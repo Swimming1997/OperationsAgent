@@ -1,0 +1,1635 @@
+﻿from datetime import datetime
+
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from intelligence_engine.db.models import (
+    BenchmarkGroup,
+    BusinessAccountType,
+    Employee,
+    CandidateDecision,
+    CommentSnapshot,
+    ContentIdentity,
+    ContentSnapshot,
+    KeywordRuleSet,
+    KeywordRule,
+    LocalAgent,
+    Job,
+    PlatformAccount,
+    TaskRun,
+    TaskTemplate,
+    User,
+    XhsSearchSuggestion,
+)
+from intelligence_engine.db.session import get_db
+from intelligence_engine.domain.enums import (
+    AccountRole,
+    AccountStatus,
+    AgentStatus,
+    ContentDataStatus,
+    JobStatus,
+    JobType,
+    Platform,
+    UserRoleName,
+)
+from intelligence_engine.domain.product_schemas import (
+    AssignmentHistoryItem,
+    BehaviorProfileCreateRequest,
+    BehaviorProfileRead,
+    BenchmarkGroupCreateRequest,
+    BenchmarkGroupBusinessAccountTypeRead,
+    BenchmarkGroupMemberCreateRequest,
+    BenchmarkGroupMemberRead,
+    BenchmarkGroupRead,
+    BenchmarkGroupUpdateRequest,
+    BindBenchmarkGroupRequest,
+    BusinessAccountTypeCreateRequest,
+    BusinessAccountTypeRead,
+    BusinessAccountTypeUpdateRequest,
+    BusinessAccountTypeRuleSetBindRequest,
+    BusinessAccountTypeRuleSetRead,
+    ContentAssignRequest,
+    CandidateDecisionDetail,
+    CommentSnapshotDetail,
+    ContentIdentityDetail,
+    ContentSnapshotDetail,
+    ContentNoteCreateRequest,
+    ContentOperatorNoteRead,
+    ContentStatusActionRequest,
+    ContentWorkflowRead,
+    CreatorMonitorTaskTemplateCreate,
+    CreatorMonitorTaskTemplateUpdate,
+    DiscoveryEventSummaryItem,
+    EnqueueFetchResponse,
+    EmployeeCreateRequest,
+    EmployeeListItem,
+    EmployeeRead,
+    EmployeeUpdateRequest,
+    EmployeeWithUserCreateRequest,
+    IntelligenceContentProductDetail,
+    IntelligenceContentProductList,
+    IntelligenceDataQualityOverview,
+    KeywordRuleCreateRequest,
+    KeywordRuleRead,
+    KeywordRuleSetCreateRequest,
+    KeywordRuleSetRead,
+    KeywordRuleSetUpdateRequest,
+    KeywordRuleUpdateRequest,
+    KeywordSearchTaskTemplateCreate,
+    KeywordSearchTaskTemplateUpdate,
+    LocalAgentRead,
+    LocalAgentUpdateRequest,
+    ManualTagsUpdateRequest,
+    NetworkEgressProfileCreateRequest,
+    NetworkEgressProfileRead,
+    PlatformAccountRead,
+    PlatformAccountCreateRequest,
+    PlatformAccountUpdateRequest,
+    ProductOptions,
+    RecommendationFeedTaskTemplateCreate,
+    RecommendationFeedTaskTemplateUpdate,
+    ReferenceLibraryItemCreateRequest,
+    ReferenceLibraryItemList,
+    ReferenceLibraryItemRead,
+    ReferenceLibraryItemUpdateRequest,
+    RiskPolicyCreateRequest,
+    RiskPolicyRead,
+    RoleRead,
+    TaskRunCreatedJob,
+    TaskRunJobRead,
+    TaskRunListResponse,
+    TaskRunQueueContext,
+    TaskRunRead,
+    TaskScheduleCreateRequest,
+    TaskScheduleRead,
+    TaskRunResponse,
+    TaskTemplateCreateRequest,
+    TaskTemplateReadiness,
+    TaskTemplateListItem,
+    TaskTemplateRead,
+    UserCreateRequest,
+    UserPasswordResetRequest,
+    UserRead,
+    UserUpdateRequest,
+    XhsSearchSuggestionRead,
+    XhsSearchSuggestionTaskRequest,
+)
+from intelligence_engine.audit.intelligence_center_audit import build_data_quality_overview
+from intelligence_engine.domain.intelligence_pool import (
+    aggregate_search_context,
+    derive_data_status,
+    extract_manual_tags,
+    extract_platform_tags,
+    extract_search_tags,
+)
+from intelligence_engine.storage.repositories.content_repository import ContentRepository
+from intelligence_engine.storage.repositories.reference_library_repository import ReferenceLibraryRepository
+from intelligence_engine.storage.repositories.job_repository import JobRepository
+from intelligence_engine.storage.repositories.product_repository import ProductRepository
+from intelligence_engine.services.job_queue_diagnostics import build_task_run_queue_context
+from intelligence_engine.services.task_materialization import TaskMaterializationService
+from intelligence_engine.storage.repositories.workflow_repository import WorkflowRepository
+from intelligence_engine.domain.enums import ContentWorkflowStatus, CandidateBucket, SourceSurface, TaskRunTriggerType
+from intelligence_engine.api.account_access import (
+    attach_agent_to_employee,
+    ensure_account_readable,
+    ensure_account_writable,
+    ensure_agent_readable,
+    get_principal_employee_id,
+    set_agent_employee,
+)
+from intelligence_engine.services.agent_presence import effective_agent_status, sync_agent_presence
+from intelligence_engine.security.auth import Principal, get_optional_principal, require_any_role
+from intelligence_engine.services.account_login_service import AccountLoginService
+from intelligence_engine.security.passwords import hash_password
+
+router = APIRouter(prefix="/api")
+
+
+def _enum_value(value):
+    return getattr(value, "value", value)
+
+
+def _local_agent_read(db: Session, agent: LocalAgent) -> LocalAgentRead:
+    return LocalAgentRead(
+        id=agent.id,
+        employee_id=agent.employee_id,
+        employee_display_name=_employee_name(db, agent.employee_id),
+        device_name=agent.device_name,
+        machine_fingerprint=agent.machine_fingerprint,
+        status=effective_agent_status(agent),
+        agent_version=agent.agent_version,
+        capabilities=agent.capabilities_json or {},
+        last_heartbeat_at=agent.last_heartbeat_at,
+    )
+
+
+def _list_local_agent_reads(db: Session, agents: list[LocalAgent]) -> list[LocalAgentRead]:
+    if any(sync_agent_presence(agent) for agent in agents):
+        db.flush()
+    return [_local_agent_read(db, agent) for agent in agents]
+
+
+def _employee_name(db: Session, employee_id: str | None) -> str | None:
+    return db.get(Employee, employee_id).display_name if employee_id and db.get(Employee, employee_id) else None
+
+
+def _business_type(db: Session, business_account_type_id: str | None) -> BusinessAccountType | None:
+    return db.get(BusinessAccountType, business_account_type_id) if business_account_type_id else None
+
+
+def _agent(db: Session, agent_id: str | None) -> LocalAgent | None:
+    return db.get(LocalAgent, agent_id) if agent_id else None
+
+
+def _account_read(db: Session, repo: ProductRepository, account: PlatformAccount) -> PlatformAccountRead:
+    business_type = _business_type(db, account.business_account_type_id)
+    agent = _agent(db, account.default_agent_id)
+    active_login = AccountLoginService(db).get_active_session(account.id)
+    return PlatformAccountRead(
+        id=account.id,
+        employee_id=account.employee_id,
+        employee_display_name=_employee_name(db, account.employee_id),
+        platform=account.platform,
+        display_name=account.display_name,
+        external_account_id=account.external_account_id,
+        business_account_type_id=account.business_account_type_id,
+        business_account_type_name=business_type.name if business_type else None,
+        legacy_business_account_type=account.business_account_type,
+        status=account.status,
+        auth_status=getattr(account, "auth_status", None) or "not_logged_in",
+        account_role=getattr(account, "account_role", None) or AccountRole.INTELLIGENCE_COLLECTOR.value,
+        health_status=getattr(account, "health_status", None) or "healthy",
+        profile_key=getattr(account, "profile_key", None),
+        platform_nickname=getattr(account, "platform_nickname", None),
+        platform_home_url=getattr(account, "platform_home_url", None),
+        last_verified_at=getattr(account, "last_verified_at", None),
+        login_cdp_port=getattr(account, "login_cdp_port", None),
+        default_agent_id=account.default_agent_id,
+        default_agent_device_name=agent.device_name if agent else None,
+        session_health_status=repo.latest_session_status(account.id),
+        active_login_session_status=active_login.status if active_login else None,
+        last_success_at=account.last_success_at,
+        last_failure_at=account.last_failure_at,
+        consecutive_failures=account.consecutive_failures,
+        metadata=account.metadata_json or {},
+    )
+
+
+def _task_template_read(service: TaskMaterializationService, template: TaskTemplate) -> TaskTemplateRead:
+    typed_payload = service.validate_template_payload(template.template_type, template.config_json or {})
+    return TaskTemplateRead(
+        id=template.id,
+        name=template.name,
+        template_type=template.template_type,
+        platform=template.platform,
+        account_id=template.account_id,
+        business_account_type_id=template.business_account_type_id,
+        config=template.config_json or {},
+        enabled=template.enabled,
+        typed_payload=typed_payload,
+    )
+
+
+def _workflow_read(state) -> ContentWorkflowRead:
+    return ContentWorkflowRead(
+        content_id=state.content_id,
+        workflow_status=state.workflow_status,
+        assigned_to_user_id=state.assigned_to_user_id,
+        assigned_by_user_id=state.assigned_by_user_id,
+        assigned_at=state.assigned_at,
+        reviewed_at=state.reviewed_at,
+        selected_at=state.selected_at,
+        discarded_at=state.discarded_at,
+        latest_operator_note=state.latest_operator_note,
+    )
+
+
+def _option_values(enum_cls) -> list[dict[str, str]]:
+    return [{"value": item.value, "label": item.value} for item in enum_cls]
+
+
+def _product_options() -> ProductOptions:
+    from intelligence_engine.domain.enums import FeedType, JobType
+
+    return ProductOptions(
+        roles=_option_values(UserRoleName),
+        platforms=_option_values(Platform),
+        feed_types=_option_values(FeedType),
+        task_template_types=[
+            {"value": "recommendation_feed_task", "label": "recommendation_feed_task"},
+            {"value": "creator_monitor_task", "label": "creator_monitor_task"},
+            {"value": "keyword_search_task", "label": "keyword_search_task"},
+        ],
+        workflow_statuses=_option_values(ContentWorkflowStatus),
+        candidate_buckets=_option_values(CandidateBucket),
+        account_statuses=_option_values(AccountStatus),
+        agent_statuses=_option_values(AgentStatus),
+    )
+
+
+def _task_template_key_fields(template: TaskTemplate) -> dict:
+    config = template.config_json or {}
+    keys = ("executor_account_id", "feed_type", "target_count", "benchmark_group_id", "platform", "keywords", "max_items", "rule_set_id")
+    return {key: config.get(key) for key in keys if key in config}
+
+
+def _readiness(service: TaskMaterializationService, template: TaskTemplate) -> TaskTemplateReadiness:
+    checks = service.readiness_checks(template)
+    messages = [item["message"] for item in checks if not item["ok"]]
+    return TaskTemplateReadiness(ready=not messages, checks=checks, messages=messages)
+
+
+def _task_run_read(service: TaskMaterializationService, run: TaskRun, *, include_jobs: bool = True) -> TaskRunRead:
+    run = service.refresh_task_run(run)
+    jobs = list(
+        service.db.scalars(select(Job).where(Job.task_run_id == run.id).order_by(Job.created_at.asc()))
+    ) if include_jobs else []
+    queue = build_task_run_queue_context(service.db, run)
+    return TaskRunRead(
+        id=run.id,
+        task_template_id=run.task_template_id,
+        trigger_type=run.trigger_type,
+        requested_by_user_id=run.requested_by_user_id,
+        task_schedule_id=run.task_schedule_id,
+        status=run.status,
+        jobs_total=run.jobs_total,
+        jobs_pending=run.jobs_pending,
+        jobs_running=run.jobs_running,
+        jobs_success=run.jobs_success,
+        jobs_failed=run.jobs_failed,
+        result_summary=run.result_summary_json or {},
+        error_summary=run.error_summary_json or {},
+        jobs=[
+            TaskRunJobRead(
+                job_id=job.id,
+                job_type=job.job_type,
+                status=job.status,
+                account_id=job.account_id,
+                claimed_by_agent_id=job.claimed_by_agent_id,
+                result_summary=job.result_summary_json or {},
+                error_message=job.last_error_message,
+                created_at=job.created_at,
+                started_at=job.started_at,
+                finished_at=job.finished_at,
+            )
+            for job in jobs
+        ],
+        queue_context=TaskRunQueueContext(
+            waiting_reason=queue["waiting_reason"],
+            message=queue["message"],
+            pending_jobs_ahead=queue.get("pending_jobs_ahead", 0),
+            job_priority=queue.get("job_priority"),
+            agent_running_job_id=queue.get("agent_running_job_id"),
+            agent_running_job_type=queue.get("agent_running_job_type"),
+            agent_running_since=queue.get("agent_running_since"),
+        ),
+        created_at=run.created_at,
+        updated_at=run.updated_at,
+        finished_at=run.finished_at,
+    )
+
+
+def _create_typed_task_template(db: Session, *, name: str, enabled: bool, template_type: str, payload: dict, platform: str | None = None) -> TaskTemplate:
+    service = TaskMaterializationService(db)
+    config = service.validate_template_payload(template_type, payload)
+    return ProductRepository(db).create_task_template(
+        name=name,
+        template_type=template_type,
+        platform=platform or config.get("platform"),
+        account_id=config.get("executor_account_id"),
+        business_account_type_id=None,
+        config=config,
+        enabled=enabled,
+    )
+
+
+def _update_typed_task_template(db: Session, template: TaskTemplate, request) -> TaskTemplate:
+    service = TaskMaterializationService(db)
+    patch = request.model_dump(exclude_unset=True, mode="json")
+    name = patch.pop("name", None)
+    enabled = patch.pop("enabled", None)
+    config = dict(template.config_json or {})
+    config.update(patch)
+    config = service.validate_template_payload(template.template_type, config)
+    return ProductRepository(db).update_task_template(template, name=name, enabled=enabled, config=config)
+
+
+def _user_read(repo: ProductRepository, user: User) -> UserRead:
+    employee = repo.get_employee_for_user(user.id)
+    return UserRead(
+        id=user.id,
+        username=user.username,
+        display_name=user.display_name,
+        email=user.email,
+        status=user.status,
+        roles=repo.user_role_names(user.id),
+        created_at=user.created_at,
+        employee_id=employee.id if employee else None,
+    )
+
+
+def _employee_list_item(repo: ProductRepository, employee: Employee, account_counts: dict[str, int], agent_counts: dict[str, int]) -> EmployeeListItem:
+    user = repo.get_user(employee.user_id) if employee.user_id else None
+    return EmployeeListItem(
+        id=employee.id,
+        user_id=employee.user_id,
+        display_name=employee.display_name,
+        email=employee.email,
+        status=employee.status,
+        user_username=user.username if user else None,
+        user_display_name=user.display_name if user else None,
+        account_count=account_counts.get(employee.id, 0),
+        agent_count=agent_counts.get(employee.id, 0),
+    )
+
+
+def _ensure_content(content_id: str, db: Session) -> ContentIdentity:
+    content = db.get(ContentIdentity, content_id)
+    if not content:
+        raise HTTPException(status_code=404, detail="content not found")
+    return content
+
+
+@router.post("/product/bootstrap-default-roles", response_model=list[RoleRead])
+def bootstrap_default_roles(db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    repo = ProductRepository(db)
+    roles = repo.ensure_default_roles()
+    db.commit()
+    return [RoleRead(id=role.id, name=role.name, description=role.description) for role in roles]
+
+
+@router.post("/users", response_model=UserRead)
+def create_user(request: UserCreateRequest, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    repo = ProductRepository(db)
+    if repo.get_user_by_username(request.username):
+        raise HTTPException(status_code=409, detail="username already exists")
+    user = repo.create_user(
+        username=request.username,
+        display_name=request.display_name,
+        email=request.email,
+        password_hash=hash_password(request.password),
+        role_names=[_enum_value(role) for role in request.role_names],
+        metadata=request.metadata,
+    )
+    db.commit()
+    return _user_read(repo, user)
+
+
+@router.get("/users", response_model=list[UserRead])
+def list_users(db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    repo = ProductRepository(db)
+    return [_user_read(repo, user) for user in repo.list_users()]
+
+
+@router.patch("/users/{user_id}", response_model=UserRead)
+def update_user(
+    user_id: str,
+    request: UserUpdateRequest,
+    db: Session = Depends(get_db),
+    _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR)),
+):
+    repo = ProductRepository(db)
+    user = repo.get_user(user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="user not found")
+    repo.update_user(
+        user,
+        display_name=request.display_name,
+        email=request.email,
+        status=request.status,
+        role_names=[_enum_value(role) for role in request.role_names] if request.role_names is not None else None,
+    )
+    db.commit()
+    return _user_read(repo, user)
+
+
+@router.post("/users/{user_id}/reset-password", response_model=UserRead)
+def reset_user_password(
+    user_id: str,
+    request: UserPasswordResetRequest,
+    db: Session = Depends(get_db),
+    _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR)),
+):
+    repo = ProductRepository(db)
+    user = repo.get_user(user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="user not found")
+    repo.set_password(user, hash_password(request.password))
+    db.commit()
+    return _user_read(repo, user)
+
+
+@router.post("/employees", response_model=EmployeeRead)
+def create_employee(request: EmployeeCreateRequest, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    employee = ProductRepository(db).create_employee(user_id=request.user_id, display_name=request.display_name, email=request.email, status=request.status)
+    db.commit()
+    return EmployeeRead(id=employee.id, user_id=employee.user_id, display_name=employee.display_name, email=employee.email, status=employee.status)
+
+
+@router.post("/employees/with-user", response_model=EmployeeListItem)
+def create_employee_with_user(
+    request: EmployeeWithUserCreateRequest,
+    db: Session = Depends(get_db),
+    _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR)),
+):
+    repo = ProductRepository(db)
+    if repo.get_user_by_username(request.username):
+        raise HTTPException(status_code=409, detail="username already exists")
+    user, employee = repo.create_employee_with_user(
+        username=request.username,
+        display_name=request.display_name,
+        email=request.email,
+        password_hash=hash_password(request.password),
+        role_name=_enum_value(request.role),
+    )
+    db.commit()
+    return _employee_list_item(repo, employee, repo.employee_account_counts(), repo.employee_agent_counts())
+
+
+@router.get("/employees", response_model=list[EmployeeListItem])
+def list_employees(db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    repo = ProductRepository(db)
+    account_counts = repo.employee_account_counts()
+    agent_counts = repo.employee_agent_counts()
+    return [_employee_list_item(repo, employee, account_counts, agent_counts) for employee in repo.list_employees()]
+
+
+@router.patch("/employees/{employee_id}", response_model=EmployeeListItem)
+def update_employee(
+    employee_id: str,
+    request: EmployeeUpdateRequest,
+    db: Session = Depends(get_db),
+    _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR)),
+):
+    repo = ProductRepository(db)
+    employee = db.get(Employee, employee_id)
+    if not employee:
+        raise HTTPException(status_code=404, detail="employee not found")
+    if request.display_name is not None:
+        employee.display_name = request.display_name
+    if request.email is not None:
+        employee.email = request.email
+    if request.status is not None:
+        employee.status = request.status
+    if request.user_id is not None:
+        employee.user_id = request.user_id
+    db.flush()
+    db.commit()
+    return _employee_list_item(repo, employee, repo.employee_account_counts(), repo.employee_agent_counts())
+
+
+@router.get("/local-agents", response_model=list[LocalAgentRead])
+def list_local_agents(
+    employee_id: str | None = None,
+    status: AgentStatus | None = None,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+):
+    repo = ProductRepository(db)
+    scoped_employee = get_principal_employee_id(db, principal)
+    if scoped_employee:
+        agents = repo.list_bindable_agents_for_employee(scoped_employee)
+        if status:
+            status_value = _enum_value(status)
+            agents = [agent for agent in agents if effective_agent_status(agent) == status_value]
+    else:
+        agents = repo.list_agents(employee_id=employee_id, status=_enum_value(status) if status else None)
+        from intelligence_engine.services.agent_selection import sort_agents_for_display
+
+        agents = sort_agents_for_display(agents)
+    reads = _list_local_agent_reads(db, agents)
+    db.commit()
+    return reads
+
+
+@router.get("/local-agents/{agent_id}", response_model=LocalAgentRead)
+def get_local_agent(
+    agent_id: str,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+):
+    agent = db.get(LocalAgent, agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="agent not found")
+    ensure_agent_readable(db, principal, agent)
+    if sync_agent_presence(agent):
+        db.flush()
+    db.commit()
+    return _local_agent_read(db, agent)
+
+
+@router.patch("/local-agents/{agent_id}", response_model=LocalAgentRead)
+def update_local_agent(
+    agent_id: str,
+    request: LocalAgentUpdateRequest,
+    db: Session = Depends(get_db),
+    _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR)),
+):
+    if not request.model_fields_set:
+        raise HTTPException(status_code=400, detail="no fields to update")
+    agent = db.get(LocalAgent, agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="agent not found")
+    if "employee_id" in request.model_fields_set:
+        agent = set_agent_employee(db, agent_id=agent_id, employee_id=request.employee_id)
+    if "status" in request.model_fields_set and request.status is not None:
+        allowed = {AgentStatus.RETIRED.value, AgentStatus.OFFLINE.value}
+        if request.status not in allowed:
+            raise HTTPException(status_code=400, detail="unsupported agent status")
+        agent.status = request.status
+    if sync_agent_presence(agent) and agent.status != AgentStatus.RETIRED.value:
+        db.flush()
+    db.commit()
+    return _local_agent_read(db, agent)
+
+
+@router.post("/business-account-types", response_model=BusinessAccountTypeRead)
+def create_business_account_type(request: BusinessAccountTypeCreateRequest, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    item = ProductRepository(db).create_business_account_type(name=request.name, description=request.description, enabled=request.enabled)
+    db.commit()
+    return BusinessAccountTypeRead(id=item.id, name=item.name, description=item.description, enabled=item.enabled)
+
+
+@router.patch("/business-account-types/{business_account_type_id}", response_model=BusinessAccountTypeRead)
+def update_business_account_type(business_account_type_id: str, request: BusinessAccountTypeUpdateRequest, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    item = db.get(BusinessAccountType, business_account_type_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="business account type not found")
+    repo = ProductRepository(db)
+    item = repo.update_business_account_type(item, **request.model_dump(exclude_unset=True))
+    db.commit()
+    rule_count, group_count = repo.business_type_relation_counts(item.id)
+    return BusinessAccountTypeRead(id=item.id, name=item.name, description=item.description, enabled=item.enabled, rule_set_count=rule_count, benchmark_group_count=group_count)
+
+
+@router.get("/business-account-types", response_model=list[BusinessAccountTypeRead])
+def list_business_account_types(db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    repo = ProductRepository(db)
+    def read(item):
+        rule_count, group_count = repo.business_type_relation_counts(item.id)
+        return BusinessAccountTypeRead(id=item.id, name=item.name, description=item.description, enabled=item.enabled, rule_set_count=rule_count, benchmark_group_count=group_count)
+    return [
+        read(item)
+        for item in repo.list_business_account_types()
+    ]
+
+
+@router.get("/product/accounts", response_model=list[PlatformAccountRead])
+def list_product_accounts(
+    employee_id: str | None = None,
+    platform: Platform | None = None,
+    status: AccountStatus | None = None,
+    business_account_type_id: str | None = None,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+):
+    scoped_employee = get_principal_employee_id(db, principal)
+    if scoped_employee:
+        employee_id = scoped_employee
+    repo = ProductRepository(db)
+    accounts = repo.list_accounts(
+        employee_id=employee_id,
+        platform=_enum_value(platform) if platform else None,
+        status=_enum_value(status) if status else None,
+        business_account_type_id=business_account_type_id,
+    )
+    return [_account_read(db, repo, account) for account in accounts]
+
+
+@router.post("/product/accounts", response_model=PlatformAccountRead)
+def create_product_account(
+    request: PlatformAccountCreateRequest,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+):
+    scoped_employee = get_principal_employee_id(db, principal)
+    employee_id = request.employee_id
+    if scoped_employee and employee_id and employee_id != scoped_employee:
+        raise HTTPException(status_code=403, detail="operator can only create accounts for self")
+    if scoped_employee and not employee_id:
+        employee_id = scoped_employee
+    repo = ProductRepository(db)
+    account = repo.create_account(
+        employee_id=employee_id,
+        platform=_enum_value(request.platform),
+        display_name=request.display_name,
+        external_account_id=request.external_account_id,
+        business_account_type=request.business_account_type,
+        business_account_type_id=request.business_account_type_id,
+        default_agent_id=request.default_agent_id,
+        account_role=request.account_role,
+        health_status=request.health_status,
+        metadata=request.metadata,
+    )
+    attach_agent_to_employee(db, agent_id=request.default_agent_id, employee_id=employee_id)
+    db.commit()
+    return _account_read(db, repo, account)
+
+
+@router.get("/product/accounts/{account_id}", response_model=PlatformAccountRead)
+def get_product_account(
+    account_id: str,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+):
+    account = db.get(PlatformAccount, account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="account not found")
+    ensure_account_readable(db, principal, account)
+    repo = ProductRepository(db)
+    return _account_read(db, repo, account)
+
+
+@router.patch("/product/accounts/{account_id}", response_model=PlatformAccountRead)
+def update_product_account(
+    account_id: str,
+    request: PlatformAccountUpdateRequest,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+):
+    account = db.get(PlatformAccount, account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="account not found")
+    ensure_account_writable(db, principal, account)
+    repo = ProductRepository(db)
+    payload = request.model_dump(exclude_unset=True)
+    updated = repo.update_account(account, **payload)
+    if "default_agent_id" in payload:
+        attach_agent_to_employee(db, agent_id=updated.default_agent_id, employee_id=updated.employee_id)
+        from intelligence_engine.services.account_login_service import AccountLoginService
+
+        AccountLoginService(db).reroute_waiting_sessions_for_account(updated, agent_id=updated.default_agent_id)
+    db.commit()
+    return _account_read(db, repo, updated)
+
+
+@router.post("/benchmark-groups", response_model=BenchmarkGroupRead)
+def create_benchmark_group(request: BenchmarkGroupCreateRequest, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    group = ProductRepository(db).create_benchmark_group(
+        name=request.name,
+        description=request.description,
+        owner_employee_id=request.owner_employee_id,
+        enabled=request.enabled,
+        metadata=request.metadata,
+    )
+    db.commit()
+    return BenchmarkGroupRead(id=group.id, name=group.name, description=group.description, owner_employee_id=group.owner_employee_id, enabled=group.enabled, metadata=group.metadata_json)
+
+
+@router.patch("/benchmark-groups/{group_id}", response_model=BenchmarkGroupRead)
+def update_benchmark_group(group_id: str, request: BenchmarkGroupUpdateRequest, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    group = db.get(BenchmarkGroup, group_id)
+    if not group:
+        raise HTTPException(status_code=404, detail="benchmark group not found")
+    group = ProductRepository(db).update_benchmark_group(group, **request.model_dump(exclude_unset=True))
+    db.commit()
+    return BenchmarkGroupRead(id=group.id, name=group.name, description=group.description, owner_employee_id=group.owner_employee_id, enabled=group.enabled, metadata=group.metadata_json or {})
+
+
+@router.get("/benchmark-groups", response_model=list[BenchmarkGroupRead])
+def list_benchmark_groups(db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    return [
+        BenchmarkGroupRead(id=group.id, name=group.name, description=group.description, owner_employee_id=group.owner_employee_id, enabled=group.enabled, metadata=group.metadata_json or {})
+        for group in ProductRepository(db).list_benchmark_groups()
+    ]
+
+
+@router.post("/benchmark-groups/{group_id}/members", response_model=BenchmarkGroupMemberRead)
+def add_benchmark_group_member(group_id: str, request: BenchmarkGroupMemberCreateRequest, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    if not db.get(BenchmarkGroup, group_id):
+        raise HTTPException(status_code=404, detail="benchmark group not found")
+    member = ProductRepository(db).add_benchmark_member(
+        benchmark_group_id=group_id,
+        creator_monitor_id=request.creator_monitor_id,
+        platform=_enum_value(request.platform),
+        creator_platform_id=request.creator_platform_id,
+        creator_profile_url=request.creator_profile_url,
+        display_name=request.display_name,
+        platform_context=request.platform_context,
+        enabled=request.enabled,
+    )
+    db.commit()
+    return BenchmarkGroupMemberRead(
+        id=member.id,
+        benchmark_group_id=member.benchmark_group_id,
+        creator_monitor_id=member.creator_monitor_id,
+        platform=member.platform,
+        creator_platform_id=member.creator_platform_id,
+        creator_profile_url=member.creator_profile_url,
+        display_name=member.display_name,
+        platform_context=member.platform_context_json,
+        enabled=member.enabled,
+    )
+
+
+@router.get("/benchmark-groups/{group_id}/members", response_model=list[BenchmarkGroupMemberRead])
+def list_benchmark_group_members(group_id: str, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    return [
+        BenchmarkGroupMemberRead(
+            id=member.id,
+            benchmark_group_id=member.benchmark_group_id,
+            creator_monitor_id=member.creator_monitor_id,
+            platform=member.platform,
+            creator_platform_id=member.creator_platform_id,
+            creator_profile_url=member.creator_profile_url,
+            display_name=member.display_name,
+            platform_context=member.platform_context_json,
+            enabled=member.enabled,
+        )
+        for member in ProductRepository(db).list_benchmark_members(group_id)
+    ]
+
+
+@router.post("/benchmark-groups/{group_id}/business-account-types")
+def bind_benchmark_group_business_type(group_id: str, request: BindBenchmarkGroupRequest, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    if not db.get(BenchmarkGroup, group_id):
+        raise HTTPException(status_code=404, detail="benchmark group not found")
+    if not db.get(BusinessAccountType, request.business_account_type_id):
+        raise HTTPException(status_code=404, detail="business account type not found")
+    binding = ProductRepository(db).bind_business_type_to_benchmark_group(business_account_type_id=request.business_account_type_id, benchmark_group_id=group_id)
+    db.commit()
+    return {"binding_id": binding.id}
+
+
+@router.get("/benchmark-groups/{group_id}/business-account-types", response_model=list[BenchmarkGroupBusinessAccountTypeRead])
+def list_benchmark_group_business_types(group_id: str, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    if not db.get(BenchmarkGroup, group_id):
+        raise HTTPException(status_code=404, detail="benchmark group not found")
+    return [
+        BenchmarkGroupBusinessAccountTypeRead(
+            id=binding.id,
+            benchmark_group_id=binding.benchmark_group_id,
+            business_account_type_id=binding.business_account_type_id,
+            business_account_type_name=business_type.name if business_type else None,
+        )
+        for binding, business_type in ProductRepository(db).list_business_types_for_benchmark_group(group_id)
+    ]
+
+
+@router.post("/task-templates", response_model=TaskTemplateRead)
+def create_task_template(request: TaskTemplateCreateRequest, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    service = TaskMaterializationService(db)
+    config = service.validate_template_payload(_enum_value(request.template_type), request.config)
+    template = ProductRepository(db).create_task_template(
+        name=request.name,
+        template_type=_enum_value(request.template_type),
+        platform=_enum_value(request.platform) if request.platform else None,
+        account_id=request.account_id,
+        business_account_type_id=request.business_account_type_id,
+        config=config,
+        enabled=request.enabled,
+    )
+    db.commit()
+    return _task_template_read(service, template)
+
+
+@router.get("/task-templates", response_model=list[TaskTemplateRead])
+def list_task_templates(db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    service = TaskMaterializationService(db)
+    return [
+        _task_template_read(service, item)
+        for item in ProductRepository(db).list_task_templates()
+    ]
+
+
+@router.get("/task-templates/list", response_model=list[TaskTemplateListItem])
+def list_task_template_items(db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    return [
+        TaskTemplateListItem(
+            id=item.id,
+            name=item.name,
+            template_type=item.template_type,
+            enabled=item.enabled,
+            platform=item.platform,
+            account_id=item.account_id,
+            key_fields=_task_template_key_fields(item),
+        )
+        for item in ProductRepository(db).list_task_templates()
+    ]
+
+
+@router.get("/task-templates/{template_id}", response_model=TaskTemplateRead)
+def get_task_template(template_id: str, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    template = db.get(TaskTemplate, template_id)
+    if not template:
+        raise HTTPException(status_code=404, detail="task template not found")
+    return _task_template_read(TaskMaterializationService(db), template)
+
+
+@router.get("/task-templates/{template_id}/readiness", response_model=TaskTemplateReadiness)
+def get_task_template_readiness(template_id: str, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    template = db.get(TaskTemplate, template_id)
+    if not template:
+        raise HTTPException(status_code=404, detail="task template not found")
+    return _readiness(TaskMaterializationService(db), template)
+
+
+@router.post("/task-templates/recommendation-feed", response_model=TaskTemplateRead)
+def create_recommendation_feed_task_template(request: RecommendationFeedTaskTemplateCreate, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    payload = request.model_dump(mode="json", exclude={"name", "enabled"})
+    template = _create_typed_task_template(
+        db,
+        name=request.name,
+        enabled=request.enabled,
+        template_type="recommendation_feed_task",
+        payload=payload,
+        platform=Platform.XHS.value,
+    )
+    db.commit()
+    return _task_template_read(TaskMaterializationService(db), template)
+
+
+@router.patch("/task-templates/recommendation-feed/{template_id}", response_model=TaskTemplateRead)
+def update_recommendation_feed_task_template(template_id: str, request: RecommendationFeedTaskTemplateUpdate, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    template = db.get(TaskTemplate, template_id)
+    if not template or template.template_type != "recommendation_feed_task":
+        raise HTTPException(status_code=404, detail="recommendation feed task template not found")
+    updated = _update_typed_task_template(db, template, request)
+    db.commit()
+    return _task_template_read(TaskMaterializationService(db), updated)
+
+
+@router.post("/task-templates/creator-monitor", response_model=TaskTemplateRead)
+def create_creator_monitor_task_template(request: CreatorMonitorTaskTemplateCreate, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    payload = request.model_dump(mode="json", exclude={"name", "enabled"})
+    template = _create_typed_task_template(
+        db,
+        name=request.name,
+        enabled=request.enabled,
+        template_type="creator_monitor_task",
+        payload=payload,
+        platform=Platform.XHS.value,
+    )
+    db.commit()
+    return _task_template_read(TaskMaterializationService(db), template)
+
+
+@router.patch("/task-templates/creator-monitor/{template_id}", response_model=TaskTemplateRead)
+def update_creator_monitor_task_template(template_id: str, request: CreatorMonitorTaskTemplateUpdate, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    template = db.get(TaskTemplate, template_id)
+    if not template or template.template_type != "creator_monitor_task":
+        raise HTTPException(status_code=404, detail="creator monitor task template not found")
+    updated = _update_typed_task_template(db, template, request)
+    db.commit()
+    return _task_template_read(TaskMaterializationService(db), updated)
+
+
+@router.post("/task-templates/keyword-search", response_model=TaskTemplateRead)
+def create_keyword_search_task_template(request: KeywordSearchTaskTemplateCreate, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    payload = request.model_dump(mode="json", exclude={"name", "enabled"})
+    template = _create_typed_task_template(
+        db,
+        name=request.name,
+        enabled=request.enabled,
+        template_type="keyword_search_task",
+        payload=payload,
+        platform=_enum_value(request.platform),
+    )
+    db.commit()
+    return _task_template_read(TaskMaterializationService(db), template)
+
+
+@router.patch("/task-templates/keyword-search/{template_id}", response_model=TaskTemplateRead)
+def update_keyword_search_task_template(template_id: str, request: KeywordSearchTaskTemplateUpdate, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    template = db.get(TaskTemplate, template_id)
+    if not template or template.template_type != "keyword_search_task":
+        raise HTTPException(status_code=404, detail="keyword search task template not found")
+    updated = _update_typed_task_template(db, template, request)
+    db.commit()
+    return _task_template_read(TaskMaterializationService(db), updated)
+
+
+@router.post("/task-templates/{template_id}/run", response_model=TaskRunResponse)
+def run_task_template(template_id: str, db: Session = Depends(get_db), principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    template = db.get(TaskTemplate, template_id)
+    if not template:
+        raise HTTPException(status_code=404, detail="task template not found")
+    if not template.enabled:
+        raise HTTPException(status_code=400, detail="task template disabled")
+    service = TaskMaterializationService(db)
+    readiness = _readiness(service, template)
+    if not readiness.ready:
+        raise HTTPException(status_code=409, detail=readiness.model_dump(mode="json"))
+    run, job_ids = service.run_template(template, trigger_type=TaskRunTriggerType.MANUAL, requested_by_user_id=principal.user_id)
+    jobs = list(db.scalars(select(Job).where(Job.id.in_(job_ids)).order_by(Job.created_at.asc()))) if job_ids else []
+    db.commit()
+    return TaskRunResponse(
+        task_run_id=run.id,
+        task_template_id=template.id,
+        jobs_created=len(job_ids),
+        jobs=[TaskRunCreatedJob(job_id=job.id, job_type=job.job_type, status=job.status) for job in jobs],
+        readiness=readiness,
+    )
+
+
+@router.get("/task-runs", response_model=TaskRunListResponse)
+def list_task_runs(db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    service = TaskMaterializationService(db)
+    runs = list(db.scalars(select(TaskRun).order_by(TaskRun.created_at.desc()).limit(50)))
+    items = [_task_run_read(service, run, include_jobs=False) for run in runs]
+    db.commit()
+    return TaskRunListResponse(items=items)
+
+
+@router.get("/task-runs/{task_run_id}", response_model=TaskRunRead)
+def get_task_run(task_run_id: str, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    run = db.get(TaskRun, task_run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="task run not found")
+    service = TaskMaterializationService(db)
+    body = _task_run_read(service, run)
+    db.commit()
+    return body
+
+
+@router.get("/task-templates/{template_id}/runs", response_model=TaskRunListResponse)
+def list_template_runs(template_id: str, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    if not db.get(TaskTemplate, template_id):
+        raise HTTPException(status_code=404, detail="task template not found")
+    service = TaskMaterializationService(db)
+    runs = list(
+        db.scalars(
+            select(TaskRun)
+            .where(TaskRun.task_template_id == template_id)
+            .order_by(TaskRun.created_at.desc())
+            .limit(5)
+        )
+    )
+    items = [_task_run_read(service, run, include_jobs=False) for run in runs]
+    db.commit()
+    return TaskRunListResponse(items=items)
+
+
+@router.post("/task-schedules", response_model=TaskScheduleRead)
+def create_task_schedule(request: TaskScheduleCreateRequest, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    if not db.get(TaskTemplate, request.task_template_id):
+        raise HTTPException(status_code=404, detail="task template not found")
+    schedule = ProductRepository(db).create_task_schedule(
+        task_template_id=request.task_template_id,
+        schedule_type=_enum_value(request.schedule_type),
+        interval_seconds=request.interval_seconds,
+        daily_time_window=request.daily_time_window,
+        enabled=request.enabled,
+        next_run_at=request.next_run_at,
+    )
+    db.commit()
+    return TaskScheduleRead(id=schedule.id, task_template_id=schedule.task_template_id, schedule_type=schedule.schedule_type, interval_seconds=schedule.interval_seconds, daily_time_window=schedule.daily_time_window_json, enabled=schedule.enabled, next_run_at=schedule.next_run_at, last_run_at=schedule.last_run_at, last_materialized_at=schedule.last_materialized_at)
+
+
+@router.get("/task-schedules", response_model=list[TaskScheduleRead])
+def list_task_schedules(db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    return [
+        TaskScheduleRead(id=item.id, task_template_id=item.task_template_id, schedule_type=item.schedule_type, interval_seconds=item.interval_seconds, daily_time_window=item.daily_time_window_json or {}, enabled=item.enabled, next_run_at=item.next_run_at, last_run_at=item.last_run_at, last_materialized_at=item.last_materialized_at)
+        for item in ProductRepository(db).list_task_schedules()
+    ]
+
+
+@router.post("/task-schedules/materialize-due")
+def materialize_due_task_schedules(db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    results = TaskMaterializationService(db).materialize_due_schedules()
+    db.commit()
+    return {"materialized": results, "schedule_count": len(results), "job_count": sum(len(item["job_ids"]) for item in results)}
+
+
+@router.post("/behavior-profiles", response_model=BehaviorProfileRead)
+def create_behavior_profile(request: BehaviorProfileCreateRequest, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    item = ProductRepository(db).create_behavior_profile(name=request.name, description=request.description, enabled=request.enabled, config=request.config)
+    db.commit()
+    return BehaviorProfileRead(id=item.id, name=item.name, description=item.description, enabled=item.enabled, config=item.config_json)
+
+
+@router.get("/behavior-profiles", response_model=list[BehaviorProfileRead])
+def list_behavior_profiles(db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    return [
+        BehaviorProfileRead(id=item.id, name=item.name, description=item.description, enabled=item.enabled, config=item.config_json or {})
+        for item in ProductRepository(db).list_behavior_profiles()
+    ]
+
+
+@router.post("/network-egress-profiles", response_model=NetworkEgressProfileRead)
+def create_network_egress_profile(request: NetworkEgressProfileCreateRequest, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    item = ProductRepository(db).create_network_egress_profile(name=request.name, strategy=_enum_value(request.strategy), description=request.description, enabled=request.enabled, config=request.config)
+    db.commit()
+    return NetworkEgressProfileRead(id=item.id, name=item.name, strategy=item.strategy, description=item.description, enabled=item.enabled, config=item.config_json)
+
+
+@router.get("/network-egress-profiles", response_model=list[NetworkEgressProfileRead])
+def list_network_egress_profiles(db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    return [
+        NetworkEgressProfileRead(id=item.id, name=item.name, strategy=item.strategy, description=item.description, enabled=item.enabled, config=item.config_json or {})
+        for item in ProductRepository(db).list_network_egress_profiles()
+    ]
+
+
+@router.post("/risk-policies", response_model=RiskPolicyRead)
+def create_risk_policy(request: RiskPolicyCreateRequest, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    item = ProductRepository(db).create_risk_policy(
+        name=request.name,
+        description=request.description,
+        enabled=request.enabled,
+        behavior_profile_id=request.behavior_profile_id,
+        network_egress_profile_id=request.network_egress_profile_id,
+        config=request.config,
+    )
+    db.commit()
+    return RiskPolicyRead(id=item.id, name=item.name, description=item.description, enabled=item.enabled, behavior_profile_id=item.behavior_profile_id, network_egress_profile_id=item.network_egress_profile_id, config=item.config_json)
+
+
+@router.get("/risk-policies", response_model=list[RiskPolicyRead])
+def list_risk_policies(db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    return [
+        RiskPolicyRead(id=item.id, name=item.name, description=item.description, enabled=item.enabled, behavior_profile_id=item.behavior_profile_id, network_egress_profile_id=item.network_egress_profile_id, config=item.config_json or {})
+        for item in ProductRepository(db).list_risk_policies()
+    ]
+
+
+@router.post("/business-account-types/{business_account_type_id}/rule-sets", response_model=BusinessAccountTypeRuleSetRead)
+def bind_business_account_type_rule_set(business_account_type_id: str, request: BusinessAccountTypeRuleSetBindRequest, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    if not db.get(BusinessAccountType, business_account_type_id):
+        raise HTTPException(status_code=404, detail="business account type not found")
+    rule_set = db.get(KeywordRuleSet, request.rule_set_id)
+    if not rule_set:
+        raise HTTPException(status_code=404, detail="rule set not found")
+    binding = ProductRepository(db).bind_rule_set_to_business_type(
+        business_account_type_id=business_account_type_id,
+        rule_set_id=request.rule_set_id,
+        is_default=request.is_default,
+    )
+    db.commit()
+    return BusinessAccountTypeRuleSetRead(id=binding.id, business_account_type_id=binding.business_account_type_id, rule_set_id=binding.rule_set_id, rule_set_name=rule_set.name, is_default=binding.is_default)
+
+
+@router.get("/business-account-types/{business_account_type_id}/rule-sets", response_model=list[BusinessAccountTypeRuleSetRead])
+def list_business_account_type_rule_sets(business_account_type_id: str, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    if not db.get(BusinessAccountType, business_account_type_id):
+        raise HTTPException(status_code=404, detail="business account type not found")
+    return [
+        BusinessAccountTypeRuleSetRead(
+            id=binding.id,
+            business_account_type_id=binding.business_account_type_id,
+            rule_set_id=binding.rule_set_id,
+            rule_set_name=rule_set.name if rule_set else None,
+            is_default=binding.is_default,
+        )
+        for binding, rule_set in ProductRepository(db).list_rule_sets_for_business_type(business_account_type_id)
+    ]
+
+
+@router.get("/keyword-rule-sets", response_model=list[KeywordRuleSetRead])
+def list_keyword_rule_sets(db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    return [
+        KeywordRuleSetRead(id=row.id, name=row.name, rule_scope=row.rule_scope, enabled=row.enabled, config=row.config_json or {})
+        for row in ProductRepository(db).list_keyword_rule_sets()
+    ]
+
+
+@router.post("/keyword-rule-sets", response_model=KeywordRuleSetRead)
+def create_keyword_rule_set(request: KeywordRuleSetCreateRequest, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    row = ProductRepository(db).create_keyword_rule_set(name=request.name, rule_scope=request.rule_scope, enabled=request.enabled, config=request.config)
+    db.commit()
+    return KeywordRuleSetRead(id=row.id, name=row.name, rule_scope=row.rule_scope, enabled=row.enabled, config=row.config_json or {})
+
+
+@router.patch("/keyword-rule-sets/{rule_set_id}", response_model=KeywordRuleSetRead)
+def update_keyword_rule_set(rule_set_id: str, request: KeywordRuleSetUpdateRequest, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    row = db.get(KeywordRuleSet, rule_set_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="rule set not found")
+    row = ProductRepository(db).update_keyword_rule_set(row, **request.model_dump(exclude_unset=True))
+    db.commit()
+    return KeywordRuleSetRead(id=row.id, name=row.name, rule_scope=row.rule_scope, enabled=row.enabled, config=row.config_json or {})
+
+
+@router.get("/keyword-rule-sets/{rule_set_id}/rules", response_model=list[KeywordRuleRead])
+def list_keyword_rules(rule_set_id: str, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    return [
+        KeywordRuleRead(id=row.id, rule_set_id=row.rule_set_id, keyword=row.keyword, normalized_keyword=row.normalized_keyword, match_mode=row.match_mode, enabled=row.enabled, weight=row.weight)
+        for row in ProductRepository(db).list_keyword_rules(rule_set_id)
+    ]
+
+
+@router.post("/keyword-rule-sets/{rule_set_id}/rules", response_model=KeywordRuleRead)
+def create_keyword_rule(rule_set_id: str, request: KeywordRuleCreateRequest, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    if not db.get(KeywordRuleSet, rule_set_id):
+        raise HTTPException(status_code=404, detail="rule set not found")
+    row = ProductRepository(db).create_keyword_rule(rule_set_id=rule_set_id, keyword=request.keyword, normalized_keyword=request.normalized_keyword, match_mode=request.match_mode, enabled=request.enabled, weight=request.weight)
+    db.commit()
+    return KeywordRuleRead(id=row.id, rule_set_id=row.rule_set_id, keyword=row.keyword, normalized_keyword=row.normalized_keyword, match_mode=row.match_mode, enabled=row.enabled, weight=row.weight)
+
+
+@router.patch("/keyword-rules/{rule_id}", response_model=KeywordRuleRead)
+def update_keyword_rule(rule_id: str, request: KeywordRuleUpdateRequest, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    row = db.get(KeywordRule, rule_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="rule not found")
+    row = ProductRepository(db).update_keyword_rule(row, **request.model_dump(exclude_unset=True))
+    db.commit()
+    return KeywordRuleRead(id=row.id, rule_set_id=row.rule_set_id, keyword=row.keyword, normalized_keyword=row.normalized_keyword, match_mode=row.match_mode, enabled=row.enabled, weight=row.weight)
+
+
+@router.get("/product/options", response_model=ProductOptions)
+def get_product_options():
+    return _product_options()
+
+
+@router.get("/product/options/roles")
+def get_role_options():
+    return _product_options().roles
+
+
+@router.get("/product/options/platforms")
+def get_platform_options():
+    return _product_options().platforms
+
+
+@router.get("/product/options/feed-types")
+def get_feed_type_options():
+    return _product_options().feed_types
+
+
+@router.get("/product/options/task-template-types")
+def get_task_template_type_options():
+    return _product_options().task_template_types
+
+
+@router.get("/product/options/workflow-statuses")
+def get_workflow_status_options():
+    return _product_options().workflow_statuses
+
+
+@router.get("/product/options/candidate-buckets")
+def get_candidate_bucket_options():
+    return _product_options().candidate_buckets
+
+
+@router.get("/product/options/account-statuses")
+def get_account_status_options():
+    return _product_options().account_statuses
+
+
+@router.get("/product/options/agent-statuses")
+def get_agent_status_options():
+    return _product_options().agent_statuses
+
+
+@router.get("/intelligence/contents/product", response_model=IntelligenceContentProductList)
+def list_product_intelligence_contents(
+    platform: Platform | None = None,
+    source_surface: SourceSurface | None = None,
+    candidate_bucket: CandidateBucket | None = None,
+    workflow_status: ContentWorkflowStatus | None = None,
+    assigned_to_user_id: str | None = None,
+    business_keyword: str | None = None,
+    search_keyword: str | None = None,
+    discovered_after: datetime | None = None,
+    discovered_before: datetime | None = None,
+    data_status: ContentDataStatus | None = None,
+    tag: str | None = None,
+    platform_tag: str | None = None,
+    manual_tag: str | None = None,
+    search_sort: str | None = None,
+    note_type_filter: str | None = None,
+    publish_time_filter: str | None = None,
+    min_like_count: int | None = None,
+    min_comment_count: int | None = None,
+    min_collect_count: int | None = None,
+    sort_by: str = "latest_discovered_at",
+    sort_order: str = "desc",
+    page: int = 1,
+    page_size: int = 20,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+):
+    if principal.has_role(UserRoleName.OPERATOR) and not principal.has_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR) and not assigned_to_user_id:
+        assigned_to_user_id = principal.user_id
+    items, total = WorkflowRepository(db).list_intelligence_contents(
+        page=page,
+        page_size=page_size,
+        platform=_enum_value(platform) if platform else None,
+        source_surface=_enum_value(source_surface) if source_surface else None,
+        candidate_bucket=_enum_value(candidate_bucket) if candidate_bucket else None,
+        workflow_status=_enum_value(workflow_status) if workflow_status else None,
+        assigned_to_user_id=assigned_to_user_id,
+        business_keyword=business_keyword,
+        search_keyword=search_keyword,
+        discovered_after=discovered_after,
+        discovered_before=discovered_before,
+        data_status=_enum_value(data_status) if data_status else None,
+        tag=tag,
+        platform_tag=platform_tag,
+        manual_tag=manual_tag,
+        search_sort=search_sort,
+        note_type_filter=note_type_filter,
+        publish_time_filter=publish_time_filter,
+        min_like_count=min_like_count,
+        min_comment_count=min_comment_count,
+        min_collect_count=min_collect_count,
+        sort_by=sort_by,
+        sort_order=sort_order,
+        pool_only=True,
+    )
+    db.commit()
+    return IntelligenceContentProductList(items=items, page=page, page_size=page_size, total=total)
+
+
+@router.get("/intelligence/contents/{content_id}/product-detail", response_model=IntelligenceContentProductDetail)
+def get_intelligence_content_product_detail(content_id: str, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR))):
+    content = _ensure_content(content_id, db)
+    repo = WorkflowRepository(db)
+    state = repo.ensure_state(content_id)
+    snapshot = db.get(ContentSnapshot, content.latest_snapshot_id) if content.latest_snapshot_id else None
+    comments = list(
+        db.scalars(
+            select(CommentSnapshot)
+            .where(CommentSnapshot.content_id == content_id)
+            .order_by(CommentSnapshot.created_time.desc().nullslast(), CommentSnapshot.fetched_at.desc())
+            .limit(20)
+        )
+    )
+    decision = repo.latest_decision_for_content(content_id)
+    notes = repo.list_notes(content_id=content_id)
+    assignments = repo.assignment_history(content_id)
+    discoveries = repo.discovery_events(content_id)
+    discovery_meta_rows = [item.discovery_meta_json for item in discoveries if item.discovery_meta_json]
+    metadata = content.metadata_json or {}
+    summary = repo._discovery_summary(content_id)
+    comment_count = summary.get("comment_snapshot_count") or 0
+    enrichment_flags = metadata.get("enrichment_flags") if isinstance(metadata.get("enrichment_flags"), dict) else {}
+    data_status_value = derive_data_status(
+        latest_snapshot_id=content.latest_snapshot_id,
+        comment_snapshot_count=comment_count,
+        detail_fetch_failed=bool(enrichment_flags.get("detail_failed")),
+        comment_fetch_failed=bool(enrichment_flags.get("comment_failed")),
+    )
+    ref_items = ReferenceLibraryRepository(db).list_for_content(content_id)
+    active_jobs = list(
+        db.scalars(
+            select(Job).where(
+                Job.job_type.in_([JobType.DETAIL_FETCH.value, JobType.COMMENT_FETCH.value]),
+                Job.status.in_([JobStatus.PENDING.value, JobStatus.CLAIMED.value, JobStatus.RUNNING.value]),
+            )
+        )
+    )
+    pending_detail_job = next((job.id for job in active_jobs if job.job_type == JobType.DETAIL_FETCH.value and (job.payload_json or {}).get("content_id") == content_id), None)
+    pending_comment_job = next((job.id for job in active_jobs if job.job_type == JobType.COMMENT_FETCH.value and (job.payload_json or {}).get("content_id") == content_id), None)
+    db.commit()
+    return IntelligenceContentProductDetail(
+        identity=ContentIdentityDetail(
+            id=content.id,
+            platform=content.platform,
+            platform_content_id=content.platform_content_id,
+            canonical_url=content.canonical_url,
+            content_type=content.content_type,
+            first_seen_at=content.first_seen_at,
+            last_seen_at=content.last_seen_at,
+            metadata=content.metadata_json or {},
+        ),
+        latest_snapshot=(
+            ContentSnapshotDetail(
+                id=snapshot.id,
+                title=snapshot.title,
+                body_text=snapshot.body_text,
+                author_platform_id=snapshot.author_platform_id,
+                author_name=snapshot.author_name,
+                author_avatar_url=snapshot.author_avatar_url,
+                cover_url=snapshot.cover_url,
+                image_urls=snapshot.image_urls_json or [],
+                video_url=snapshot.video_url,
+                like_count=snapshot.like_count,
+                comment_count=snapshot.comment_count,
+                collect_count=snapshot.collect_count,
+                share_count=snapshot.share_count,
+                publish_time=snapshot.publish_time,
+                fetched_at=snapshot.fetched_at,
+            )
+            if snapshot
+            else None
+        ),
+        comments=[
+            CommentSnapshotDetail(
+                id=comment.id,
+                platform_comment_id=comment.platform_comment_id,
+                parent_platform_comment_id=comment.parent_platform_comment_id,
+                author_platform_id=comment.author_platform_id,
+                author_name=comment.author_name,
+                body_text=comment.body_text,
+                like_count=comment.like_count,
+                created_time=comment.created_time,
+                fetched_at=comment.fetched_at,
+            )
+            for comment in comments
+        ],
+        latest_candidate_decision=(
+            CandidateDecisionDetail(
+                id=decision.id,
+                candidate_bucket=decision.candidate_bucket,
+                business_keyword_hits=decision.business_keyword_hits_json or [],
+                lead_keyword_hits=decision.lead_keyword_hits_json or [],
+                comment_keyword_hits=decision.comment_keyword_hits_json or [],
+                decision_reason=decision.decision_reason_json or {},
+                evaluated_at=decision.evaluated_at,
+            )
+            if decision
+            else None
+        ),
+        workflow_state=_workflow_read(state),
+        notes=[ContentOperatorNoteRead(id=note.id, content_id=note.content_id, user_id=note.user_id, note=note.note, created_at=note.created_at) for note in notes],
+        assignment_history=[
+            AssignmentHistoryItem(id=item.id, assigned_to_user_id=item.assigned_to_user_id, assigned_by_user_id=item.assigned_by_user_id, assigned_at=item.assigned_at, status=item.status, remark=item.remark)
+            for item in assignments
+        ],
+        discovery_events_summary=[
+            DiscoveryEventSummaryItem(
+                id=item.id,
+                source_surface=item.source_surface,
+                feed_type=item.feed_type,
+                feed_position=item.feed_position,
+                discovered_at=item.discovered_at,
+                account_id=item.account_id,
+                job_id=item.job_id,
+                search_keyword=(item.discovery_meta_json or {}).get("search_keyword"),
+                search_keywords=(item.discovery_meta_json or {}).get("search_keywords") or [],
+            )
+            for item in discoveries
+        ],
+        reference_library_items=[
+            ReferenceLibraryItemRead(**ReferenceLibraryRepository(db)._item_dict(item, content, snapshot))
+            for item in ref_items
+        ],
+        platform_tags=extract_platform_tags(metadata, snapshot.raw_payload_json if snapshot else None),
+        search_tags=extract_search_tags(metadata, discovery_meta_rows),
+        manual_tags=extract_manual_tags(metadata),
+        data_status=data_status_value,
+        pending_detail_job_id=pending_detail_job,
+        pending_comment_job_id=pending_comment_job,
+    )
+
+
+@router.post("/intelligence/contents/{content_id}/assign", response_model=ContentWorkflowRead)
+def assign_intelligence_content(content_id: str, request: ContentAssignRequest, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    if not db.get(ContentIdentity, content_id):
+        raise HTTPException(status_code=404, detail="content not found")
+    state = WorkflowRepository(db).assign(
+        content_id=content_id,
+        assigned_to_user_id=request.assigned_to_user_id,
+        assigned_by_user_id=request.assigned_by_user_id,
+        remark=request.remark,
+    )
+    db.commit()
+    return _workflow_read(state)
+
+
+@router.post("/intelligence/contents/{content_id}/select", response_model=ContentWorkflowRead)
+def select_intelligence_content(content_id: str, request: ContentStatusActionRequest, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR))):
+    state = WorkflowRepository(db).set_status(content_id=content_id, status=ContentWorkflowStatus.SELECTED, user_id=request.user_id, note=request.note)
+    db.commit()
+    return _workflow_read(state)
+
+
+@router.post("/intelligence/contents/{content_id}/discard", response_model=ContentWorkflowRead)
+def discard_intelligence_content(content_id: str, request: ContentStatusActionRequest, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR))):
+    state = WorkflowRepository(db).set_status(content_id=content_id, status=ContentWorkflowStatus.DISCARDED, user_id=request.user_id, note=request.note)
+    db.commit()
+    return _workflow_read(state)
+
+
+@router.post("/intelligence/contents/{content_id}/archive", response_model=ContentWorkflowRead)
+def archive_intelligence_content(content_id: str, request: ContentStatusActionRequest, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR))):
+    state = WorkflowRepository(db).set_status(content_id=content_id, status=ContentWorkflowStatus.ARCHIVED, user_id=request.user_id, note=request.note)
+    db.commit()
+    return _workflow_read(state)
+
+
+@router.post("/intelligence/contents/{content_id}/notes", response_model=ContentOperatorNoteRead)
+def add_intelligence_content_note(content_id: str, request: ContentNoteCreateRequest, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR))):
+    if not db.get(ContentIdentity, content_id):
+        raise HTTPException(status_code=404, detail="content not found")
+    note = WorkflowRepository(db).add_note(content_id=content_id, user_id=request.user_id, note=request.note)
+    db.commit()
+    return ContentOperatorNoteRead(id=note.id, content_id=note.content_id, user_id=note.user_id, note=note.note, created_at=note.created_at)
+
+
+@router.get("/intelligence/contents/{content_id}/notes", response_model=list[ContentOperatorNoteRead])
+def list_intelligence_content_notes(content_id: str, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR))):
+    return [
+        ContentOperatorNoteRead(id=note.id, content_id=note.content_id, user_id=note.user_id, note=note.note, created_at=note.created_at)
+        for note in WorkflowRepository(db).list_notes(content_id=content_id)
+    ]
+
+
+@router.patch("/intelligence/contents/{content_id}/manual-tags", response_model=ContentIdentityDetail)
+def update_intelligence_manual_tags(content_id: str, request: ManualTagsUpdateRequest, db: Session = Depends(get_db), principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR))):
+    try:
+        content = WorkflowRepository(db).update_manual_tags(
+            content_id=content_id,
+            manual_tags=request.manual_tags,
+            user_id=request.user_id or principal.user_id,
+        )
+    except ValueError:
+        raise HTTPException(status_code=404, detail="content not found")
+    db.commit()
+    return ContentIdentityDetail(
+        id=content.id,
+        platform=content.platform,
+        platform_content_id=content.platform_content_id,
+        canonical_url=content.canonical_url,
+        content_type=content.content_type,
+        first_seen_at=content.first_seen_at,
+        last_seen_at=content.last_seen_at,
+        metadata=content.metadata_json or {},
+    )
+
+
+@router.post("/intelligence/contents/{content_id}/enqueue-detail-fetch", response_model=EnqueueFetchResponse)
+def enqueue_intelligence_detail_fetch(content_id: str, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR))):
+    try:
+        job = ContentRepository(db).enqueue_detail_fetch(content_id=content_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="content not found")
+    db.commit()
+    return EnqueueFetchResponse(job_id=job.id, job_type=job.job_type, status=job.status)
+
+
+@router.post("/intelligence/contents/{content_id}/enqueue-comment-fetch", response_model=EnqueueFetchResponse)
+def enqueue_intelligence_comment_fetch(content_id: str, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR))):
+    try:
+        job = ContentRepository(db).enqueue_comment_fetch(content_id=content_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="content not found")
+    db.commit()
+    return EnqueueFetchResponse(job_id=job.id, job_type=job.job_type, status=job.status)
+
+
+@router.post("/intelligence/contents/{content_id}/reference-library-items", response_model=ReferenceLibraryItemRead)
+def create_reference_library_item(content_id: str, request: ReferenceLibraryItemCreateRequest, db: Session = Depends(get_db), principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR))):
+    content = _ensure_content(content_id, db)
+    snapshot = db.get(ContentSnapshot, content.latest_snapshot_id) if content.latest_snapshot_id else None
+    item = ReferenceLibraryRepository(db).create_item(
+        content_id=content_id,
+        library_type=_enum_value(request.library_type),
+        created_by_user_id=request.user_id or principal.user_id,
+        created_by_employee_id=request.employee_id,
+        selected_reason=request.selected_reason,
+        rating=_enum_value(request.rating) if request.rating else None,
+        manual_tags=request.manual_tags,
+        material_tags=request.material_tags,
+        usage_status=_enum_value(request.usage_status),
+        note=request.note,
+        metadata=request.metadata,
+    )
+    db.commit()
+    return ReferenceLibraryItemRead(**ReferenceLibraryRepository(db)._item_dict(item, content, snapshot))
+
+
+@router.get("/reference-library/items", response_model=ReferenceLibraryItemList)
+def list_reference_library_items(
+    library_type: str | None = None,
+    usage_status: str | None = None,
+    page: int = 1,
+    page_size: int = 20,
+    db: Session = Depends(get_db),
+    _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+):
+    items, total = ReferenceLibraryRepository(db).list_items(page=page, page_size=page_size, library_type=library_type, usage_status=usage_status)
+    db.commit()
+    return ReferenceLibraryItemList(items=items, page=page, page_size=page_size, total=total)
+
+
+@router.patch("/reference-library/items/{item_id}", response_model=ReferenceLibraryItemRead)
+def update_reference_library_item(item_id: str, request: ReferenceLibraryItemUpdateRequest, db: Session = Depends(get_db), principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR))):
+    repo = ReferenceLibraryRepository(db)
+    item = repo.get_item(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="reference library item not found")
+    content = db.get(ContentIdentity, item.content_id)
+    snapshot = db.get(ContentSnapshot, content.latest_snapshot_id) if content and content.latest_snapshot_id else None
+    updates = {}
+    if request.selected_reason is not None:
+        updates["selected_reason"] = request.selected_reason
+    if request.rating is not None:
+        updates["rating"] = _enum_value(request.rating)
+    if request.manual_tags is not None:
+        updates["manual_tags_json"] = request.manual_tags
+    if request.material_tags is not None:
+        updates["material_tags_json"] = request.material_tags
+    if request.usage_status is not None:
+        updates["usage_status"] = _enum_value(request.usage_status)
+    if request.note is not None:
+        updates["note"] = request.note
+    if request.metadata is not None:
+        updates["metadata_json"] = request.metadata
+    item = repo.update_item(item, **updates)
+    db.commit()
+    return ReferenceLibraryItemRead(**repo._item_dict(item, content, snapshot))
+
+
+@router.post("/reference-library/items/{item_id}/archive", response_model=ReferenceLibraryItemRead)
+def archive_reference_library_item(item_id: str, db: Session = Depends(get_db), principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR))):
+    repo = ReferenceLibraryRepository(db)
+    item = repo.get_item(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="reference library item not found")
+    content = db.get(ContentIdentity, item.content_id)
+    snapshot = db.get(ContentSnapshot, content.latest_snapshot_id) if content and content.latest_snapshot_id else None
+    item = repo.archive_item(item, user_id=principal.user_id, employee_id=get_principal_employee_id(db, principal))
+    db.commit()
+    return ReferenceLibraryItemRead(**repo._item_dict(item, content, snapshot))
+
+
+@router.post("/xhs/search-suggestions/tasks", response_model=EnqueueFetchResponse)
+def create_xhs_search_suggestion_task(request: XhsSearchSuggestionTaskRequest, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    account = db.get(PlatformAccount, request.executor_account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="executor account not found")
+    job = JobRepository(db).create_job(
+        job_type=JobType.XHS_SEARCH_SUGGEST.value,
+        account_id=account.id,
+        local_agent_id=account.default_agent_id,
+        payload={
+            "platform": _enum_value(request.platform),
+            "executor_account_id": account.id,
+            "core_keyword": request.core_keyword,
+        },
+        priority=110,
+    )
+    db.commit()
+    return EnqueueFetchResponse(job_id=job.id, job_type=job.job_type, status=job.status)
+
+
+@router.get("/xhs/search-suggestions", response_model=list[XhsSearchSuggestionRead])
+def list_xhs_search_suggestions(
+    core_keyword: str | None = None,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+):
+    stmt = select(XhsSearchSuggestion).order_by(XhsSearchSuggestion.fetched_at.desc()).limit(limit)
+    if core_keyword:
+        stmt = stmt.where(XhsSearchSuggestion.core_keyword == core_keyword)
+    rows = list(db.scalars(stmt))
+    return [
+        XhsSearchSuggestionRead(
+            id=row.id,
+            platform=row.platform,
+            core_keyword=row.core_keyword,
+            suggested_keyword=row.suggested_keyword,
+            suggestion_rank=row.suggestion_rank,
+            source_account_id=row.source_account_id,
+            fetched_at=row.fetched_at,
+            created_at=row.created_at,
+        )
+        for row in rows
+    ]
+
+
+@router.get("/intelligence/data-quality/overview", response_model=IntelligenceDataQualityOverview)
+def get_intelligence_data_quality_overview(
+    window_hours: int = 24,
+    db: Session = Depends(get_db),
+    _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+):
+    overview = build_data_quality_overview(db, window_hours=window_hours)
+    db.commit()
+    return IntelligenceDataQualityOverview(**overview)

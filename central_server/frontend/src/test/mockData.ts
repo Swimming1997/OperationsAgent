@@ -1,0 +1,217 @@
+import type {
+  BehaviorProfile,
+  BenchmarkGroup,
+  BusinessAccountType,
+  IntelligenceListResponse,
+  KeywordRuleSet,
+  LocalAgent,
+  NetworkEgressProfile,
+  PlatformAccount,
+  ProductDetail,
+  ProductOptions,
+  RiskPolicy,
+  TaskRun,
+  TaskTemplateDetail,
+  TaskTemplateListItem,
+  TaskTemplateReadiness,
+} from '../types/api';
+
+export const options: ProductOptions = {
+  roles: [{ value: 'admin', label: 'admin' }, { value: 'supervisor', label: 'supervisor' }, { value: 'operator', label: 'operator' }],
+  platforms: [{ value: 'xhs', label: 'xhs' }],
+  feed_types: [{ value: 'xhs_home_feed', label: 'xhs_home_feed' }],
+  task_template_types: [
+    { value: 'recommendation_feed_task', label: 'recommendation_feed_task' },
+    { value: 'creator_monitor_task', label: 'creator_monitor_task' },
+    { value: 'keyword_search_task', label: 'keyword_search_task' },
+  ],
+  workflow_statuses: [{ value: 'pending_review', label: 'pending_review' }, { value: 'assigned', label: 'assigned' }],
+  candidate_buckets: [{ value: 'content_candidate', label: 'content_candidate' }],
+  account_statuses: [{ value: 'active', label: 'active' }],
+  agent_statuses: [{ value: 'online', label: 'online' }],
+};
+
+export const platformAccounts: PlatformAccount[] = [{
+  id: 'account-1',
+  employee_id: 'employee-1',
+  employee_display_name: '运营一组',
+  platform: 'xhs',
+  display_name: '小红书测试账号',
+  external_account_id: 'xhs-user-1',
+  business_account_type_id: 'type-1',
+  business_account_type_name: '论文服务号',
+  legacy_business_account_type: null,
+  status: 'active',
+  auth_status: 'not_logged_in',
+  account_role: 'intelligence_collector',
+  health_status: 'healthy',
+  profile_key: 'accounts/account-1',
+  platform_nickname: null,
+  platform_home_url: null,
+  last_verified_at: null,
+  login_cdp_port: null,
+  active_login_session_status: null,
+  default_agent_id: 'agent-1',
+  default_agent_device_name: 'WIN-AGENT',
+  session_health_status: 'ready',
+  last_success_at: null,
+  last_failure_at: null,
+  consecutive_failures: 0,
+  metadata: {},
+}];
+
+export const businessTypes: BusinessAccountType[] = [{ id: 'type-1', name: '论文服务号', description: 'SCI 相关业务', enabled: true, rule_set_count: 1, benchmark_group_count: 1 }];
+export const benchmarkGroups: BenchmarkGroup[] = [{ id: 'group-1', name: 'SCI 对标组', description: null, owner_employee_id: null, enabled: true, metadata: {} }];
+export const ruleSets: KeywordRuleSet[] = [{ id: 'rule-set-1', name: 'SCI 关键词', rule_scope: 'xhs', enabled: true, config: {} }];
+export const behaviorProfiles: BehaviorProfile[] = [{ id: 'behavior-1', name: '低频浏览', description: null, enabled: true, config: {} }];
+export const networkProfiles: NetworkEgressProfile[] = [{ id: 'network-1', name: '本机出口', strategy: 'direct_local', description: null, enabled: true, config: {} }];
+export const riskPolicies: RiskPolicy[] = [{ id: 'risk-1', name: '低风险预算', description: null, enabled: true, behavior_profile_id: 'behavior-1', network_egress_profile_id: 'network-1', config: {} }];
+export const agents: LocalAgent[] = [{
+  id: 'agent-1',
+  employee_id: 'employee-1',
+  employee_display_name: '运营一组',
+  device_name: 'WIN-AGENT',
+  machine_fingerprint: 'fp',
+  status: 'online',
+  agent_version: '0.1.0',
+  capabilities: { supports_account_login: true, runtime: 'local_agent_runtime_v1', job_types: ['feed_collect'] },
+  last_heartbeat_at: '2026-05-19T01:00:00Z',
+}];
+
+export const intelligenceList: IntelligenceListResponse = {
+  page: 1,
+  page_size: 20,
+  total: 1,
+  items: [{
+    content_id: 'content-1',
+    platform: 'xhs',
+    platform_content_id: 'note-1',
+    content_type: 'image_text',
+    canonical_url: 'https://example.com',
+    title: 'SCI论文投稿避坑',
+    author_name: '作者A',
+    cover_url: 'https://invalid.local/cover.jpg',
+    like_count: 128,
+    comment_count: 12,
+    collect_count: 5,
+    candidate_bucket: 'content_candidate',
+    workflow_status: 'assigned',
+    assigned_to_user_id: 'operator-user',
+    assigned_to_user_display_name: '运营',
+    latest_operator_note: '需要跟进',
+    latest_snapshot_time: '2026-05-19T01:00:00Z',
+    latest_discovered_at: '2026-05-19T01:00:00Z',
+    discovery_sources_summary: { source_surfaces: { xhs_home_feed: 1 }, search_keywords: ['SCI'] },
+    first_seen_at: '2026-05-19T00:00:00Z',
+    last_seen_at: '2026-05-19T01:00:00Z',
+    data_status: 'detail_ready',
+    discovery_count: 2,
+    discovered_account_count: 1,
+    discovered_search_keyword_count: 1,
+    platform_tags: ['#SCI'],
+    search_tags: ['SCI'],
+    manual_tags: ['可仿写'],
+    search_keyword: 'SCI',
+    search_sort: 'comprehensive',
+    note_type_filter: 'all',
+    publish_time_filter: 'all',
+    search_scope_filter: 'all',
+    location_filter: 'all',
+    best_search_rank: 3,
+    best_feed_position: 1,
+    reference_library_count: 0,
+  }],
+};
+
+export const productDetail: ProductDetail = {
+  identity: { id: 'content-1', platform: 'xhs', platform_content_id: 'note-1', canonical_url: 'https://example.com', content_type: 'image_text', first_seen_at: '2026-05-19T00:00:00Z', last_seen_at: '2026-05-19T01:00:00Z', metadata: {} },
+  latest_snapshot: { id: 'snapshot-1', title: 'SCI论文投稿避坑', body_text: '这是一条详情正文', author_name: '作者A', cover_url: 'https://invalid.local/detail.jpg', like_count: 128, comment_count: 12, collect_count: 5, fetched_at: '2026-05-19T01:00:00Z' },
+  comments: [{ id: 'comment-1', platform_comment_id: 'c1', parent_platform_comment_id: null, author_platform_id: 'u1', author_name: '评论者A', body_text: '求推荐，怎么联系？', like_count: 3, created_time: '2026-05-19T01:00:00Z', fetched_at: '2026-05-19T01:00:00Z' }],
+  latest_candidate_decision: { id: 'decision-1', candidate_bucket: 'content_candidate', business_keyword_hits: ['SCI', '论文'], lead_keyword_hits: [], comment_keyword_hits: [], decision_reason: {}, evaluated_at: '2026-05-19T01:00:00Z' },
+  workflow_state: { content_id: 'content-1', workflow_status: 'assigned', assigned_to_user_id: 'operator-user', assigned_by_user_id: 'supervisor-user', assigned_at: '2026-05-19T01:00:00Z', reviewed_at: null, selected_at: null, discarded_at: null, latest_operator_note: '需要跟进' },
+  notes: [{ id: 'note-1', content_id: 'content-1', user_id: 'operator-user', note: '需要跟进', created_at: '2026-05-19T01:00:00Z' }],
+  assignment_history: [{ id: 'assign-1', assigned_to_user_id: 'operator-user', assigned_by_user_id: 'supervisor-user', assigned_at: '2026-05-19T01:00:00Z', status: 'assigned', remark: null }],
+  discovery_events_summary: [{ id: 'event-1', source_surface: 'xhs_home_feed', feed_type: 'xhs_home_feed', feed_position: 1, discovered_at: '2026-05-19T01:00:00Z', account_id: null, job_id: 'job-1' }],
+  reference_library_items: [],
+  platform_tags: ['#SCI'],
+  search_tags: ['SCI'],
+  manual_tags: ['可仿写'],
+  data_status: 'detail_ready',
+  pending_detail_job_id: null,
+  pending_comment_job_id: null,
+};
+
+export const taskList: TaskTemplateListItem[] = [
+  { id: 'task-1', name: '推荐流巡检', template_type: 'recommendation_feed_task', enabled: true, platform: 'xhs', account_id: 'account-1', key_fields: { target_count: 50 } },
+];
+
+export const taskDetail: TaskTemplateDetail = {
+  id: 'task-1',
+  name: '推荐流巡检',
+  template_type: 'recommendation_feed_task',
+  platform: 'xhs',
+  account_id: 'account-1',
+  business_account_type_id: null,
+  enabled: true,
+  config: {},
+  typed_payload: { executor_account_id: 'account-1', feed_type: 'xhs_home_feed', target_count: 50, refresh_rounds: 2, per_round_scroll_target: 50 },
+};
+
+export const readinessReady: TaskTemplateReadiness = {
+  ready: true,
+  messages: [],
+  checks: [
+    { key: 'executor_account', ok: true, message: '执行账号存在' },
+    { key: 'agent_online', ok: true, message: '绑定 Agent 当前在线' },
+    { key: 'session_ready', ok: true, message: '账号 Session 已就绪' },
+  ],
+};
+
+export const readinessBlocked: TaskTemplateReadiness = {
+  ready: false,
+  messages: ['绑定 Agent 当前离线', '账号 Session 未就绪'],
+  checks: [
+    { key: 'executor_account', ok: true, message: '执行账号存在' },
+    { key: 'agent_online', ok: false, message: '绑定 Agent 当前离线' },
+    { key: 'session_ready', ok: false, message: '账号 Session 未就绪' },
+  ],
+};
+
+export const taskRun: TaskRun = {
+  id: 'run-1',
+  task_template_id: 'task-1',
+  trigger_type: 'manual',
+  requested_by_user_id: 'supervisor-user',
+  task_schedule_id: null,
+  status: 'success',
+  jobs_total: 1,
+  jobs_pending: 0,
+  jobs_running: 0,
+  jobs_success: 1,
+  jobs_failed: 0,
+  result_summary: {
+    feed_collect: {
+      sampled_count: 10,
+      inserted_count: 0,
+      duplicate_count: 10,
+      detail_jobs_enqueued: 0,
+      message: '任务执行成功，本次采样 10 条，新增 0 条，10 条均为历史重复内容。',
+    },
+  },
+  error_summary: { errors: [], error_count: 0 },
+  created_at: '2026-05-19T01:00:00Z',
+  updated_at: '2026-05-19T01:01:00Z',
+  finished_at: '2026-05-19T01:01:00Z',
+  jobs: [{
+    job_id: 'job-1',
+    job_type: 'feed_collect',
+    status: 'success',
+    account_id: 'account-1',
+    claimed_by_agent_id: 'agent-1',
+    result_summary: { raw_items_seen: 10, unique_contents_inserted: 0 },
+    error_message: null,
+    created_at: '2026-05-19T01:00:00Z',
+    started_at: '2026-05-19T01:00:10Z',
+    finished_at: '2026-05-19T01:01:00Z',
+  }],
+};

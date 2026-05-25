@@ -1,0 +1,23 @@
+{
+  "comments": [
+    {
+      "commentId": "c001",
+      "content": "求推荐，怎么联系？",
+      "likeCount": "12",
+      "createTime": 1716000000000,
+      "user": {
+        "userId": "u001",
+        "nickname": "评论者A"
+      }
+    },
+    {
+      "commentId": "c002",
+      "content": "内容很有帮助",
+      "likeCount": "3",
+      "user": {
+        "userId": "u002",
+        "nickname": "评论者B"
+      }
+    }
+  ]
+}

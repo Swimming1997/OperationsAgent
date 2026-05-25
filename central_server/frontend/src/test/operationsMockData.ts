@@ -1,0 +1,90 @@
+import type { JobQueueSummary, OpsJobDetail, OpsJobItem, OpsTaskRunDetail, OpsTaskRunItem } from '../api/operations';
+
+export const operationsSummary: JobQueueSummary = {
+  generated_at: '2026-05-19T08:00:00Z',
+  status_counts: {
+    pending: 3,
+    running: 1,
+    success: 12,
+    failed: 2,
+    cancelled: 1,
+    partial_success: 0,
+  },
+  job_status_counts: {
+    pending: 3,
+    running: 1,
+    success: 12,
+    failed: 2,
+    cancelled: 1,
+    partial_success: 0,
+  },
+  task_run_status_counts: {
+    success: 1,
+    queued: 0,
+    running: 0,
+  },
+  orphan_active_job_count: 0,
+  job_type_status_counts: {},
+  stale_running_count: 2,
+  stale_claimed_count: 1,
+  legacy_pending_count: 5,
+  by_agent: [],
+};
+
+export const operationsTaskRuns: OpsTaskRunItem[] = [{
+  id: 'run-1',
+  task_template_id: 'task-1',
+  task_template_name: '推荐页巡检',
+  trigger_type: 'manual',
+  status: 'success',
+  requested_by_user_id: 'supervisor-user',
+  task_schedule_id: null,
+  jobs_total: 1,
+  jobs_pending: 0,
+  jobs_running: 0,
+  jobs_success: 1,
+  jobs_failed: 0,
+  result_summary: { feed_collect: { message: '任务执行成功，本次采样 10 条。' } },
+  error_summary: {},
+  created_at: '2026-05-19T01:00:00Z',
+  updated_at: '2026-05-19T01:01:00Z',
+  finished_at: '2026-05-19T01:01:00Z',
+  has_active_jobs: false,
+}];
+
+export const operationsJobs: OpsJobItem[] = [{
+  id: 'job-comment-1',
+  task_run_id: 'run-1',
+  task_template_name: '推荐页巡检',
+  job_type: 'comment_fetch',
+  status: 'running',
+  priority: 80,
+  account_id: 'account-1',
+  local_agent_id: 'agent-1',
+  claimed_by_agent_id: 'agent-1',
+  claimed_by_agent_name: 'WIN-AGENT',
+  retry_count: 0,
+  last_error_code: null,
+  last_error_message: null,
+  created_at: '2026-05-19T02:00:00Z',
+  started_at: '2026-05-19T02:00:10Z',
+  finished_at: null,
+  is_legacy: false,
+  is_stale_running: true,
+  payload_json: { content_id: 'content-1' },
+  result_summary_json: {},
+}];
+
+export const operationsTaskRunDetail: OpsTaskRunDetail = {
+  ...operationsTaskRuns[0],
+  jobs: operationsJobs,
+  queue_context: { message: '当前 Agent 正在执行其他任务，本次运行等待调度', pending_jobs_ahead: 3 },
+};
+
+export const operationsJobDetail: OpsJobDetail = {
+  ...operationsJobs[0],
+  events: [
+    { event_type: 'job_created', payload: {}, created_at: '2026-05-19T02:00:00Z' },
+    { event_type: 'job_started', payload: {}, created_at: '2026-05-19T02:00:10Z' },
+  ],
+};

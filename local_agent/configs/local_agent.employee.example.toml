@@ -1,0 +1,50 @@
+# AMiracle Local Agent — employee workstation template (Stage 3F)
+#
+# Copy to a private path if needed, e.g. configs/local_agent.my.toml
+# and set:  set LOCAL_AGENT_CONFIG=configs\local_agent.my.toml
+#
+# Employee binding is done in the web UI (Admin / Supervisor → Agent 管理),
+# not in this file. After cd local_agent; .\scripts\start.ps1 registers the device, open
+# /agents, select the device, and bind the operator employee.
+#
+# Optional legacy override (normally leave empty):
+# employee_id = ""
+
+# Central API base URL (same machine dev: 127.0.0.1; prod: https://your-central-host)
+center_url = "http://127.0.0.1:8000"
+
+# Optional: reuse existing agent row instead of creating by fingerprint
+agent_id = ""
+
+# Shown in Admin /agents and employee UI
+device_name = "WIN-1"
+machine_fingerprint = "win-1-demo-fingerprint"
+
+agent_version = "0.1.0"
+
+# Local Agent root. profiles live under {project_root}/profiles/accounts/{profile_key}/
+project_root = "."
+
+# Loop timing
+claim_interval_seconds = 5
+heartbeat_interval_seconds = 30
+max_concurrent_jobs = 1
+
+# Intelligence job types (optional if only doing account login)
+supported_job_types = [
+  "feed_collect",
+  "creator_monitor",
+  "detail_fetch",
+  "comment_fetch",
+  "search_collect",
+]
+
+# Legacy single-browser CDP (optional; account login uses per-account Chrome + port)
+# 审计 / 单浏览器调试：先 scripts\start_account_chrome.py --account-key audit-demo --port 9222
+cdp_url = "http://127.0.0.1:9222"
+
+# Runtime declares supports_account_login=true automatically for Local Agent V1.
+# Central must see capabilities.supports_account_login for login session claim.
+
+[accounts]
+# Optional legacy per-account CDP overrides (Stage 3F login uses profile_key from central)

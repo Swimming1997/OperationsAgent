@@ -1,0 +1,13 @@
+.env
+logs/
+profiles/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+references/MediaCrawler/.git/
+references/MediaCrawler/node_modules/
+references/MediaCrawler/**/__pycache__/
+references/MediaCrawler/**/*.py[cod]
+packages/
+*.zip

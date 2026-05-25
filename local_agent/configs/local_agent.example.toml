@@ -1,0 +1,19 @@
+center_url = "http://127.0.0.1:8000"
+agent_id = ""
+# 可选：本地覆盖员工绑定（正常在 Admin「Agent 管理」界面绑定，无需填写）
+# employee_id = ""
+device_name = "AMiracle Local Agent"
+machine_fingerprint = "amiracle-local-agent-001"
+agent_version = "0.1.0"
+project_root = "."
+claim_interval_seconds = 5
+heartbeat_interval_seconds = 30
+max_concurrent_jobs = 1
+cdp_url = "http://127.0.0.1:9222"
+supported_job_types = ["feed_collect", "creator_monitor", "detail_fetch", "comment_fetch", "search_collect"]
+
+[accounts]
+# Replace this key with the platform_accounts.id from the central service.
+# No cookie is stored here. The Agent connects to the local browser/CDP endpoint.
+# Chrome profiles live under profiles/accounts/{profile_key}.
+# "00000000-0000-0000-0000-000000000000" = { platform = "xhs", session_mode = "cdp", cdp_url = "http://127.0.0.1:9222" }

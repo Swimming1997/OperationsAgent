@@ -1,0 +1,25 @@
+[
+  {
+    "href": "/explore/65abc123def4560001",
+    "card_class": "note-item",
+    "card_text": "SCI投稿经验 作者A 1.2万",
+    "title": "SCI投稿经验：如何选择期刊",
+    "cover_url": "https://sns-img-qc.xhscdn.com/example-cover.jpg",
+    "author_name": "作者A",
+    "author_platform_id": "/user/profile/user001",
+    "visible_like_count": "1.2万"
+  },
+  {
+    "href": "https://www.xiaohongshu.com/discovery/item/65abc123def4560002",
+    "card_class": "note-item video",
+    "card_text": "视频样本 作者B 345",
+    "title": "投稿渠道避坑",
+    "cover_url": "https://sns-img-qc.xhscdn.com/example-cover-2.jpg",
+    "author_name": "作者B",
+    "visible_like_count": "345"
+  },
+  {
+    "href": "/explore/",
+    "card_text": "invalid card"
+  }
+]

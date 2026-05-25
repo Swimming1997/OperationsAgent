@@ -1,0 +1,35 @@
+{
+  "scripts": [
+    {
+      "note": {
+        "noteId": "65abc123def4560001",
+        "title": "SCI投稿经验：如何选择期刊",
+        "desc": "正文内容：期刊选择、投稿流程、发表周期。",
+        "time": 1716000000000,
+        "user": {
+          "userId": "user001",
+          "nickname": "作者A",
+          "avatar": "https://sns-avatar-qc.xhscdn.com/avatar.jpg"
+        },
+        "interactInfo": {
+          "likedCount": "1.2万",
+          "commentCount": "88",
+          "collectedCount": "456",
+          "shareCount": "12"
+        },
+        "imageList": [
+          {
+            "url": "https://sns-img-qc.xhscdn.com/image-1.jpg"
+          },
+          {
+            "infoList": [
+              {
+                "url": "https://sns-img-qc.xhscdn.com/image-2.jpg"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}
