@@ -303,12 +303,26 @@ class ContentRepository:
 
     def list_intelligence_contents(self, *, page: int, page_size: int) -> tuple[list[dict], int]:
         total = self.db.scalar(select(func.count(ContentIdentity.id))) or 0
+        latest_decision = (
+            select(
+                CandidateDecision.id.label("decision_id"),
+                CandidateDecision.content_id.label("content_id"),
+                func.row_number()
+                .over(
+                    partition_by=CandidateDecision.content_id,
+                    order_by=(CandidateDecision.evaluated_at.desc(), CandidateDecision.created_at.desc()),
+                )
+                .label("rn"),
+            )
+            .subquery()
+        )
         rows = list(
             self.db.execute(
                 select(ContentIdentity, ContentSnapshot, CandidateDecision, func.max(ContentDiscoveryEvent.discovered_at))
                 .join(ContentDiscoveryEvent, ContentDiscoveryEvent.content_id == ContentIdentity.id, isouter=True)
                 .join(ContentSnapshot, ContentSnapshot.id == ContentIdentity.latest_snapshot_id, isouter=True)
-                .join(CandidateDecision, CandidateDecision.snapshot_id == ContentSnapshot.id, isouter=True)
+                .join(latest_decision, (latest_decision.c.content_id == ContentIdentity.id) & (latest_decision.c.rn == 1), isouter=True)
+                .join(CandidateDecision, CandidateDecision.id == latest_decision.c.decision_id, isouter=True)
                 .group_by(ContentIdentity.id, ContentSnapshot.id, CandidateDecision.id)
                 .order_by(func.max(ContentDiscoveryEvent.discovered_at).desc())
                 .offset((page - 1) * page_size)

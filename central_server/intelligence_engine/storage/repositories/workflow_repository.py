@@ -134,17 +134,18 @@ class WorkflowRepository:
     ) -> tuple[list[dict], int]:
         base_conditions = []
         if pool_only and not candidate_bucket:
-            base_conditions.append(CandidateDecision.candidate_bucket != CandidateBucket.DISCARD.value)
             base_conditions.append(
-                CandidateDecision.candidate_bucket.in_(
-                    [
-                        CandidateBucket.CONTENT_CANDIDATE.value,
-                        CandidateBucket.LEAD_CANDIDATE.value,
-                        CandidateBucket.PENDING_ENRICHMENT.value,
-                    ]
+                or_(
+                    CandidateDecision.id.is_(None),
+                    CandidateDecision.candidate_bucket.in_(
+                        [
+                            CandidateBucket.CONTENT_CANDIDATE.value,
+                            CandidateBucket.LEAD_CANDIDATE.value,
+                            CandidateBucket.PENDING_ENRICHMENT.value,
+                        ]
+                    ),
                 )
             )
-            base_conditions.append(CandidateDecision.id.isnot(None))
         if platform:
             base_conditions.append(ContentIdentity.platform == platform)
         if source_surface:
@@ -207,6 +208,19 @@ class WorkflowRepository:
         elif data_status == ContentDataStatus.DETAIL_READY.value:
             base_conditions.append(ContentIdentity.latest_snapshot_id.isnot(None))
 
+        latest_decision = (
+            select(
+                CandidateDecision.id.label("decision_id"),
+                CandidateDecision.content_id.label("content_id"),
+                func.row_number()
+                .over(
+                    partition_by=CandidateDecision.content_id,
+                    order_by=(CandidateDecision.evaluated_at.desc(), CandidateDecision.created_at.desc()),
+                )
+                .label("rn"),
+            )
+            .subquery()
+        )
         discovery_count_expr = func.count(ContentDiscoveryEvent.id)
         discovered_account_count_expr = func.count(func.distinct(ContentDiscoveryEvent.account_id))
         latest_discovered_expr = func.max(ContentDiscoveryEvent.discovered_at)
@@ -215,7 +229,8 @@ class WorkflowRepository:
             select(ContentIdentity.id)
             .join(ContentDiscoveryEvent, ContentDiscoveryEvent.content_id == ContentIdentity.id, isouter=True)
             .join(ContentSnapshot, ContentSnapshot.id == ContentIdentity.latest_snapshot_id, isouter=True)
-            .join(CandidateDecision, CandidateDecision.snapshot_id == ContentSnapshot.id, isouter=True)
+            .join(latest_decision, (latest_decision.c.content_id == ContentIdentity.id) & (latest_decision.c.rn == 1), isouter=True)
+            .join(CandidateDecision, CandidateDecision.id == latest_decision.c.decision_id, isouter=True)
             .join(ContentWorkflowState, ContentWorkflowState.content_id == ContentIdentity.id, isouter=True)
         )
         if base_conditions:
@@ -252,7 +267,8 @@ class WorkflowRepository:
             )
             .join(ContentDiscoveryEvent, ContentDiscoveryEvent.content_id == ContentIdentity.id, isouter=True)
             .join(ContentSnapshot, ContentSnapshot.id == ContentIdentity.latest_snapshot_id, isouter=True)
-            .join(CandidateDecision, CandidateDecision.snapshot_id == ContentSnapshot.id, isouter=True)
+            .join(latest_decision, (latest_decision.c.content_id == ContentIdentity.id) & (latest_decision.c.rn == 1), isouter=True)
+            .join(CandidateDecision, CandidateDecision.id == latest_decision.c.decision_id, isouter=True)
             .join(ContentWorkflowState, ContentWorkflowState.content_id == ContentIdentity.id, isouter=True)
             .join(User, User.id == ContentWorkflowState.assigned_to_user_id, isouter=True)
         )

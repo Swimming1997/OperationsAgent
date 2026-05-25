@@ -14,7 +14,7 @@ from intelligence_engine.domain.enums import (
     Platform,
     SourceSurface,
 )
-from intelligence_engine.domain.schemas import FeedCandidateInput
+from intelligence_engine.domain.schemas import DetailSnapshotInput, FeedCandidateInput
 from intelligence_engine.storage.repositories.account_repository import AccountRepository
 from intelligence_engine.storage.repositories.content_repository import ContentRepository
 from intelligence_engine.storage.repositories.job_repository import JobRepository
@@ -210,3 +210,33 @@ def test_duplicate_ingestion_adds_discovery_without_duplicate_detail_job(db_sess
 
     assert db_session.scalar(select(func.count()).select_from(ContentDiscoveryEvent)) == 2
     assert db_session.scalar(select(func.count()).select_from(Job).where(Job.job_type == JobType.DETAIL_FETCH.value)) == 1
+
+
+def test_intelligence_list_uses_latest_candidate_decision_once(db_session):
+    job = JobRepository(db_session).create_job(job_type=JobType.FEED_COLLECT, payload={})
+    candidate = FeedCandidateInput(
+        platform=Platform.XHS,
+        platform_content_id="multi-decision-id",
+        canonical_url="https://fake.local/multi-decision-id",
+        content_type=ContentType.IMAGE_TEXT,
+        title_or_summary="SCI论文投稿",
+        source_surface=SourceSurface.XHS_HOME_FEED,
+        feed_type=FeedType.XHS_HOME_FEED,
+        feed_position=1,
+        visible_like_count=120,
+        discovered_at=datetime.now(timezone.utc),
+    )
+    repo = ContentRepository(db_session)
+    content, *_ = repo.ingest_feed_candidate(job_id=job.id, account_id=None, candidate=candidate)
+    snapshot = repo.create_snapshot(
+        content_id=content.id,
+        account_id=None,
+        snapshot=DetailSnapshotInput(title="SCI论文投稿", body_text="第一次评估", like_count=120),
+    )
+    repo.evaluate_candidate(content_id=content.id, snapshot_id=snapshot.id)
+    repo.evaluate_candidate(content_id=content.id, snapshot_id=snapshot.id)
+
+    items, total = repo.list_intelligence_contents(page=1, page_size=20)
+
+    assert total == 1
+    assert [item["content_id"] for item in items] == [content.id]

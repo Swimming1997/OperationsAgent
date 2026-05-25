@@ -427,6 +427,16 @@ class XhsJobExecutor:
         results = ingestion.get("results") or []
         prelim_scored = [item for item in results if item.get("feed_prelim_pass") is not None]
         prelim_pass_count = sum(1 for item in prelim_scored if item.get("feed_prelim_pass"))
+        missing_like_ids = {
+            item.platform_content_id
+            for item in candidates
+            if item.visible_like_count is None
+        }
+        missing_like_detail_jobs = sum(
+            1
+            for item in results
+            if item.get("detail_job_enqueued") and item.get("platform_content_id") in missing_like_ids
+        )
         return JobExecutionResult(
             status=JobStatus.SUCCESS.value,
             checkpoint={"items_seen": len(candidates)},
@@ -441,6 +451,8 @@ class XhsJobExecutor:
                 "prelim_pass_count": prelim_pass_count,
                 "prelim_discard_count": max(0, len(prelim_scored) - prelim_pass_count),
                 "detail_jobs_enqueued": sum(1 for item in results if item.get("detail_job_enqueued")),
+                "missing_visible_like_count": len(missing_like_ids),
+                "missing_visible_like_detail_jobs_enqueued": missing_like_detail_jobs,
                 "runtime": "local_agent_runtime_v1",
                 "engine_audit": engine_audit_summary(capability_key="xhs.feed.home_recommend", surface="homefeed", report=report),
             },

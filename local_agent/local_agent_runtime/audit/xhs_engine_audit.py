@@ -55,6 +55,12 @@ SURFACE_CAPABILITY = {
 }
 
 
+def should_flag_note_unavailable(*, title: str, body_text: str | None, api_success: bool) -> bool:
+    if title == "当前笔记暂时无法浏览" or "暂时无法浏览" in str(title):
+        return True
+    return not title and not body_text and not api_success
+
+
 def pick_fresh_note(candidates: list[FeedCandidateInput]) -> tuple[str, str, dict[str, Any]] | None:
     ordered = sorted(
         candidates,
@@ -819,7 +825,7 @@ class XhsEngineAuditor:
         )
         issues = []
         severity = AuditSeverity.P4_INFO
-        if title in {"当前笔记暂时无法浏览", ""} or "暂时无法浏览" in str(title):
+        if should_flag_note_unavailable(title=title, body_text=payload.get("body_text"), api_success=api_success):
             severity = AuditSeverity.P2_MAJOR
             issues.append(
                 EngineAuditIssue(

@@ -1,7 +1,9 @@
 ﻿import asyncio
 import json
+from datetime import datetime, timezone
 
 import httpx
+import local_agent_runtime.runtime as runtime_module
 
 from local_agent_runtime.config import load_agent_runtime_config
 from local_agent_runtime.runtime import (
@@ -11,8 +13,10 @@ from local_agent_runtime.runtime import (
     JobExecutionResult,
     LocalAgentRuntime,
     RuntimeFailure,
+    XhsJobExecutor,
 )
-from local_agent_runtime.enums import ErrorCode, JobStatus, JobType
+from local_agent_runtime.contracts import FeedCandidateInput
+from local_agent_runtime.enums import ContentType, ErrorCode, FeedType, JobStatus, JobType, Platform, SourceSurface
 
 
 class FakeCenterClient:
@@ -61,6 +65,20 @@ class FakeExecutor:
         if self.failure:
             raise self.failure
         return self.result
+
+
+class FakeIngestionClient:
+    async def ingest_feed_candidates(self, payload):
+        return {
+            "results": [
+                {
+                    "platform_content_id": item.platform_content_id,
+                    "is_new_content": True,
+                    "detail_job_enqueued": item.visible_like_count is None,
+                }
+                for item in payload.candidates
+            ]
+        }
 
 
 def test_agent_config_loads_toml_account_mapping(tmp_path):
@@ -179,3 +197,49 @@ def test_center_client_http_job_lifecycle_uses_json_protocol():
     assert agent_id == "agent-http"
     assert jobs[0].job_id == "job-http"
     assert ("POST", "/api/jobs/job-http/complete", {"agent_id": "agent-http", "status": "success", "result_summary": {"ok": True}}) in events
+
+
+def test_feed_summary_counts_missing_like_detail_jobs(monkeypatch):
+    candidates = [
+        FeedCandidateInput(
+            platform=Platform.XHS,
+            platform_content_id="with-like",
+            canonical_url="https://x.test/with-like",
+            content_type=ContentType.IMAGE_TEXT,
+            title_or_summary="有点赞",
+            visible_like_count=12,
+            source_surface=SourceSurface.XHS_HOME_FEED,
+            feed_type=FeedType.XHS_HOME_FEED,
+            feed_position=1,
+            discovered_at=datetime.now(timezone.utc),
+        ),
+        FeedCandidateInput(
+            platform=Platform.XHS,
+            platform_content_id="missing-like",
+            canonical_url="https://x.test/missing-like",
+            content_type=ContentType.IMAGE_TEXT,
+            title_or_summary="待补点赞",
+            visible_like_count=None,
+            source_surface=SourceSurface.XHS_HOME_FEED,
+            feed_type=FeedType.XHS_HOME_FEED,
+            feed_position=2,
+            discovered_at=datetime.now(timezone.utc),
+        ),
+    ]
+
+    class FakeProbe:
+        def __init__(self, *, target_count):
+            self.target_count = target_count
+
+        async def collect(self, page):
+            return candidates, {"target_count": self.target_count, "actual_count": len(candidates)}
+
+    monkeypatch.setattr(runtime_module, "XhsHomeFeedProbe", FakeProbe)
+    executor = XhsJobExecutor(client=FakeIngestionClient(), config=AgentRuntimeConfig())
+    job = ClaimedJobPayload(job_id="feed-job", job_type=JobType.FEED_COLLECT.value, account_id="account-1", payload={"target_count": 2}, checkpoint={})
+
+    result = asyncio.run(executor._run_feed(job, page=object()))
+
+    assert result.result_summary["missing_visible_like_count"] == 1
+    assert result.result_summary["missing_visible_like_detail_jobs_enqueued"] == 1
+    assert result.result_summary["detail_jobs_enqueued"] == 1

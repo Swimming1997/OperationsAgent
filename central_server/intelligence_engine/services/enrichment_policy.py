@@ -24,6 +24,8 @@ def should_enqueue_detail_fetch(
         return False
     if policy == EnqueueDetailPolicy.ALL.value:
         return True
+    if candidate.source_surface in {SourceSurface.XHS_HOME_FEED, SourceSurface.SEARCH} and candidate.visible_like_count is None:
+        return True
 
     raw = candidate.raw_payload or {}
     prelim = classify_feed_prelim(

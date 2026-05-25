@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 from datetime import timedelta
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -21,6 +22,8 @@ from intelligence_engine.storage.repositories.content_repository import ContentR
 from intelligence_engine.storage.repositories.job_repository import JobRepository
 from intelligence_engine.storage.repositories.product_repository import ProductRepository
 
+
+CENTRAL_ROOT = Path(__file__).resolve().parents[1]
 
 ADMIN_HEADERS = {"X-Role": "admin", "X-User-Id": "admin-user"}
 OPERATOR_HEADERS = {"X-Role": "operator", "X-User-Id": "operator-user"}
@@ -233,11 +236,11 @@ def test_scheduler_cli_dry_run_and_run(tmp_path):
 
     env = os.environ.copy()
     env["INTEL_ENGINE_DATABASE_URL"] = database_url
-    dry = subprocess.run([sys.executable, "scripts/materialize_due_schedules.py", "--dry-run"], cwd="D:\\AMiracle\\central_server", env=env, capture_output=True, text=True, encoding="utf-8")
+    dry = subprocess.run([sys.executable, "scripts/materialize_due_schedules.py", "--dry-run"], cwd=CENTRAL_ROOT, env=env, capture_output=True, text=True, encoding="utf-8")
     assert dry.returncode == 0, dry.stderr
     assert json.loads(dry.stdout)["due_schedule_count"] == 1
 
-    run = subprocess.run([sys.executable, "scripts/materialize_due_schedules.py"], cwd="D:\\AMiracle\\central_server", env=env, capture_output=True, text=True, encoding="utf-8")
+    run = subprocess.run([sys.executable, "scripts/materialize_due_schedules.py"], cwd=CENTRAL_ROOT, env=env, capture_output=True, text=True, encoding="utf-8")
     assert run.returncode == 0, run.stderr
     assert json.loads(run.stdout)["job_count"] == 1
     engine = create_engine(database_url, connect_args={"check_same_thread": False}, future=True)

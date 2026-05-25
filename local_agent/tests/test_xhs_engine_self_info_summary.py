@@ -42,7 +42,8 @@ def test_extract_self_info_red_id_without_user_id_does_not_construct_home_url():
     summary = build_self_info_account_summary(logged_in=True, status="partial", extract=result)
     assert summary["stable_user_key"] == "1479543583"
     assert summary["stable_user_key_source"] == "red_id"
-    assert classify_self_info_severity(logged_in=True, summary=summary) == AuditSeverity.P2_MAJOR
+    assert summary["profile_url_status"] == "pending_enrichment"
+    assert classify_self_info_severity(logged_in=True, summary=summary) == AuditSeverity.P3_MINOR
 
 
 def test_extract_self_info_derives_home_url_when_api_has_user_id_only():
@@ -109,8 +110,15 @@ def test_classify_self_info_severity_rules():
         status="partial",
         fields={"nickname": "a", "red_id": "123"},
     )
-    assert classify_self_info_severity(logged_in=True, summary=incomplete) == AuditSeverity.P2_MAJOR
+    assert classify_self_info_severity(logged_in=True, summary=incomplete) == AuditSeverity.P3_MINOR
     assert classify_self_info_severity(logged_in=False, summary=incomplete) == AuditSeverity.P1_BLOCKER
+
+    missing_identity = build_self_info_account_summary(
+        logged_in=True,
+        status="partial",
+        fields={"nickname": "a"},
+    )
+    assert classify_self_info_severity(logged_in=True, summary=missing_identity) == AuditSeverity.P2_MAJOR
 
 
 def test_self_info_summary_files_include_field_sources_and_missing_reasons(tmp_path: Path):
@@ -123,7 +131,7 @@ def test_self_info_summary_files_include_field_sources_and_missing_reasons(tmp_p
         "xhs.account.self_info",
         "self_info",
         "partial",
-        severity=AuditSeverity.P2_MAJOR,
+        severity=AuditSeverity.P3_MINOR,
         items_seen=1,
         normalized_items=1,
         source_path="signed_api_selfinfo",
@@ -148,6 +156,7 @@ def test_self_info_summary_files_include_field_sources_and_missing_reasons(tmp_p
     assert summary_json["self_info"]["missing_fields"] == ["user_id", "home_url"]
     assert summary_json["self_info"]["missing_reasons"]["home_url"] == "cannot_derive_without_user_id"
     assert summary_json["self_info"]["stable_user_key_source"] == "red_id"
+    assert summary_json["self_info"]["profile_url_status"] == "pending_enrichment"
 
     for blob in (md_text, json_text, ndjson_text):
         assert "secret-cookie" not in blob
@@ -166,7 +175,7 @@ def test_format_self_info_terminal_lines():
     assert lines[0].startswith("self_info: partial, nickname=真实昵称")
     assert "stable_user_key=1479543583(red_id)" in lines[0]
     assert "missing_fields: user_id, home_url" in lines
-    assert lines[-1] == "highest_severity: P2_MAJOR"
+    assert lines[-1] == "highest_severity: P3_MINOR"
 
 
 def test_sanitize_self_info_raw_fields_strips_sensitive_keys():

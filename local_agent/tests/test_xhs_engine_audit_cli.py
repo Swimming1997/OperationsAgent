@@ -1,11 +1,15 @@
 import subprocess
 import sys
+from pathlib import Path
+
+
+LOCAL_AGENT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_cli_capabilities_runs_without_xhs_network():
     result = subprocess.run(
         [sys.executable, "scripts/xhs_engine_audit.py", "--surface", "capabilities"],
-        cwd="D:\\AMiracle\\local_agent",
+        cwd=LOCAL_AGENT_ROOT,
         capture_output=True,
         text=True,
         encoding="utf-8",

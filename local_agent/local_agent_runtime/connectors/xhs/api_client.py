@@ -316,6 +316,7 @@ def build_self_info_account_summary(
         home_url_source_value = "api"
     else:
         home_url_source_value = "missing"
+    profile_url_status = "ready" if extract.home_url else "pending_enrichment"
 
     field_sources = {
         "login_status": "self_info",
@@ -337,6 +338,7 @@ def build_self_info_account_summary(
         "stable_user_key_source": stable_user_key_source,
         "home_url": _self_info_fmt(extract.home_url),
         "home_url_source": home_url_source_value,
+        "profile_url_status": profile_url_status,
         "avatar_url": _self_info_fmt(extract.avatar_url),
         "missing_fields": missing_fields,
         "missing_reasons": missing_reasons,
@@ -361,7 +363,7 @@ def classify_self_info_severity(
     if "nickname" in missing or "red_id" in missing:
         return AuditSeverity.P2_MAJOR
     if "user_id" in missing or "home_url" in missing:
-        return AuditSeverity.P2_MAJOR
+        return AuditSeverity.P3_MINOR
     if "avatar_url" in missing:
         return AuditSeverity.P3_MINOR
     return AuditSeverity.P4_INFO

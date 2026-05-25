@@ -24,6 +24,22 @@ def test_detail_policy_candidate_only_blocks_low_signal(db_session, monkeypatch)
     assert should_enqueue_detail_fetch(candidate=candidate, is_new=True, feed_prelim_pass=False, parent_job_type=JobType.FEED_COLLECT.value) is False
 
 
+def test_detail_policy_enqueues_when_card_like_count_missing(db_session, monkeypatch):
+    monkeypatch.setenv("INTEL_ENGINE_ENQUEUE_DETAIL_POLICY", "candidate_only")
+    get_settings.cache_clear()
+    candidate = FeedCandidateInput(
+        platform=Platform.XHS,
+        platform_content_id="policy-missing-like",
+        content_type=ContentType.IMAGE_TEXT,
+        title_or_summary="普通内容",
+        visible_like_count=None,
+        source_surface=SourceSurface.XHS_HOME_FEED,
+        discovered_at=utcnow(),
+        raw_payload={},
+    )
+    assert should_enqueue_detail_fetch(candidate=candidate, is_new=True, feed_prelim_pass=False, parent_job_type=JobType.FEED_COLLECT.value) is True
+
+
 def test_detail_policy_manual_enqueue(db_session):
     candidate = FeedCandidateInput(
         platform=Platform.XHS,
