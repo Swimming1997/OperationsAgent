@@ -31,10 +31,13 @@ export async function apiRequest<T>(path: string, config: RequestConfig): Promis
 
   if (!response.ok) {
     let detail: unknown = null;
-    try {
-      detail = await response.json();
-    } catch {
-      detail = await response.text();
+    const raw = await response.text();
+    if (raw) {
+      try {
+        detail = JSON.parse(raw);
+      } catch {
+        detail = raw;
+      }
     }
     const message = response.status === 403 ? '无权限访问当前资源' : response.status === 422 ? '请求字段校验失败' : `接口请求失败 (${response.status})`;
     const error = new Error(message) as ApiError;

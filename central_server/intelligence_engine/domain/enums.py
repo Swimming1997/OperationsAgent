@@ -196,6 +196,9 @@ class XhsLocationFilter(str, Enum):
 
 
 class ReferenceLibraryType(str, Enum):
+    LEAD = "lead"
+    NON_LEAD = "non_lead"
+    UNCATEGORIZED = "uncategorized"
     BENCHMARK_WORK = "benchmark_work"
     LEAD_CASE = "lead_case"
     VISUAL_MATERIAL = "visual_material"
@@ -207,10 +210,28 @@ class ReferenceLibraryItemStatus(str, Enum):
 
 
 class ReferenceLibraryRating(str, Enum):
+    POOR = "poor"
+    MEDIUM = "medium"
+    GOOD = "good"
+    WATCHING = "watching"
     S = "S"
     A = "A"
     B = "B"
     C = "C"
+
+
+class ReferenceLibrarySelectionSource(str, Enum):
+    MANUAL = "manual"
+    AI = "ai"
+
+
+class OperationRuleType(str, Enum):
+    TITLE = "title"
+    COVER = "cover"
+    BODY = "body"
+    LEAD = "lead"
+    PLATFORM_RISK = "platform_risk"
+    PERSONA = "persona"
 
 
 class ReferenceLibraryUsageStatus(str, Enum):

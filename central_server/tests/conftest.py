@@ -12,6 +12,7 @@ from intelligence_engine.db import models  # noqa: F401
 def reset_intelligence_settings(monkeypatch):
     from intelligence_engine.config import get_settings
 
+    monkeypatch.setenv("INTEL_ENGINE_ALLOW_HEADER_AUTH", "true")
     for name in (
         "INTEL_ENGINE_ENQUEUE_DETAIL_POLICY",
         "INTEL_ENGINE_ENQUEUE_COMMENT_POLICY",

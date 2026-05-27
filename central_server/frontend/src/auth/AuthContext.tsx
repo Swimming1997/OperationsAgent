@@ -7,6 +7,7 @@ import {
   login,
   logoutApi,
   persistLogin,
+  register,
   type AuthUser,
 } from '../api/auth';
 import { isDevAuthEnabled, setDevAuthEnabled, setStoredToken } from './storage';
@@ -128,6 +129,16 @@ export function useAuth() {
 
 export async function performLogin(username: string, password: string) {
   const response = await login({ username, password });
+  return persistLogin(response);
+}
+
+export async function performRegister(payload: {
+  username: string;
+  display_name: string;
+  email?: string;
+  password: string;
+}) {
+  const response = await register(payload);
   return persistLogin(response);
 }
 

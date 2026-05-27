@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """为单个平台账号启动独立 Chrome（CDP），便于员工电脑多账号并行登录。"""
 
 from __future__ import annotations
@@ -17,16 +17,19 @@ DEFAULT_PROFILES_ROOT = PROJECT_ROOT / "profiles" / "accounts"
 def _find_chrome() -> str:
     candidates = [
         os.environ.get("CHROME_PATH"),
+        os.environ.get("BROWSER_PATH"),
         r"C:\Program Files\Google\Chrome\Application\chrome.exe",
         r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
     ]
     for item in candidates:
         if item and Path(item).is_file():
             return item
-    found = shutil.which("chrome") or shutil.which("google-chrome")
+    found = shutil.which("chrome") or shutil.which("google-chrome") or shutil.which("msedge")
     if found:
         return found
-    raise FileNotFoundError("未找到 Chrome，请设置 CHROME_PATH 环境变量")
+    raise FileNotFoundError("未找到 Chrome/Edge，请安装浏览器或设置 CHROME_PATH/BROWSER_PATH")
 
 
 def parse_args() -> argparse.Namespace:

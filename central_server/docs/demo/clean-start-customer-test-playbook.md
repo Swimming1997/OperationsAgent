@@ -1,4 +1,4 @@
-﻿# 客户测试：从零首跑手册（reset 后）
+# 客户测试：从零首跑手册（reset 后）
 
 本文按**真实操作顺序**编写，假设你已用 `reset_demo_environment.py` 把系统恢复到「空库 + 默认角色」状态。
 
@@ -30,13 +30,21 @@
 
 在项目根目录 **双击 `central_server\scripts\start.ps1`**（或 `recentral_server\scripts\start.ps1` 先停后启）。
 
-将自动启动：
+将自动启动（仅中央服务）：
 
 | 服务 | 地址 |
 |------|------|
 | 前端 Vite | http://127.0.0.1:5173 |
 | 后端 FastAPI | http://127.0.0.1:8000 |
-| Chrome CDP（采集用） | http://127.0.0.1:9222 |
+
+> 注意：`central_server\scripts\start.ps1` **不会启动 Chrome/CDP**。  
+> 采集用 CDP 端口（如 `http://127.0.0.1:9222`）需按本文第 4 节单独启动浏览器实例。
+
+CDP 快速自检（可选）：
+
+```powershell
+Invoke-WebRequest http://127.0.0.1:9222/json/version -UseBasicParsing
+```
 
 进程 PID 记录在 `logs/runtime/*.pid`，供 `分别运行 local_agent\scripts\stop.ps1 和 central_server\scripts\stop.ps1` 可靠结束进程。
 
@@ -50,7 +58,7 @@
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\stop.ps1
 ```
 
-停止后会校验 **8000 / 5173**（及 9222）是否已释放。
+停止后会校验 **8000 / 5173** 是否已释放；若你单独启动了 Chrome/CDP，再额外检查 9222（或对应端口）。
 
 ### 1.3 一键重启
 
@@ -225,6 +233,19 @@ supported_job_types = ["feed_collect", "creator_monitor", "detail_fetch", "comme
 cd D:\AMiracle
 .\.venv\Scripts\python.exe scripts\run_local_agent.py --config configs\local_agent.toml
 ```
+
+**同一台电脑多台 Agent**（每个进程一个 bridge 端口）：
+
+- 一键 `cd local_agent; .\scripts\start.ps1`（或根目录 `start-local-agent.ps1`）会读配置里的首选端口（默认 `18765`）。
+- **若该端口已被占用**，启动脚本会自动尝试 `18766、18767…`（最多 10 个，与前端扫描范围一致），并在控制台打印 `bridge port 18765 in use, using 18766`。
+- 多台设备请使用**不同配置文件**（`device_name`、`machine_fingerprint` 不要相同），可多次双击启动脚本，无需手写 `--bridge-port`。
+
+```powershell
+# 也可手动指定首选端口（仍会在被占用时自动递增）
+.\.venv\Scripts\python.exe scripts\run_local_agent.py --config configs\local_agent_2.toml --bridge-port 18765
+```
+
+中央账号管理页「登记本地 Agent」会扫描 `18765–18774`（或前端 `VITE_LOCAL_BRIDGE_PORTS`），一次登记多台。
 
 成功日志特征（`logs/local_agent/local_agent.log`）：
 

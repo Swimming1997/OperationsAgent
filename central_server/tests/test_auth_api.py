@@ -95,6 +95,43 @@ def test_create_user_plaintext_password_hashed(db_session):
     assert login.status_code == 200
 
 
+def test_register_creates_operator_user_and_allows_login(db_session):
+    client = _client(db_session)
+    blocked_before_admin = client.post(
+        "/api/auth/register",
+        json={"username": "operator0", "display_name": "运营零号", "password": "OperatorPass123!"},
+    )
+    assert blocked_before_admin.status_code == 409
+
+    bootstrap = client.post(
+        "/api/auth/bootstrap-admin",
+        json={"username": "admin", "display_name": "Admin", "password": "AdminPass123!"},
+    )
+    assert bootstrap.status_code == 200
+
+    registered = client.post(
+        "/api/auth/register",
+        json={
+            "username": "operator2",
+            "display_name": "运营二号",
+            "email": "operator2@demo.local",
+            "password": "OperatorPass123!",
+        },
+    )
+    assert registered.status_code == 200, registered.text
+    assert registered.json()["access_token"]
+    assert registered.json()["user"]["roles"] == ["operator"]
+
+    duplicate = client.post(
+        "/api/auth/register",
+        json={"username": "operator2", "display_name": "重复账号", "password": "OperatorPass123!"},
+    )
+    assert duplicate.status_code == 409
+
+    login = client.post("/api/auth/login", json={"username": "operator2", "password": "OperatorPass123!"})
+    assert login.status_code == 200
+
+
 def test_employee_with_user_and_org_permissions(db_session):
     client = _client(db_session)
     bootstrap = client.post(
@@ -131,3 +168,43 @@ def test_password_hash_helpers():
     hashed = hash_password("secret")
     assert verify_password("secret", hashed)
     assert not verify_password("wrong", hashed)
+
+
+def test_header_role_auth_can_be_disabled_in_production_config(db_session, monkeypatch):
+    monkeypatch.setenv("INTEL_ENGINE_ALLOW_HEADER_AUTH", "false")
+    from intelligence_engine.config import get_settings
+
+    get_settings.cache_clear()
+    client = _client(db_session)
+    response = client.get("/api/users", headers={"X-Role": "admin", "X-User-Id": "admin-user"})
+    assert response.status_code == 401
+
+
+def test_change_password_requires_current_password_and_allows_relogin(db_session):
+    client = _client(db_session)
+    bootstrap = client.post(
+        "/api/auth/bootstrap-admin",
+        json={"username": "admin", "display_name": "Admin", "password": "AdminPass123!"},
+    )
+    token = bootstrap.json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    wrong_current = client.post(
+        "/api/auth/change-password",
+        headers=headers,
+        json={"current_password": "wrong", "new_password": "AdminPass456!"},
+    )
+    assert wrong_current.status_code == 401
+
+    changed = client.post(
+        "/api/auth/change-password",
+        headers=headers,
+        json={"current_password": "AdminPass123!", "new_password": "AdminPass456!"},
+    )
+    assert changed.status_code == 200, changed.text
+
+    old_login = client.post("/api/auth/login", json={"username": "admin", "password": "AdminPass123!"})
+    assert old_login.status_code == 401
+
+    new_login = client.post("/api/auth/login", json={"username": "admin", "password": "AdminPass456!"})
+    assert new_login.status_code == 200

@@ -1,4 +1,4 @@
-﻿from datetime import datetime
+from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -57,7 +57,6 @@ class AccountCreateRequest(ApiModel):
     external_account_id: str | None = None
     business_account_type: str | None = None
     business_account_type_id: str | None = None
-    default_agent_id: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

@@ -1,9 +1,9 @@
-﻿from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from intelligence_engine.db.models import Job, JobEvent, utcnow
+from intelligence_engine.db.models import AccountSession, Job, JobEvent, LocalAgent, PlatformAccount, utcnow
 from intelligence_engine.domain.enums import JobStatus, JobType
 from intelligence_engine.jobs.state_machine import assert_transition
 
@@ -179,8 +179,44 @@ class JobRepository:
         self.db.flush()
         return failed
 
+    def _agent_has_active_work(self, agent_id: str) -> bool:
+        active = self.db.scalar(
+            select(Job.id)
+            .where(Job.claimed_by_agent_id == agent_id)
+            .where(Job.status.in_([JobStatus.CLAIMED.value, JobStatus.RUNNING.value]))
+            .limit(1)
+        )
+        return bool(active)
+
+    def _agent_can_run_job(self, *, agent_id: str, job: Job) -> bool:
+        if job.local_agent_id and job.local_agent_id != agent_id:
+            return False
+        if self._agent_has_active_work(agent_id):
+            return False
+        agent = self.db.get(LocalAgent, agent_id)
+        if not agent or agent.status == "retired":
+            return False
+        if not job.account_id:
+            return True
+        account = self.db.get(PlatformAccount, job.account_id)
+        if not account:
+            return False
+        if account.employee_id and agent.employee_id != account.employee_id:
+            return False
+        ready_session = self.db.scalar(
+            select(AccountSession.id).where(
+                AccountSession.account_id == job.account_id,
+                AccountSession.local_agent_id == agent_id,
+                AccountSession.status == "ready",
+            )
+        )
+        return bool(ready_session)
+
     def claim_jobs_for_agent(self, *, agent_id: str, supported_job_types: list[JobType], max_jobs: int, ttl_seconds: int) -> list[Job]:
         self.requeue_expired_claims()
+        agent = self.db.get(LocalAgent, agent_id)
+        if not agent or agent.status == "retired":
+            return []
         now = utcnow()
         expires_at = now + timedelta(seconds=ttl_seconds)
         supported = [enum_value(job_type) for job_type in supported_job_types] or [job_type.value for job_type in JobType]
@@ -188,14 +224,20 @@ class JobRepository:
             select(Job)
             .where(Job.status == JobStatus.PENDING.value)
             .where(Job.job_type.in_(supported))
-            .where(or_(Job.local_agent_id.is_(None), Job.local_agent_id == agent_id))
             .order_by(Job.priority.asc(), Job.created_at.asc())
-            .limit(max_jobs)
+            .limit(max_jobs * 5)
         )
-        jobs = list(self.db.scalars(stmt))
+        candidates = list(self.db.scalars(stmt))
+        jobs: list[Job] = []
+        for item in candidates:
+            if len(jobs) >= max_jobs:
+                break
+            if self._agent_can_run_job(agent_id=agent_id, job=item):
+                jobs.append(item)
         for job in jobs:
             assert_transition(job.status, JobStatus.CLAIMED)
             job.status = JobStatus.CLAIMED.value
+            job.local_agent_id = agent_id
             job.claimed_by_agent_id = agent_id
             job.claimed_at = now
             job.claim_expires_at = expires_at

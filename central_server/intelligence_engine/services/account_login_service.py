@@ -11,6 +11,8 @@ from intelligence_engine.domain.enums import AuthStatus, LoginSessionStatus, Ses
 from intelligence_engine.services.agent_presence import is_agent_live
 from intelligence_engine.services.agent_selection import agent_supports_account_login
 
+FRESH_PROFILE_MARKER = "__fresh_profile__"
+
 
 LOGIN_SESSION_TTL_MINUTES = 15
 CDP_PORT_BASE = 9300
@@ -107,8 +109,6 @@ class AccountLoginService:
         candidate_ids: list[str] = []
         if preferred_agent_id:
             candidate_ids.append(preferred_agent_id)
-        if account.default_agent_id and account.default_agent_id not in candidate_ids:
-            candidate_ids.append(account.default_agent_id)
         agents: list[LocalAgent] = []
         for agent_id in candidate_ids:
             agent = self.db.get(LocalAgent, agent_id)
@@ -153,6 +153,14 @@ class AccountLoginService:
         self.db.flush()
         return account
 
+    def _validate_preferred_agent(self, account: PlatformAccount, agent_id: str) -> LocalAgent:
+        agent = self.db.get(LocalAgent, agent_id)
+        if not agent or agent.status == "retired":
+            raise ValueError(f"agent not found or retired: {agent_id}")
+        if account.employee_id and agent.employee_id and agent.employee_id != account.employee_id:
+            raise ValueError("preferred agent does not belong to account employee")
+        return agent
+
     def start_login(
         self,
         account: PlatformAccount,
@@ -162,21 +170,23 @@ class AccountLoginService:
     ) -> AccountLoginSession:
         if force:
             self.reset_login_state(account, reason="re-login requested")
+            account.login_cdp_port = None
         self.expire_stale_sessions()
         active = self.get_active_session(account.id)
         if active:
             if active.status == LoginSessionStatus.WAITING_AGENT.value and not active.claimed_by_agent_id:
-                replacement = self.resolve_login_agent(account)
+                replacement = self.resolve_login_agent(account, preferred_agent_id=preferred_agent_id)
                 if replacement and active.agent_id != replacement.id and is_agent_online(replacement):
                     active.agent_id = replacement.id
                     self.db.flush()
             return active
 
         profile_key = self.ensure_account_profile_key(account)
-        agent_id = preferred_agent_id or account.default_agent_id
-        agent = self.db.get(LocalAgent, agent_id) if agent_id else None
-        if not agent or agent.status == "retired":
-            agent = self.resolve_login_agent(account, preferred_agent_id=preferred_agent_id)
+        if preferred_agent_id:
+            agent = self._validate_preferred_agent(account, preferred_agent_id)
+            agent_id = agent.id
+        else:
+            agent = self.resolve_login_agent(account)
             agent_id = agent.id if agent else None
         cdp_port = self.allocate_cdp_port(account)
         now = utcnow()
@@ -191,6 +201,7 @@ class AccountLoginService:
             status=initial_status,
             profile_key=profile_key,
             cdp_port=cdp_port,
+            error_message=FRESH_PROFILE_MARKER if force else None,
             started_at=now,
             expires_at=now + timedelta(minutes=LOGIN_SESSION_TTL_MINUTES),
         )
@@ -200,11 +211,7 @@ class AccountLoginService:
         return session
 
     def reroute_waiting_sessions_for_account(self, account: PlatformAccount, *, agent_id: str | None) -> int:
-        """Point unclaimed waiting sessions at the account's current default agent."""
         if not agent_id:
-            return 0
-        target = self.db.get(LocalAgent, agent_id)
-        if not target or not is_agent_online(target):
             return 0
         sessions = list(
             self.db.scalars(
@@ -223,6 +230,11 @@ class AccountLoginService:
             self.db.flush()
         return count
 
+    def _agent_serves_account(self, account: PlatformAccount, agent: LocalAgent) -> bool:
+        if not account.employee_id:
+            return True
+        return account.employee_id == agent.employee_id
+
     def _session_claimable_by_agent(
         self,
         session: AccountLoginSession,
@@ -233,13 +245,13 @@ class AccountLoginService:
             return False
         if session.status not in (LoginSessionStatus.CREATED.value, LoginSessionStatus.WAITING_AGENT.value):
             return False
-        if session.agent_id == agent.id or account.default_agent_id == agent.id:
+        if session.agent_id == agent.id:
             return True
-        if session.agent_id is None and account.employee_id and account.employee_id == agent.employee_id:
+        if session.agent_id is None and self._agent_serves_account(account, agent):
             return is_agent_online(agent) and agent_supports_account_login(agent)
         if session.status != LoginSessionStatus.WAITING_AGENT.value:
             return False
-        if not account.employee_id or account.employee_id != agent.employee_id:
+        if not self._agent_serves_account(account, agent):
             return False
         if not is_agent_online(agent) or not agent_supports_account_login(agent):
             return False
@@ -282,10 +294,117 @@ class AccountLoginService:
 
     def update_progress(self, session: AccountLoginSession, status: LoginSessionStatus, *, error_message: str | None = None) -> AccountLoginSession:
         session.status = status.value
-        if error_message:
+        if session.error_message == FRESH_PROFILE_MARKER:
+            session.error_message = error_message
+        elif error_message:
             session.error_message = error_message
         self.db.flush()
         return session
+
+    def sync_local_bridge_login(
+        self,
+        account: PlatformAccount,
+        *,
+        preferred_agent_id: str | None = None,
+        login_cdp_port: int | None = None,
+        platform_nickname: str | None = None,
+        platform_home_url: str | None = None,
+        bridge_status: str = "ready",
+    ) -> PlatformAccount:
+        """将本机 bridge 校验结果回写到中央账号登录态。"""
+        bridge_value = (bridge_status or "").lower()
+        if bridge_value not in {
+            SessionStatus.READY.value,
+            SessionStatus.EXPIRED.value,
+            SessionStatus.MANUAL_VERIFY_REQUIRED.value,
+            SessionStatus.UNAVAILABLE.value,
+        }:
+            raise ValueError(f"invalid bridge status: {bridge_status}")
+        self.expire_stale_sessions()
+        now = utcnow()
+        active_sessions = list(
+            self.db.scalars(
+                select(AccountLoginSession).where(
+                    AccountLoginSession.platform_account_id == account.id,
+                    AccountLoginSession.status.in_(ACTIVE_LOGIN_STATUSES),
+                )
+            )
+        )
+        for session in active_sessions:
+            if bridge_value == SessionStatus.READY.value:
+                session.status = LoginSessionStatus.LOGGED_IN.value
+                session.error_message = None
+            elif bridge_value == SessionStatus.MANUAL_VERIFY_REQUIRED.value:
+                session.status = LoginSessionStatus.WAITING_USER_LOGIN.value
+                session.error_message = "manual verification required"
+            else:
+                session.status = LoginSessionStatus.FAILED.value
+                session.error_message = "local bridge indicates login required"
+            session.finished_at = now if session.status in {LoginSessionStatus.LOGGED_IN.value, LoginSessionStatus.FAILED.value} else None
+        profile_key = self.ensure_account_profile_key(account)
+        if login_cdp_port:
+            account.login_cdp_port = login_cdp_port
+        elif not account.login_cdp_port:
+            login_cdp_port = self.allocate_cdp_port(account)
+        else:
+            login_cdp_port = account.login_cdp_port
+        if bridge_value == SessionStatus.READY.value:
+            account.auth_status = AuthStatus.ACTIVE.value
+            account.last_verified_at = now
+        elif bridge_value == SessionStatus.MANUAL_VERIFY_REQUIRED.value:
+            account.auth_status = AuthStatus.LOGIN_PENDING.value
+            account.last_verified_at = None
+        elif bridge_value == SessionStatus.EXPIRED.value:
+            account.auth_status = AuthStatus.EXPIRED.value
+            account.last_verified_at = None
+        else:
+            account.auth_status = AuthStatus.NOT_LOGGED_IN.value
+            account.last_verified_at = None
+        if platform_nickname:
+            account.platform_nickname = platform_nickname
+        if platform_home_url:
+            account.platform_home_url = platform_home_url
+        agent: LocalAgent | None = None
+        if preferred_agent_id:
+            try:
+                agent = self._validate_preferred_agent(account, preferred_agent_id)
+            except ValueError:
+                agent = None
+        if not agent:
+            agent = self.resolve_login_agent(account)
+        agent_id = agent.id if agent else None
+        if agent_id:
+            session_meta = {
+                "cdp_url": f"http://127.0.0.1:{login_cdp_port}" if login_cdp_port else None,
+                "profile_key": profile_key,
+                "source": "local_bridge_sync",
+            }
+            existing = self.db.scalar(
+                select(AccountSession)
+                .where(AccountSession.account_id == account.id)
+                .where(AccountSession.local_agent_id == agent_id)
+                .where(AccountSession.session_type == "managed_chrome")
+            )
+            if existing:
+                existing.profile_ref = profile_key
+                existing.status = bridge_value
+                existing.session_meta_json = {**(existing.session_meta_json or {}), **{k: v for k, v in session_meta.items() if v}}
+                existing.last_validated_at = now
+            else:
+                self.db.add(
+                    AccountSession(
+                        account_id=account.id,
+                        local_agent_id=agent_id,
+                        platform=account.platform,
+                        session_type="managed_chrome",
+                        profile_ref=profile_key,
+                        status=bridge_value,
+                        session_meta_json=session_meta,
+                        last_validated_at=now,
+                    )
+                )
+        self.db.flush()
+        return account
 
     def complete_login(
         self,

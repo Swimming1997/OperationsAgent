@@ -9,7 +9,7 @@ from local_agent_runtime.connectors.xhs.normalizer import (
     parse_visible_count,
 )
 from local_agent_runtime.enums import ContentType, SessionStatus
-from local_agent_runtime.sessions.xhs_browser_session import evaluate_xhs_session_state
+from local_agent_runtime.sessions.xhs_browser_session import evaluate_xhs_selfinfo_payload, evaluate_xhs_session_state
 
 
 def test_xhs_normalizer_extracts_card_fields_from_fixture():
@@ -54,6 +54,30 @@ def test_xhs_session_state_branches():
     assert ready[0] == SessionStatus.READY
     assert need_login[0] == SessionStatus.EXPIRED
     assert manual_verify[0] == SessionStatus.MANUAL_VERIFY_REQUIRED
+
+
+def test_xhs_session_state_ready_even_if_login_word_present():
+    # 已登录页面中可能出现“登录”字样，不应直接判定过期。
+    ready = evaluate_xhs_session_state(
+        url="https://www.xiaohongshu.com/user/profile/abc",
+        visible_text="个人主页 首页 发现 关注 消息 登录查看更多内容",
+    )
+    assert ready[0] == SessionStatus.READY
+
+
+def test_xhs_session_state_guest_navigation_not_treated_as_ready():
+    guest = evaluate_xhs_session_state(
+        url="https://www.xiaohongshu.com/explore",
+        visible_text="首页 发现 关注 发布 消息 登录查看更多内容",
+    )
+    assert guest[0] == SessionStatus.EXPIRED
+
+
+def test_xhs_selfinfo_payload_detects_ready_and_expired():
+    ready = evaluate_xhs_selfinfo_payload({"success": True, "data": {"basic_info": {"nickname": "demo"}}})
+    expired = evaluate_xhs_selfinfo_payload({"success": False, "msg": "未登录"})
+    assert ready[0] == SessionStatus.READY
+    assert expired[0] == SessionStatus.EXPIRED
 
 
 def test_xhs_helpers_parse_ids_and_counts():

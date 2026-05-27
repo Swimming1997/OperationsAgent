@@ -1,10 +1,10 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import logging
 import socket
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
 import httpx
@@ -39,6 +39,10 @@ class AgentRuntimeConfig:
     poll_interval_seconds: float = 5.0
     heartbeat_interval_seconds: float = 30.0
     max_jobs_per_claim: int = 1
+    local_bridge_enabled: bool = True
+    local_bridge_host: str = "127.0.0.1"
+    local_bridge_port: int = 18765
+    local_bridge_token: str | None = None
     supports_account_login: bool = True
     supported_job_types: tuple[str, ...] = (
         JobType.FEED_COLLECT.value,
@@ -91,6 +95,7 @@ class ClaimedLoginSessionPayload:
     platform_account_id: str
     profile_key: str
     cdp_port: int
+    fresh_profile: bool = False
 
 
 class CenterClientProtocol(Protocol):
@@ -181,6 +186,7 @@ class CenterClient:
                 platform_account_id=item["platform_account_id"],
                 profile_key=item["profile_key"],
                 cdp_port=int(item["cdp_port"]),
+                fresh_profile=bool(item.get("fresh_profile")),
             )
             for item in response.json().get("sessions", [])
             if item.get("cdp_port")
@@ -586,6 +592,7 @@ class LocalAgentRuntime:
     async def ensure_registered(self) -> str:
         if not self._registered_this_process:
             self.agent_id = await self.client.register_agent(self.config)
+            self.config = replace(self.config, agent_id=self.agent_id)
             self._registered_this_process = True
         return self.agent_id
 
@@ -628,6 +635,7 @@ class LocalAgentRuntime:
                     platform_account_id=session.platform_account_id,
                     profile_key=session.profile_key,
                     cdp_port=session.cdp_port,
+                    fresh_profile=session.fresh_profile,
                 ),
             )
         return len(sessions)

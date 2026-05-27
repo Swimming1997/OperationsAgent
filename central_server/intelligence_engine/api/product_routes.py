@@ -1,10 +1,12 @@
 ﻿from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from intelligence_engine.db.models import (
+    AccountAgentBinding,
+    AccountSession,
     BenchmarkGroup,
     BusinessAccountType,
     Employee,
@@ -16,7 +18,9 @@ from intelligence_engine.db.models import (
     KeywordRule,
     LocalAgent,
     Job,
+    OperationRule,
     PlatformAccount,
+    RuleProfile,
     TaskRun,
     TaskTemplate,
     User,
@@ -31,9 +35,16 @@ from intelligence_engine.domain.enums import (
     JobStatus,
     JobType,
     Platform,
+    OperationRuleType,
     UserRoleName,
 )
 from intelligence_engine.domain.product_schemas import (
+    AccountAgentBindingCreateRequest,
+    AccountAgentBindingRead,
+    AccountAgentBindingRebindRequest,
+    RegisterLocalAgentsRequest,
+    ResolveDiscoveredAgentsRequest,
+    ResolvedDiscoverMatch,
     AssignmentHistoryItem,
     BehaviorProfileCreateRequest,
     BehaviorProfileRead,
@@ -81,6 +92,9 @@ from intelligence_engine.domain.product_schemas import (
     LocalAgentRead,
     LocalAgentUpdateRequest,
     ManualTagsUpdateRequest,
+    OperationRuleCreateRequest,
+    OperationRuleRead,
+    OperationRuleUpdateRequest,
     NetworkEgressProfileCreateRequest,
     NetworkEgressProfileRead,
     PlatformAccountRead,
@@ -89,13 +103,22 @@ from intelligence_engine.domain.product_schemas import (
     ProductOptions,
     RecommendationFeedTaskTemplateCreate,
     RecommendationFeedTaskTemplateUpdate,
+    ReferenceLibraryBulkCreateFailure,
+    ReferenceLibraryBulkCreateRequest,
+    ReferenceLibraryBulkCreateResponse,
+    ReferenceLibraryEventRead,
     ReferenceLibraryItemCreateRequest,
     ReferenceLibraryItemList,
     ReferenceLibraryItemRead,
+    ReferenceLibraryReevaluateRequest,
+    ReferenceLibraryReevaluateResponse,
+    ReferenceLibraryReevaluateResult,
     ReferenceLibraryItemUpdateRequest,
     RiskPolicyCreateRequest,
     RiskPolicyRead,
     RoleRead,
+    RuleProfileRead,
+    RuleProfileUpdateRequest,
     TaskRunCreatedJob,
     TaskRunJobRead,
     TaskRunListResponse,
@@ -129,10 +152,12 @@ from intelligence_engine.storage.repositories.job_repository import JobRepositor
 from intelligence_engine.storage.repositories.product_repository import ProductRepository
 from intelligence_engine.services.job_queue_diagnostics import build_task_run_queue_context
 from intelligence_engine.services.task_materialization import TaskMaterializationService
+from intelligence_engine.services.benchmark_selection import BenchmarkSelectionService, SelectionActor
+from intelligence_engine.services.rule_profile import RuleProfileService
+from intelligence_engine.storage.repositories.operation_rule_repository import OperationRuleRepository
 from intelligence_engine.storage.repositories.workflow_repository import WorkflowRepository
 from intelligence_engine.domain.enums import ContentWorkflowStatus, CandidateBucket, SourceSurface, TaskRunTriggerType
 from intelligence_engine.api.account_access import (
-    attach_agent_to_employee,
     ensure_account_readable,
     ensure_account_writable,
     ensure_agent_readable,
@@ -142,6 +167,12 @@ from intelligence_engine.api.account_access import (
 from intelligence_engine.services.agent_presence import effective_agent_status, sync_agent_presence
 from intelligence_engine.security.auth import Principal, get_optional_principal, require_any_role
 from intelligence_engine.services.account_login_service import AccountLoginService
+from intelligence_engine.services.employee_agent_pool import (
+    AgentEmployeeConflictError,
+    account_session_health_for_employee_pool,
+    register_agents_to_employee,
+    resolve_discovered_agents,
+)
 from intelligence_engine.security.passwords import hash_password
 
 router = APIRouter(prefix="/api")
@@ -179,14 +210,11 @@ def _business_type(db: Session, business_account_type_id: str | None) -> Busines
     return db.get(BusinessAccountType, business_account_type_id) if business_account_type_id else None
 
 
-def _agent(db: Session, agent_id: str | None) -> LocalAgent | None:
-    return db.get(LocalAgent, agent_id) if agent_id else None
-
-
 def _account_read(db: Session, repo: ProductRepository, account: PlatformAccount) -> PlatformAccountRead:
     business_type = _business_type(db, account.business_account_type_id)
-    agent = _agent(db, account.default_agent_id)
     active_login = AccountLoginService(db).get_active_session(account.id)
+    session_health_status = account_session_health_for_employee_pool(db, account) or repo.latest_session_status(account.id)
+    active_login_session_status = active_login.status if active_login else None
     return PlatformAccountRead(
         id=account.id,
         employee_id=account.employee_id,
@@ -206,15 +234,91 @@ def _account_read(db: Session, repo: ProductRepository, account: PlatformAccount
         platform_home_url=getattr(account, "platform_home_url", None),
         last_verified_at=getattr(account, "last_verified_at", None),
         login_cdp_port=getattr(account, "login_cdp_port", None),
-        default_agent_id=account.default_agent_id,
-        default_agent_device_name=agent.device_name if agent else None,
-        session_health_status=repo.latest_session_status(account.id),
-        active_login_session_status=active_login.status if active_login else None,
+        bindings=[],
+        session_health_status=session_health_status,
+        active_login_session_status=active_login_session_status,
+        usage_status=_derive_account_usage_status(
+            status=account.status,
+            auth_status=getattr(account, "auth_status", None) or "not_logged_in",
+            session_health_status=session_health_status,
+            active_login_session_status=active_login_session_status,
+        ),
         last_success_at=account.last_success_at,
         last_failure_at=account.last_failure_at,
         consecutive_failures=account.consecutive_failures,
         metadata=account.metadata_json or {},
     )
+
+
+def _account_binding_reads(db: Session, account_id: str) -> list[AccountAgentBindingRead]:
+    rows = list(
+        db.scalars(
+            select(AccountAgentBinding)
+            .where(AccountAgentBinding.account_id == account_id)
+            .where(AccountAgentBinding.enabled.is_(True))
+            .order_by(AccountAgentBinding.updated_at.desc())
+        )
+    )
+    result: list[AccountAgentBindingRead] = []
+    for row in rows:
+        agent = db.get(LocalAgent, row.agent_id)
+        session_status = db.scalar(
+            select(AccountSession.status)
+            .where(AccountSession.account_id == account_id, AccountSession.local_agent_id == row.agent_id)
+            .order_by(AccountSession.last_validated_at.desc().nullslast(), AccountSession.created_at.desc())
+            .limit(1)
+        )
+        result.append(
+            AccountAgentBindingRead(
+                id=row.id,
+                account_id=row.account_id,
+                agent_id=row.agent_id,
+                employee_id=row.employee_id,
+                agent_device_name=agent.device_name if agent else None,
+                agent_status=effective_agent_status(agent) if agent else None,
+                enabled=row.enabled,
+                session_status=session_status,
+                last_claimed_at=row.last_claimed_at,
+            )
+        )
+    return result
+
+
+def _best_binding_session_status(bindings: list[AccountAgentBindingRead]) -> str | None:
+    statuses = [item.session_status for item in bindings if item.session_status]
+    if not statuses:
+        return None
+    if "ready" in statuses:
+        return "ready"
+    if "manual_verify_required" in statuses:
+        return "manual_verify_required"
+    if "expired" in statuses:
+        return "expired"
+    return statuses[0]
+
+
+def _derive_account_usage_status(
+    *,
+    status: str,
+    auth_status: str,
+    session_health_status: str | None,
+    active_login_session_status: str | None,
+) -> str:
+    status_value = (status or "").lower()
+    auth_value = (auth_status or "").lower()
+    session_value = (session_health_status or "").lower()
+    login_value = (active_login_session_status or "").lower()
+    if status_value in {"disabled", "paused"}:
+        return "unavailable"
+    if "manual_verify" in session_value or login_value == "waiting_user_login":
+        return "need_verify"
+    if auth_value in {"not_logged_in", "expired", "error", "login_pending"}:
+        return "need_login"
+    if session_value and session_value != "ready":
+        return "unavailable"
+    if auth_value == "active":
+        return "ready"
+    return "unavailable"
 
 
 def _task_template_read(service: TaskMaterializationService, template: TaskTemplate) -> TaskTemplateRead:
@@ -392,6 +496,49 @@ def _ensure_content(content_id: str, db: Session) -> ContentIdentity:
     return content
 
 
+def _rule_profile_read(profile) -> RuleProfileRead:
+    return RuleProfileRead(
+        id=profile.id,
+        name=profile.name,
+        platform=profile.platform,
+        library_type=profile.library_type,
+        version=profile.version,
+        enabled=profile.enabled,
+        config=profile.config_json or {},
+        created_by_user_id=profile.created_by_user_id,
+        created_at=profile.created_at,
+        updated_at=profile.updated_at,
+    )
+
+
+def _operation_rule_read(rule: OperationRule) -> OperationRuleRead:
+    return OperationRuleRead(
+        id=rule.id,
+        rule_type=rule.rule_type,
+        title=rule.title,
+        content=rule.content,
+        platform=rule.platform,
+        enabled=rule.enabled,
+        version=rule.version,
+        created_by_user_id=rule.created_by_user_id,
+        created_at=rule.created_at,
+        updated_at=rule.updated_at,
+    )
+
+
+def _reference_library_event_read(event) -> ReferenceLibraryEventRead:
+    return ReferenceLibraryEventRead(
+        id=event.id,
+        library_item_id=event.library_item_id,
+        content_id=event.content_id,
+        event_type=event.event_type,
+        user_id=event.user_id,
+        employee_id=event.employee_id,
+        event_payload=event.event_payload_json or {},
+        created_at=event.created_at,
+    )
+
+
 @router.post("/product/bootstrap-default-roles", response_model=list[RoleRead])
 def bootstrap_default_roles(db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
     repo = ProductRepository(db)
@@ -518,6 +665,59 @@ def update_employee(
     db.flush()
     db.commit()
     return _employee_list_item(repo, employee, repo.employee_account_counts(), repo.employee_agent_counts())
+
+
+@router.post("/product/me/local-agents/resolve-discover", response_model=list[ResolvedDiscoverMatch])
+def resolve_my_discovered_local_agents(
+    request: ResolveDiscoveredAgentsRequest,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(UserRoleName.OPERATOR, UserRoleName.ADMIN, UserRoleName.SUPERVISOR)),
+):
+    if not request.items:
+        raise HTTPException(status_code=400, detail="items required")
+    pairs = resolve_discovered_agents(
+        db,
+        [item.model_dump() for item in request.items],
+    )
+    db.commit()
+    return [
+        ResolvedDiscoverMatch(agent=_local_agent_read(db, agent), bridge_port=bridge_port)
+        for agent, bridge_port in pairs
+    ]
+
+
+@router.post("/product/me/local-agents/register", response_model=list[LocalAgentRead])
+def register_my_local_agents(
+    request: RegisterLocalAgentsRequest,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(UserRoleName.OPERATOR, UserRoleName.ADMIN, UserRoleName.SUPERVISOR)),
+):
+    employee_id = get_principal_employee_id(db, principal)
+    if not employee_id:
+        raise HTTPException(status_code=403, detail="operator has no employee profile")
+    if not request.agent_ids:
+        raise HTTPException(status_code=400, detail="agent_ids required")
+    try:
+        agents = register_agents_to_employee(
+            db,
+            agent_ids=request.agent_ids,
+            employee_id=employee_id,
+            force=request.force,
+        )
+    except AgentEmployeeConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "agent_bound_conflict",
+                "agent_id": exc.agent_id,
+                "bound_employee_id": exc.bound_employee_id,
+                "message": "agent already bound to another employee",
+            },
+        ) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    db.commit()
+    return _list_local_agent_reads(db, agents)
 
 
 @router.get("/local-agents", response_model=list[LocalAgentRead])
@@ -658,12 +858,10 @@ def create_product_account(
         external_account_id=request.external_account_id,
         business_account_type=request.business_account_type,
         business_account_type_id=request.business_account_type_id,
-        default_agent_id=request.default_agent_id,
         account_role=request.account_role,
         health_status=request.health_status,
         metadata=request.metadata,
     )
-    attach_agent_to_employee(db, agent_id=request.default_agent_id, employee_id=employee_id)
     db.commit()
     return _account_read(db, repo, account)
 
@@ -696,13 +894,109 @@ def update_product_account(
     repo = ProductRepository(db)
     payload = request.model_dump(exclude_unset=True)
     updated = repo.update_account(account, **payload)
-    if "default_agent_id" in payload:
-        attach_agent_to_employee(db, agent_id=updated.default_agent_id, employee_id=updated.employee_id)
-        from intelligence_engine.services.account_login_service import AccountLoginService
-
-        AccountLoginService(db).reroute_waiting_sessions_for_account(updated, agent_id=updated.default_agent_id)
     db.commit()
     return _account_read(db, repo, updated)
+
+
+@router.get("/product/accounts/{account_id}/agent-bindings", response_model=list[AccountAgentBindingRead])
+def list_account_agent_bindings(
+    account_id: str,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+):
+    account = db.get(PlatformAccount, account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="account not found")
+    ensure_account_readable(db, principal, account)
+    return _account_binding_reads(db, account_id)
+
+
+@router.post("/product/accounts/{account_id}/agent-bindings", response_model=list[AccountAgentBindingRead])
+def create_account_agent_bindings(
+    account_id: str,
+    request: AccountAgentBindingCreateRequest,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+):
+    account = db.get(PlatformAccount, account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="account not found")
+    ensure_account_writable(db, principal, account)
+    scoped_employee = get_principal_employee_id(db, principal)
+    target_employee = scoped_employee or account.employee_id
+    for agent_id in request.agent_ids:
+        agent = db.get(LocalAgent, agent_id)
+        if not agent:
+            raise HTTPException(status_code=404, detail=f"agent not found: {agent_id}")
+        if agent.employee_id and target_employee and agent.employee_id != target_employee and not request.force:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "agent_bound_conflict",
+                    "agent_id": agent.id,
+                    "bound_employee_id": agent.employee_id,
+                    "message": "agent already bound to another employee",
+                },
+            )
+        if target_employee and (agent.employee_id is None or request.force):
+            agent.employee_id = target_employee
+        ProductRepository(db).ensure_account_agent_binding(
+            account_id=account_id,
+            agent_id=agent.id,
+            employee_id=agent.employee_id,
+        )
+    db.commit()
+    return _account_binding_reads(db, account_id)
+
+
+@router.post("/product/accounts/{account_id}/agent-bindings/{agent_id}/rebind", response_model=list[AccountAgentBindingRead])
+def rebind_account_agent_binding(
+    account_id: str,
+    agent_id: str,
+    request: AccountAgentBindingRebindRequest,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+):
+    account = db.get(PlatformAccount, account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="account not found")
+    ensure_account_writable(db, principal, account)
+    agent = db.get(LocalAgent, agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="agent not found")
+    scoped_employee = get_principal_employee_id(db, principal)
+    target_employee = scoped_employee or account.employee_id
+    if agent.employee_id and target_employee and agent.employee_id != target_employee and not request.force:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "agent_bound_conflict",
+                "agent_id": agent.id,
+                "bound_employee_id": agent.employee_id,
+                "message": "agent already bound to another employee",
+            },
+        )
+    if target_employee:
+        agent.employee_id = target_employee
+    ProductRepository(db).ensure_account_agent_binding(account_id=account_id, agent_id=agent.id, employee_id=agent.employee_id)
+    db.commit()
+    return _account_binding_reads(db, account_id)
+
+
+@router.delete("/product/accounts/{account_id}/agent-bindings/{agent_id}", response_model=list[AccountAgentBindingRead])
+def delete_account_agent_binding(
+    account_id: str,
+    agent_id: str,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+):
+    account = db.get(PlatformAccount, account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="account not found")
+    ensure_account_writable(db, principal, account)
+    ProductRepository(db).disable_account_agent_binding(account_id=account_id, agent_id=agent_id)
+    db.commit()
+    return _account_binding_reads(db, account_id)
 
 
 @router.post("/benchmark-groups", response_model=BenchmarkGroupRead)
@@ -1235,6 +1529,10 @@ def list_product_intelligence_contents(
     min_like_count: int | None = None,
     min_comment_count: int | None = None,
     min_collect_count: int | None = None,
+    in_reference_library: bool | None = None,
+    reference_library_type: str | None = None,
+    selection_source: str | None = None,
+    reference_rating: str | None = None,
     sort_by: str = "latest_discovered_at",
     sort_order: str = "desc",
     page: int = 1,
@@ -1266,6 +1564,10 @@ def list_product_intelligence_contents(
         min_like_count=min_like_count,
         min_comment_count=min_comment_count,
         min_collect_count=min_collect_count,
+        in_reference_library=in_reference_library,
+        reference_library_type=reference_library_type,
+        selection_source=selection_source,
+        reference_rating=reference_rating,
         sort_by=sort_by,
         sort_order=sort_order,
         pool_only=True,
@@ -1506,11 +1808,14 @@ def enqueue_intelligence_comment_fetch(content_id: str, db: Session = Depends(ge
 def create_reference_library_item(content_id: str, request: ReferenceLibraryItemCreateRequest, db: Session = Depends(get_db), principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR))):
     content = _ensure_content(content_id, db)
     snapshot = db.get(ContentSnapshot, content.latest_snapshot_id) if content.latest_snapshot_id else None
-    item = ReferenceLibraryRepository(db).create_item(
+    repo = ReferenceLibraryRepository(db)
+    item = BenchmarkSelectionService(db).manual_select(
         content_id=content_id,
         library_type=_enum_value(request.library_type),
-        created_by_user_id=request.user_id or principal.user_id,
-        created_by_employee_id=request.employee_id,
+        actor=SelectionActor(
+            user_id=request.user_id or principal.user_id,
+            employee_id=request.employee_id or get_principal_employee_id(db, principal),
+        ),
         selected_reason=request.selected_reason,
         rating=_enum_value(request.rating) if request.rating else None,
         manual_tags=request.manual_tags,
@@ -1518,23 +1823,107 @@ def create_reference_library_item(content_id: str, request: ReferenceLibraryItem
         usage_status=_enum_value(request.usage_status),
         note=request.note,
         metadata=request.metadata,
+        matched_keywords=request.matched_keywords,
+        selection_sources=request.selection_sources,
     )
     db.commit()
-    return ReferenceLibraryItemRead(**ReferenceLibraryRepository(db)._item_dict(item, content, snapshot))
+    return ReferenceLibraryItemRead(**repo._item_dict(item, content, snapshot))
 
 
 @router.get("/reference-library/items", response_model=ReferenceLibraryItemList)
 def list_reference_library_items(
     library_type: str | None = None,
+    platform: str | None = None,
+    selection_source: str | None = None,
+    rating: str | None = None,
     usage_status: str | None = None,
+    sort_by: str = "selected_at",
+    sort_order: str = "desc",
     page: int = 1,
     page_size: int = 20,
     db: Session = Depends(get_db),
     _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
 ):
-    items, total = ReferenceLibraryRepository(db).list_items(page=page, page_size=page_size, library_type=library_type, usage_status=usage_status)
+    items, total = ReferenceLibraryRepository(db).list_items(
+        page=page,
+        page_size=page_size,
+        library_type=library_type,
+        platform=platform,
+        selection_source=selection_source,
+        rating=rating,
+        usage_status=usage_status,
+        sort_by=sort_by,
+        sort_order=sort_order,
+    )
     db.commit()
     return ReferenceLibraryItemList(items=items, page=page, page_size=page_size, total=total)
+
+
+@router.post("/reference-library/items/bulk", response_model=ReferenceLibraryBulkCreateResponse)
+def bulk_create_reference_library_items(
+    request: ReferenceLibraryBulkCreateRequest,
+    atomic: bool = False,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+):
+    if len(request.items) > 50:
+        raise HTTPException(status_code=400, detail="bulk item limit exceeded")
+    if atomic and not principal.has_role(UserRoleName.ADMIN):
+        raise HTTPException(status_code=403, detail="atomic bulk requires admin")
+
+    repo = ReferenceLibraryRepository(db)
+    service = BenchmarkSelectionService(db)
+    succeeded: list[ReferenceLibraryItemRead] = []
+    failed: list[ReferenceLibraryBulkCreateFailure] = []
+    actor = SelectionActor(user_id=principal.user_id, employee_id=get_principal_employee_id(db, principal))
+
+    for entry in request.items:
+        try:
+            content = db.get(ContentIdentity, entry.content_id)
+            if not content:
+                raise ValueError("content not found")
+            snapshot = db.get(ContentSnapshot, content.latest_snapshot_id) if content.latest_snapshot_id else None
+            existing = repo.get_active_item(content_id=entry.content_id)
+            idempotency_keys = list((existing.metadata_json or {}).get("bulk_idempotency_keys") or []) if existing else []
+            if idempotency_key and existing and idempotency_key in idempotency_keys:
+                item = existing
+            else:
+                item = service.manual_select(
+                    content_id=entry.content_id,
+                    library_type=_enum_value(entry.library_type),
+                    actor=actor,
+                    selected_reason=entry.selected_reason,
+                    rating=_enum_value(entry.rating) if entry.rating else None,
+                    manual_tags=entry.manual_tags,
+                    material_tags=entry.material_tags,
+                    usage_status=_enum_value(entry.usage_status),
+                    note=entry.note,
+                    metadata=entry.metadata,
+                    matched_keywords=entry.matched_keywords,
+                    selection_sources=entry.selection_sources,
+                )
+                if idempotency_key:
+                    metadata = dict(item.metadata_json or {})
+                    keys = list(metadata.get("bulk_idempotency_keys") or [])
+                    if idempotency_key not in keys:
+                        metadata["bulk_idempotency_keys"] = [*keys, idempotency_key]
+                        item.metadata_json = metadata
+                        db.flush()
+            succeeded.append(ReferenceLibraryItemRead(**repo._item_dict(item, content, snapshot)))
+        except Exception as exc:
+            failed.append(
+                ReferenceLibraryBulkCreateFailure(
+                    content_id=entry.content_id,
+                    code="bulk_item_failed",
+                    message=str(exc),
+                )
+            )
+            if atomic:
+                db.rollback()
+                return ReferenceLibraryBulkCreateResponse(succeeded=[], failed=failed)
+    db.commit()
+    return ReferenceLibraryBulkCreateResponse(succeeded=succeeded, failed=failed)
 
 
 @router.patch("/reference-library/items/{item_id}", response_model=ReferenceLibraryItemRead)
@@ -1546,10 +1935,16 @@ def update_reference_library_item(item_id: str, request: ReferenceLibraryItemUpd
     content = db.get(ContentIdentity, item.content_id)
     snapshot = db.get(ContentSnapshot, content.latest_snapshot_id) if content and content.latest_snapshot_id else None
     updates = {}
+    if request.library_type is not None:
+        updates["library_type"] = _enum_value(request.library_type)
+    if request.selection_sources is not None:
+        updates["selection_sources_json"] = request.selection_sources
     if request.selected_reason is not None:
         updates["selected_reason"] = request.selected_reason
     if request.rating is not None:
         updates["rating"] = _enum_value(request.rating)
+    if request.matched_keywords is not None:
+        updates["matched_keywords_json"] = request.matched_keywords
     if request.manual_tags is not None:
         updates["manual_tags_json"] = request.manual_tags
     if request.material_tags is not None:
@@ -1560,13 +1955,18 @@ def update_reference_library_item(item_id: str, request: ReferenceLibraryItemUpd
         updates["note"] = request.note
     if request.metadata is not None:
         updates["metadata_json"] = request.metadata
-    item = repo.update_item(item, **updates)
+    item = repo.update_item(
+        item,
+        **updates,
+        actor_user_id=request.user_id or principal.user_id,
+        actor_employee_id=request.employee_id or get_principal_employee_id(db, principal),
+    )
     db.commit()
     return ReferenceLibraryItemRead(**repo._item_dict(item, content, snapshot))
 
 
 @router.post("/reference-library/items/{item_id}/archive", response_model=ReferenceLibraryItemRead)
-def archive_reference_library_item(item_id: str, db: Session = Depends(get_db), principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR))):
+def archive_reference_library_item(item_id: str, db: Session = Depends(get_db), principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
     repo = ReferenceLibraryRepository(db)
     item = repo.get_item(item_id)
     if not item:
@@ -1578,6 +1978,145 @@ def archive_reference_library_item(item_id: str, db: Session = Depends(get_db), 
     return ReferenceLibraryItemRead(**repo._item_dict(item, content, snapshot))
 
 
+@router.get("/reference-library/items/{item_id}/events", response_model=list[ReferenceLibraryEventRead])
+def list_reference_library_item_events(
+    item_id: str,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+):
+    repo = ReferenceLibraryRepository(db)
+    if not repo.get_item(item_id):
+        raise HTTPException(status_code=404, detail="reference library item not found")
+    limit = max(1, min(limit, 200))
+    return [_reference_library_event_read(event) for event in repo.list_events(item_id, limit=limit)]
+
+
+@router.post("/reference-library/items/re-evaluate", response_model=ReferenceLibraryReevaluateResponse)
+def re_evaluate_reference_library_items(
+    request: ReferenceLibraryReevaluateRequest,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR)),
+):
+    repo = ReferenceLibraryRepository(db)
+    content_ids = list(request.content_ids)
+    for item_id in request.item_ids:
+        item = repo.get_item(item_id)
+        if item and item.content_id not in content_ids:
+            content_ids.append(item.content_id)
+    service = BenchmarkSelectionService(db)
+    results: list[ReferenceLibraryReevaluateResult] = []
+    for content_id in content_ids[:50]:
+        try:
+            item, status, metadata = service.ai_select_by_rules(
+                content_id=content_id,
+                trigger_source=request.trigger_source,
+                actor=SelectionActor(user_id=principal.user_id, employee_id=get_principal_employee_id(db, principal)),
+            )
+        except ValueError:
+            results.append(ReferenceLibraryReevaluateResult(content_id=content_id, status="failed_not_found"))
+            continue
+        results.append(
+            ReferenceLibraryReevaluateResult(
+                content_id=content_id,
+                item_id=item.id if item else None,
+                status=status,
+                library_type=item.library_type if item else None,
+                rating=item.rating if item else None,
+                reason=(metadata or {}).get("ai_reason"),
+            )
+        )
+    db.commit()
+    return ReferenceLibraryReevaluateResponse(results=results)
+
+
+@router.get("/benchmark-rule-profiles", response_model=list[RuleProfileRead])
+def list_benchmark_rule_profiles(
+    include_disabled: bool = False,
+    db: Session = Depends(get_db),
+    _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+):
+    profiles = RuleProfileService(db).list_profiles(include_disabled=include_disabled)
+    db.commit()
+    return [_rule_profile_read(profile) for profile in profiles]
+
+
+@router.put("/benchmark-rule-profiles/{profile_id}", response_model=RuleProfileRead)
+def update_benchmark_rule_profile(
+    profile_id: str,
+    request: RuleProfileUpdateRequest,
+    db: Session = Depends(get_db),
+    _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR)),
+):
+    service = RuleProfileService(db)
+    profile = db.get(RuleProfile, profile_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="rule profile not found")
+    profile = service.update_profile(profile, name=request.name, enabled=request.enabled, config=request.config)
+    db.commit()
+    return _rule_profile_read(profile)
+
+
+@router.get("/operation-rules", response_model=list[OperationRuleRead])
+def list_operation_rules(
+    rule_type: str | None = None,
+    platform: str | None = None,
+    enabled: bool | None = None,
+    keyword: str | None = None,
+    db: Session = Depends(get_db),
+    _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+):
+    rules = OperationRuleRepository(db).list_rules(
+        rule_type=_enum_value(rule_type) if rule_type else None,
+        platform=_enum_value(platform) if platform else None,
+        enabled=enabled,
+        keyword=keyword,
+    )
+    db.commit()
+    return [_operation_rule_read(rule) for rule in rules]
+
+
+@router.post("/operation-rules", response_model=OperationRuleRead)
+def create_operation_rule(
+    request: OperationRuleCreateRequest,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR)),
+):
+    rule = OperationRuleRepository(db).create(
+        rule_type=_enum_value(request.rule_type),
+        title=request.title,
+        content=request.content,
+        platform=_enum_value(request.platform) if request.platform else None,
+        enabled=request.enabled,
+        created_by_user_id=principal.user_id,
+    )
+    db.commit()
+    return _operation_rule_read(rule)
+
+
+@router.patch("/operation-rules/{rule_id}", response_model=OperationRuleRead)
+def update_operation_rule(
+    rule_id: str,
+    request: OperationRuleUpdateRequest,
+    db: Session = Depends(get_db),
+    _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR)),
+):
+    repo = OperationRuleRepository(db)
+    rule = repo.get(rule_id)
+    if not rule:
+        raise HTTPException(status_code=404, detail="operation rule not found")
+    rule = repo.update(
+        rule,
+        title=request.title,
+        content=request.content,
+        platform=_enum_value(request.platform) if request.platform is not None else None,
+        enabled=request.enabled,
+        bump_version=request.bump_version,
+    )
+    db.commit()
+    return _operation_rule_read(rule)
+
+
 @router.post("/xhs/search-suggestions/tasks", response_model=EnqueueFetchResponse)
 def create_xhs_search_suggestion_task(request: XhsSearchSuggestionTaskRequest, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
     account = db.get(PlatformAccount, request.executor_account_id)
@@ -1586,7 +2125,7 @@ def create_xhs_search_suggestion_task(request: XhsSearchSuggestionTaskRequest, d
     job = JobRepository(db).create_job(
         job_type=JobType.XHS_SEARCH_SUGGEST.value,
         account_id=account.id,
-        local_agent_id=account.default_agent_id,
+        local_agent_id=None,
         payload={
             "platform": _enum_value(request.platform),
             "executor_account_id": account.id,

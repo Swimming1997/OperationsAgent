@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import re
@@ -17,6 +17,7 @@ class LoginSessionPayload:
     platform_account_id: str
     profile_key: str
     cdp_port: int
+    fresh_profile: bool = False
 
 
 class LoginCenterClient(Protocol):
@@ -50,6 +51,7 @@ class AccountLoginExecutor:
                 project_root=self.project_root,
                 profile_key=session.profile_key,
                 cdp_port=session.cdp_port,
+                fresh_profile=session.fresh_profile,
             )
             await asyncio.sleep(4.0)
             await self.client.report_login_progress(agent_id, session.session_id, LoginSessionStatus.WAITING_USER_LOGIN.value)
@@ -107,3 +109,13 @@ class AccountLoginExecutor:
             return acquired.status, acquired.message, nickname, home_url
         finally:
             await acquired.close()
+
+    async def probe_session(self, cdp_url: str) -> dict[str, str | None]:
+        status, message, nickname, home_url = await self._probe_session(cdp_url)
+        return {
+            "status": status.value,
+            "message": message,
+            "platform_nickname": nickname,
+            "platform_home_url": home_url,
+            "cdp_url": cdp_url,
+        }

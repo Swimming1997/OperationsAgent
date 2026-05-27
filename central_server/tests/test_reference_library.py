@@ -1,5 +1,7 @@
 from fastapi.testclient import TestClient
+from sqlalchemy import func, select
 
+from intelligence_engine.db.models import ReferenceLibraryEvent
 from intelligence_engine.db.session import get_db
 from intelligence_engine.main import create_app
 from tests.test_intelligence_pool_product_fields import _seed_content
@@ -40,3 +42,219 @@ def test_reference_library_create_and_deduplicate(db_session):
     detail = client.get(f"/api/intelligence/contents/{content.id}/product-detail")
     assert detail.status_code == 200
     assert len(detail.json()["reference_library_items"]) == 1
+
+
+def test_reference_library_manual_select_maps_p0_fields_and_locks(db_session):
+    content = _seed_content(db_session)
+    client = _client(db_session)
+
+    first = client.post(
+        f"/api/intelligence/contents/{content.id}/reference-library-items",
+        json={
+            "library_type": "lead",
+            "selection_sources": ["ai"],
+            "selected_reason": "评论命中求推",
+            "rating": "good",
+            "matched_keywords": ["求推"],
+            "user_id": "admin-user",
+        },
+    )
+    assert first.status_code == 200, first.text
+    body = first.json()
+    assert body["library_type"] == "lead"
+    assert body["rating"] == "good"
+    assert body["selection_sources"] == ["ai", "manual"]
+    assert body["matched_keywords"] == ["求推"]
+    assert body["selected_at"]
+    assert body["metadata"]["selection_locked_by_manual"] is True
+
+    second = client.post(
+        f"/api/intelligence/contents/{content.id}/reference-library-items",
+        json={
+            "library_type": "non_lead",
+            "selected_reason": "人工改为非获客",
+            "rating": "watching",
+            "user_id": "admin-user",
+        },
+    )
+    assert second.status_code == 200, second.text
+    assert second.json()["id"] == body["id"]
+    assert second.json()["library_type"] == "non_lead"
+    assert second.json()["rating"] == "watching"
+
+    listing = client.get("/api/reference-library/items")
+    assert listing.json()["total"] == 1
+
+
+def test_reference_library_legacy_values_are_mapped(db_session):
+    content = _seed_content(db_session)
+    client = _client(db_session)
+    response = client.post(
+        f"/api/intelligence/contents/{content.id}/reference-library-items",
+        json={"library_type": "benchmark_work", "rating": "A", "user_id": "admin-user"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["library_type"] == "uncategorized"
+    assert response.json()["rating"] == "good"
+
+
+def test_rule_profile_list_update_and_ai_re_evaluate(db_session):
+    content = _seed_content(db_session)
+    client = _client(db_session)
+
+    profiles = client.get("/api/benchmark-rule-profiles")
+    assert profiles.status_code == 200, profiles.text
+    xhs_non_lead = next(item for item in profiles.json() if item["platform"] == "xhs" and item["library_type"] == "non_lead")
+    assert xhs_non_lead["version"] == 1
+
+    updated = client.put(
+        f"/api/benchmark-rule-profiles/{xhs_non_lead['id']}",
+        json={"config": {"lead_intent_required": False, "rating_thresholds": {"poor": 50, "medium": 100, "good": 500}}},
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["version"] == 2
+
+    response = client.post(
+        "/api/reference-library/items/re-evaluate",
+        json={"content_ids": [content.id], "trigger_source": "test"},
+    )
+    assert response.status_code == 200, response.text
+    result = response.json()["results"][0]
+    assert result["status"] == "created"
+    assert result["library_type"] == "non_lead"
+    assert result["rating"] == "medium"
+
+    detail = client.get(f"/api/intelligence/contents/{content.id}/product-detail")
+    item = detail.json()["reference_library_items"][0]
+    assert item["selection_sources"] == ["ai"]
+    assert item["metadata"]["rule_profile_version"] == 2
+    assert item["metadata"]["trigger_source"] == "test"
+
+
+def test_ai_re_evaluate_skips_manual_locked_item(db_session):
+    content = _seed_content(db_session)
+    client = _client(db_session)
+    manual = client.post(
+        f"/api/intelligence/contents/{content.id}/reference-library-items",
+        json={"library_type": "lead", "rating": "watching", "user_id": "admin-user"},
+    )
+    assert manual.status_code == 200, manual.text
+
+    response = client.post("/api/reference-library/items/re-evaluate", json={"content_ids": [content.id]})
+    assert response.status_code == 200, response.text
+    result = response.json()["results"][0]
+    assert result["status"] == "skipped_manual_locked"
+    assert result["item_id"] == manual.json()["id"]
+    assert result["library_type"] == "lead"
+    assert result["rating"] == "watching"
+
+
+def test_reference_library_events_api_returns_audit_trail(db_session):
+    content = _seed_content(db_session)
+    client = _client(db_session)
+    created = client.post(
+        f"/api/intelligence/contents/{content.id}/reference-library-items",
+        json={"library_type": "lead", "rating": "watching", "user_id": "admin-user"},
+    )
+    assert created.status_code == 200, created.text
+
+    updated = client.patch(
+        f"/api/reference-library/items/{created.json()['id']}",
+        json={"rating": "good", "user_id": "admin-user"},
+    )
+    assert updated.status_code == 200, updated.text
+
+    events = client.get(f"/api/reference-library/items/{created.json()['id']}/events")
+    assert events.status_code == 200, events.text
+    event_types = [item["event_type"] for item in events.json()]
+    assert "created" in event_types
+    assert "updated" in event_types
+
+
+def test_reference_library_list_and_pool_filters_by_p0_fields(db_session):
+    content = _seed_content(db_session)
+    client = _client(db_session)
+    created = client.post(
+        f"/api/intelligence/contents/{content.id}/reference-library-items",
+        json={
+            "library_type": "lead",
+            "selection_sources": ["ai"],
+            "matched_keywords": ["求推"],
+            "rating": "good",
+            "user_id": "admin-user",
+        },
+    )
+    assert created.status_code == 200, created.text
+
+    reference_listing = client.get(
+        "/api/reference-library/items",
+        params={"platform": "xhs", "library_type": "lead", "selection_source": "ai", "rating": "good"},
+    )
+    assert reference_listing.status_code == 200, reference_listing.text
+    assert reference_listing.json()["total"] == 1
+    assert reference_listing.json()["items"][0]["platform"] == "xhs"
+
+    pool_listing = client.get(
+        "/api/intelligence/contents/product",
+        params={
+            "in_reference_library": "true",
+            "reference_library_type": "lead",
+            "selection_source": "ai",
+            "reference_rating": "good",
+        },
+    )
+    assert pool_listing.status_code == 200, pool_listing.text
+    item = next(row for row in pool_listing.json()["items"] if row["content_id"] == content.id)
+    assert item["in_reference_library"] is True
+    assert item["reference_library_type"] == "lead"
+    assert item["reference_library_rating"] == "good"
+    assert item["reference_selection_sources"] == ["ai", "manual"]
+    assert item["reference_matched_keywords"] == ["求推"]
+
+    hidden = client.get("/api/intelligence/contents/product", params={"in_reference_library": "false"})
+    assert hidden.status_code == 200, hidden.text
+    assert all(row["content_id"] != content.id for row in hidden.json()["items"])
+
+
+def test_reference_library_bulk_partial_success_and_idempotency(db_session):
+    content = _seed_content(db_session)
+    client = _client(db_session)
+    payload = {
+        "items": [
+            {
+                "content_id": content.id,
+                "library_type": "lead",
+                "rating": "watching",
+                "selected_reason": "批量人工入库",
+            },
+            {
+                "content_id": "missing-content",
+                "library_type": "lead",
+                "rating": "watching",
+            },
+        ]
+    }
+
+    first = client.post("/api/reference-library/items/bulk", json=payload, headers={"Idempotency-Key": "bulk-1"})
+    second = client.post("/api/reference-library/items/bulk", json=payload, headers={"Idempotency-Key": "bulk-1"})
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    assert len(first.json()["succeeded"]) == 1
+    assert len(first.json()["failed"]) == 1
+    assert first.json()["succeeded"][0]["id"] == second.json()["succeeded"][0]["id"]
+    event_count = db_session.scalar(
+        select(func.count(ReferenceLibraryEvent.id)).where(ReferenceLibraryEvent.library_item_id == first.json()["succeeded"][0]["id"])
+    )
+    assert event_count == 1
+
+
+def test_reference_library_bulk_atomic_requires_admin(db_session):
+    content = _seed_content(db_session)
+    client = _client(db_session)
+    response = client.post(
+        "/api/reference-library/items/bulk?atomic=true",
+        headers={"X-Role": "operator", "X-User-Id": "operator-user"},
+        json={"items": [{"content_id": content.id, "library_type": "lead", "rating": "watching"}]},
+    )
+    assert response.status_code == 403

@@ -36,6 +36,20 @@ export function updateAccount(role: Role, accountId: string, payload: Partial<Pl
   return apiRequest<PlatformAccount>(`/api/product/accounts/${accountId}`, { method: 'PATCH', role, userId, body: payload });
 }
 
+export function registerMyLocalAgents(role: Role, payload: { agent_ids: string[]; force?: boolean }, userId?: string) {
+  return apiRequest<LocalAgent[]>('/api/product/me/local-agents/register', { method: 'POST', role, userId, body: payload });
+}
+
+export type ResolveDiscoveredMatch = { agent: LocalAgent; bridge_port: number | null };
+
+export function resolveDiscoveredLocalAgents(
+  role: Role,
+  payload: { items: Array<{ agent_id?: string | null; device_name?: string | null; machine_fingerprint?: string | null; bridge_port?: number | null }> },
+  userId?: string,
+) {
+  return apiRequest<ResolveDiscoveredMatch[]>('/api/product/me/local-agents/resolve-discover', { method: 'POST', role, userId, body: payload });
+}
+
 export function listBusinessAccountTypes(role: Role, userId?: string) {
   return apiRequest<BusinessAccountType[]>('/api/business-account-types', { role, userId });
 }

@@ -5,8 +5,11 @@ import type {
   DataQualityOverview,
   IntelligenceListResponse,
   ProductDetail,
+  ReferenceLibraryBulkResponse,
+  ReferenceLibraryEvent,
   ReferenceLibraryItem,
   ReferenceLibraryListResponse,
+  ReferenceLibraryReevaluateResponse,
   Role,
 } from '../types/api';
 
@@ -30,6 +33,20 @@ export type IntelligenceFilters = {
   min_like_count?: string;
   min_comment_count?: string;
   min_collect_count?: string;
+  in_reference_library?: string;
+  reference_library_type?: string;
+  selection_source?: string;
+  reference_rating?: string;
+  sort_by?: string;
+  sort_order?: string;
+};
+
+export type ReferenceLibraryFilters = {
+  library_type?: string;
+  platform?: string;
+  selection_source?: string;
+  rating?: string;
+  usage_status?: string;
   sort_by?: string;
   sort_order?: string;
 };
@@ -51,9 +68,13 @@ export function fetchDataQualityOverview(role: Role, userId?: string, windowHour
   return apiRequest<DataQualityOverview>(`/api/intelligence/data-quality/overview?window_hours=${windowHours}`, { role, userId });
 }
 
-export function fetchReferenceLibraryItems(role: Role, filters: { library_type?: string; usage_status?: string } = {}, userId?: string) {
+export function fetchReferenceLibraryItems(role: Role, filters: ReferenceLibraryFilters = {}, userId?: string) {
   const qs = query(filters);
   return apiRequest<ReferenceLibraryListResponse>(`/api/reference-library/items${qs ? `?${qs}` : ''}`, { role, userId });
+}
+
+export function fetchReferenceLibraryEvents(role: Role, itemId: string, userId?: string) {
+  return apiRequest<ReferenceLibraryEvent[]>(`/api/reference-library/items/${itemId}/events`, { role, userId });
 }
 
 export function fetchProductDetail(role: Role, contentId: string, userId?: string) {
@@ -117,8 +138,10 @@ export function createReferenceLibraryItem(
   contentId: string,
   payload: {
     library_type: string;
+    selection_sources?: string[];
     selected_reason?: string;
     rating?: string;
+    matched_keywords?: string[];
     manual_tags?: string[];
     material_tags?: string[];
     note?: string;
@@ -130,5 +153,71 @@ export function createReferenceLibraryItem(
     role,
     userId,
     body: { ...payload, user_id: userId || `${role}-user` },
+  });
+}
+
+export function bulkCreateReferenceLibraryItems(
+  role: Role,
+  items: Array<{
+    content_id: string;
+    library_type: string;
+    selected_reason?: string;
+    rating?: string;
+    manual_tags?: string[];
+    note?: string;
+  }>,
+  userId?: string,
+) {
+  return apiRequest<ReferenceLibraryBulkResponse>('/api/reference-library/items/bulk', {
+    method: 'POST',
+    role,
+    userId,
+    body: { items },
+  });
+}
+
+export function updateReferenceLibraryItem(
+  role: Role,
+  itemId: string,
+  payload: {
+    library_type?: string;
+    rating?: string;
+    manual_tags?: string[];
+    material_tags?: string[];
+    note?: string;
+    selected_reason?: string;
+  },
+  userId?: string,
+) {
+  return apiRequest<ReferenceLibraryItem>(`/api/reference-library/items/${itemId}`, {
+    method: 'PATCH',
+    role,
+    userId,
+    body: { ...payload, user_id: userId || `${role}-user` },
+  });
+}
+
+export function archiveReferenceLibraryItem(role: Role, itemId: string, userId?: string) {
+  return apiRequest<ReferenceLibraryItem>(`/api/reference-library/items/${itemId}/archive`, {
+    method: 'POST',
+    role,
+    userId,
+  });
+}
+
+export function reEvaluateReferenceLibraryItems(
+  role: Role,
+  payload: { content_ids?: string[]; item_ids?: string[]; trigger_source?: string },
+  userId?: string,
+) {
+  return apiRequest<ReferenceLibraryReevaluateResponse>('/api/reference-library/items/re-evaluate', {
+    method: 'POST',
+    role,
+    userId,
+    body: {
+      content_ids: payload.content_ids ?? [],
+      item_ids: payload.item_ids ?? [],
+      trigger_source: payload.trigger_source ?? 'manual_re_evaluate',
+    },
   });
 }

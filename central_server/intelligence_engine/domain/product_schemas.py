@@ -142,7 +142,6 @@ class PlatformAccountUpdateRequest(ApiModel):
     display_name: str | None = None
     external_account_id: str | None = None
     business_account_type_id: str | None = None
-    default_agent_id: str | None = None
     status: str | None = None
     account_role: str | None = None
     health_status: str | None = None
@@ -156,10 +155,51 @@ class PlatformAccountCreateRequest(ApiModel):
     external_account_id: str | None = None
     business_account_type: str | None = None
     business_account_type_id: str | None = None
-    default_agent_id: str | None = None
     account_role: str = "intelligence_collector"
     health_status: str = "healthy"
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AccountAgentBindingRead(ApiModel):
+    id: str
+    account_id: str
+    agent_id: str
+    employee_id: str | None = None
+    agent_device_name: str | None = None
+    agent_status: str | None = None
+    enabled: bool
+    session_status: str | None = None
+    last_claimed_at: datetime | None = None
+
+
+class AccountAgentBindingCreateRequest(ApiModel):
+    agent_ids: list[str] = Field(default_factory=list)
+    force: bool = False
+
+
+class AccountAgentBindingRebindRequest(ApiModel):
+    force: bool = False
+
+
+class RegisterLocalAgentsRequest(ApiModel):
+    agent_ids: list[str] = Field(default_factory=list)
+    force: bool = False
+
+
+class DiscoverLocalAgentItem(ApiModel):
+    agent_id: str | None = None
+    device_name: str | None = None
+    machine_fingerprint: str | None = None
+    bridge_port: int | None = None
+
+
+class ResolveDiscoveredAgentsRequest(ApiModel):
+    items: list[DiscoverLocalAgentItem] = Field(default_factory=list)
+
+
+class ResolvedDiscoverMatch(ApiModel):
+    agent: LocalAgentRead
+    bridge_port: int | None = None
 
 
 class PlatformAccountRead(ApiModel):
@@ -181,10 +221,10 @@ class PlatformAccountRead(ApiModel):
     platform_home_url: str | None = None
     last_verified_at: datetime | None = None
     login_cdp_port: int | None = None
-    default_agent_id: str | None = None
-    default_agent_device_name: str | None = None
+    bindings: list[AccountAgentBindingRead] = Field(default_factory=list)
     session_health_status: str | None = None
     active_login_session_status: str | None = None
+    usage_status: str = "unavailable"
     last_success_at: datetime | None = None
     last_failure_at: datetime | None = None
     consecutive_failures: int
@@ -627,6 +667,13 @@ class IntelligenceContentProductItem(ApiModel):
     best_search_rank: int | None = None
     best_feed_position: int | None = None
     reference_library_count: int = 0
+    in_reference_library: bool = False
+    reference_library_type: str | None = None
+    reference_library_rating: str | None = None
+    reference_selection_sources: list[str] = Field(default_factory=list)
+    reference_matched_keywords: list[str] = Field(default_factory=list)
+    reference_ai_reason: str | None = None
+    reference_manual_locked: bool = False
 
 
 class IntelligenceContentProductList(ApiModel):
@@ -835,8 +882,10 @@ class XhsSearchSuggestionRead(ApiModel):
 
 class ReferenceLibraryItemCreateRequest(ApiModel):
     library_type: ReferenceLibraryType
+    selection_sources: list[str] = Field(default_factory=list)
     selected_reason: str | None = None
     rating: ReferenceLibraryRating | None = None
+    matched_keywords: list[str] = Field(default_factory=list)
     manual_tags: list[str] = Field(default_factory=list)
     material_tags: list[str] = Field(default_factory=list)
     usage_status: ReferenceLibraryUsageStatus = ReferenceLibraryUsageStatus.UNUSED
@@ -847,8 +896,11 @@ class ReferenceLibraryItemCreateRequest(ApiModel):
 
 
 class ReferenceLibraryItemUpdateRequest(ApiModel):
+    library_type: ReferenceLibraryType | None = None
+    selection_sources: list[str] | None = None
     selected_reason: str | None = None
     rating: ReferenceLibraryRating | None = None
+    matched_keywords: list[str] | None = None
     manual_tags: list[str] | None = None
     material_tags: list[str] | None = None
     usage_status: ReferenceLibraryUsageStatus | None = None
@@ -861,12 +913,16 @@ class ReferenceLibraryItemUpdateRequest(ApiModel):
 class ReferenceLibraryItemRead(ApiModel):
     id: str
     content_id: str
+    platform: str | None = None
     library_type: str
     status: str
     created_by_user_id: str | None = None
     created_by_employee_id: str | None = None
     selected_reason: str | None = None
     rating: str | None = None
+    selection_sources: list[str] = Field(default_factory=list)
+    matched_keywords: list[str] = Field(default_factory=list)
+    selected_at: datetime | None = None
     manual_tags: list[str] = Field(default_factory=list)
     material_tags: list[str] = Field(default_factory=list)
     usage_status: str
@@ -887,6 +943,113 @@ class ReferenceLibraryItemList(ApiModel):
     page: int
     page_size: int
     total: int
+
+
+class ReferenceLibraryEventRead(ApiModel):
+    id: str
+    library_item_id: str
+    content_id: str
+    event_type: str
+    user_id: str | None = None
+    employee_id: str | None = None
+    event_payload: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+
+
+class ReferenceLibraryBulkCreateItem(ApiModel):
+    content_id: str
+    library_type: ReferenceLibraryType
+    selection_sources: list[str] = Field(default_factory=list)
+    selected_reason: str | None = None
+    rating: ReferenceLibraryRating | None = None
+    matched_keywords: list[str] = Field(default_factory=list)
+    manual_tags: list[str] = Field(default_factory=list)
+    material_tags: list[str] = Field(default_factory=list)
+    usage_status: ReferenceLibraryUsageStatus = ReferenceLibraryUsageStatus.UNUSED
+    note: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ReferenceLibraryBulkCreateRequest(ApiModel):
+    items: list[ReferenceLibraryBulkCreateItem] = Field(default_factory=list)
+
+
+class ReferenceLibraryBulkCreateFailure(ApiModel):
+    content_id: str
+    code: str
+    message: str
+
+
+class ReferenceLibraryBulkCreateResponse(ApiModel):
+    succeeded: list[ReferenceLibraryItemRead] = Field(default_factory=list)
+    failed: list[ReferenceLibraryBulkCreateFailure] = Field(default_factory=list)
+
+
+class ReferenceLibraryReevaluateRequest(ApiModel):
+    content_ids: list[str] = Field(default_factory=list)
+    item_ids: list[str] = Field(default_factory=list)
+    trigger_source: str = "manual_re_evaluate"
+
+
+class ReferenceLibraryReevaluateResult(ApiModel):
+    content_id: str
+    item_id: str | None = None
+    status: str
+    library_type: str | None = None
+    rating: str | None = None
+    reason: str | None = None
+
+
+class ReferenceLibraryReevaluateResponse(ApiModel):
+    results: list[ReferenceLibraryReevaluateResult]
+
+
+class RuleProfileRead(ApiModel):
+    id: str
+    name: str
+    platform: str
+    library_type: str
+    version: int
+    enabled: bool
+    config: dict[str, Any] = Field(default_factory=dict)
+    created_by_user_id: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class RuleProfileUpdateRequest(ApiModel):
+    name: str | None = None
+    enabled: bool | None = None
+    config: dict[str, Any] | None = None
+
+
+class OperationRuleRead(ApiModel):
+    id: str
+    rule_type: str
+    title: str
+    content: str
+    platform: str | None = None
+    enabled: bool
+    version: int
+    created_by_user_id: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class OperationRuleCreateRequest(ApiModel):
+    rule_type: str
+    title: str
+    content: str
+    platform: str | None = None
+    enabled: bool = True
+
+
+class OperationRuleUpdateRequest(ApiModel):
+    title: str | None = None
+    content: str | None = None
+    platform: str | None = None
+    enabled: bool | None = None
+    bump_version: bool = False
 
 
 class IntelligenceDataQualityOverview(ApiModel):

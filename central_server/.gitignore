@@ -10,3 +10,7 @@ frontend/dist/
 frontend/*.tsbuildinfo
 packages/
 *.zip
+
+# Office temporary lock files
+~$*.docx
+~$*.doc

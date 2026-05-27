@@ -24,9 +24,6 @@ from intelligence_engine.domain.intelligence_pool import (
     extract_platform_tags,
     extract_search_tags,
 )
-from intelligence_engine.storage.repositories.reference_library_repository import ReferenceLibraryRepository
-
-
 def enum_value(value):
     return getattr(value, "value", value)
 
@@ -128,6 +125,10 @@ class WorkflowRepository:
         min_like_count: int | None = None,
         min_comment_count: int | None = None,
         min_collect_count: int | None = None,
+        in_reference_library: bool | None = None,
+        reference_library_type: str | None = None,
+        selection_source: str | None = None,
+        reference_rating: str | None = None,
         sort_by: str = "latest_discovered_at",
         sort_order: str = "desc",
         pool_only: bool = True,
@@ -207,6 +208,16 @@ class WorkflowRepository:
             base_conditions.append(ContentIdentity.latest_snapshot_id.is_(None))
         elif data_status == ContentDataStatus.DETAIL_READY.value:
             base_conditions.append(ContentIdentity.latest_snapshot_id.isnot(None))
+        if in_reference_library is True:
+            base_conditions.append(ReferenceLibraryItem.id.isnot(None))
+        elif in_reference_library is False:
+            base_conditions.append(ReferenceLibraryItem.id.is_(None))
+        if reference_library_type:
+            base_conditions.append(ReferenceLibraryItem.library_type == reference_library_type)
+        if reference_rating:
+            base_conditions.append(ReferenceLibraryItem.rating == reference_rating)
+        if selection_source:
+            base_conditions.append(func.lower(ReferenceLibraryItem.selection_sources_json.cast(Text)).contains(selection_source.lower()))
 
         latest_decision = (
             select(
@@ -232,6 +243,12 @@ class WorkflowRepository:
             .join(latest_decision, (latest_decision.c.content_id == ContentIdentity.id) & (latest_decision.c.rn == 1), isouter=True)
             .join(CandidateDecision, CandidateDecision.id == latest_decision.c.decision_id, isouter=True)
             .join(ContentWorkflowState, ContentWorkflowState.content_id == ContentIdentity.id, isouter=True)
+            .join(
+                ReferenceLibraryItem,
+                (ReferenceLibraryItem.content_id == ContentIdentity.id)
+                & (ReferenceLibraryItem.status == ReferenceLibraryItemStatus.ACTIVE.value),
+                isouter=True,
+            )
         )
         if base_conditions:
             joins = joins.where(and_(*base_conditions))
@@ -264,6 +281,7 @@ class WorkflowRepository:
                 latest_discovered_expr.label("latest_discovered_at"),
                 discovery_count_expr.label("discovery_count"),
                 discovered_account_count_expr.label("discovered_account_count"),
+                ReferenceLibraryItem,
             )
             .join(ContentDiscoveryEvent, ContentDiscoveryEvent.content_id == ContentIdentity.id, isouter=True)
             .join(ContentSnapshot, ContentSnapshot.id == ContentIdentity.latest_snapshot_id, isouter=True)
@@ -271,23 +289,35 @@ class WorkflowRepository:
             .join(CandidateDecision, CandidateDecision.id == latest_decision.c.decision_id, isouter=True)
             .join(ContentWorkflowState, ContentWorkflowState.content_id == ContentIdentity.id, isouter=True)
             .join(User, User.id == ContentWorkflowState.assigned_to_user_id, isouter=True)
+            .join(
+                ReferenceLibraryItem,
+                (ReferenceLibraryItem.content_id == ContentIdentity.id)
+                & (ReferenceLibraryItem.status == ReferenceLibraryItemStatus.ACTIVE.value),
+                isouter=True,
+            )
         )
         if base_conditions:
             stmt = stmt.where(and_(*base_conditions))
         stmt = (
-            stmt.group_by(ContentIdentity.id, ContentSnapshot.id, CandidateDecision.id, ContentWorkflowState.id, User.id)
+            stmt.group_by(ContentIdentity.id, ContentSnapshot.id, CandidateDecision.id, ContentWorkflowState.id, User.id, ReferenceLibraryItem.id)
             .order_by(order_expr)
             .offset((page - 1) * page_size)
             .limit(page_size)
         )
         rows = list(self.db.execute(stmt))
-        ref_repo = ReferenceLibraryRepository(self.db)
+        content_ids = [row[0].id for row in rows]
+        discovery_summaries = self._discovery_summaries_bulk(content_ids)
+        discovery_meta_by_content = self._discovery_meta_rows_bulk(content_ids)
         items = []
-        for content, snapshot, decision, state, assignee, latest_discovered_at, discovery_count, discovered_account_count in rows:
+        for content, snapshot, decision, state, assignee, latest_discovered_at, discovery_count, discovered_account_count, ref_item in rows:
             if not state:
                 state = self.ensure_state(content.id)
-            summary = self._discovery_summary(content.id)
-            discovery_meta_rows = self._discovery_meta_rows(content.id)
+            summary = discovery_summaries.get(content.id) or {
+                "source_surfaces": {},
+                "comment_snapshot_count": 0,
+                "search_keywords": [],
+            }
+            discovery_meta_rows = discovery_meta_by_content.get(content.id, [])
             search_context = aggregate_search_context(discovery_meta_rows)
             metadata = content.metadata_json or {}
             comment_count = summary.get("comment_snapshot_count") or 0
@@ -304,6 +334,7 @@ class WorkflowRepository:
             platform_tags = extract_platform_tags(metadata, snapshot.raw_payload_json if snapshot else None)
             manual_tags = extract_manual_tags(metadata)
             search_tags = extract_search_tags(metadata, discovery_meta_rows)
+            reference_library_count = 1 if ref_item else 0
             items.append(
                 {
                     "content_id": content.id,
@@ -345,7 +376,14 @@ class WorkflowRepository:
                     "location_filter": search_context["location_filter"],
                     "best_search_rank": search_context["best_search_rank"],
                     "best_feed_position": search_context["best_feed_position"] or self._best_feed_position(discovery_meta_rows),
-                    "reference_library_count": ref_repo.count_active_for_content(content.id),
+                    "reference_library_count": reference_library_count,
+                    "in_reference_library": reference_library_count > 0,
+                    "reference_library_type": ref_item.library_type if ref_item else None,
+                    "reference_library_rating": ref_item.rating if ref_item else None,
+                    "reference_selection_sources": ref_item.selection_sources_json if ref_item else [],
+                    "reference_matched_keywords": ref_item.matched_keywords_json if ref_item else [],
+                    "reference_ai_reason": (ref_item.metadata_json or {}).get("ai_reason") if ref_item else None,
+                    "reference_manual_locked": bool((ref_item.metadata_json or {}).get("selection_locked_by_manual")) if ref_item else False,
                 }
             )
         if data_status in {ContentDataStatus.COMMENTS_READY.value, ContentDataStatus.DETAIL_FAILED.value, ContentDataStatus.COMMENTS_FAILED.value}:
@@ -374,38 +412,76 @@ class WorkflowRepository:
         return list(self.db.scalars(stmt))
 
     def _discovery_meta_rows(self, content_id: str) -> list[dict]:
+        return self._discovery_meta_rows_bulk([content_id]).get(content_id, [])
+
+    def _discovery_meta_rows_bulk(self, content_ids: list[str]) -> dict[str, list[dict]]:
+        if not content_ids:
+            return {}
+        grouped: dict[str, list[dict]] = {content_id: [] for content_id in content_ids}
         rows = list(
-            self.db.scalars(
-                select(ContentDiscoveryEvent.discovery_meta_json).where(ContentDiscoveryEvent.content_id == content_id)
+            self.db.execute(
+                select(ContentDiscoveryEvent.content_id, ContentDiscoveryEvent.discovery_meta_json).where(
+                    ContentDiscoveryEvent.content_id.in_(content_ids)
+                )
             )
         )
-        return [row for row in rows if row]
+        for content_id, meta in rows:
+            if meta:
+                grouped.setdefault(content_id, []).append(meta)
+        return grouped
+
+    def _discovery_summaries_bulk(self, content_ids: list[str]) -> dict[str, dict]:
+        if not content_ids:
+            return {}
+        summaries = {
+            content_id: {"source_surfaces": {}, "comment_snapshot_count": 0, "search_keywords": []}
+            for content_id in content_ids
+        }
+        surface_rows = list(
+            self.db.execute(
+                select(
+                    ContentDiscoveryEvent.content_id,
+                    ContentDiscoveryEvent.source_surface,
+                    func.count(ContentDiscoveryEvent.id),
+                )
+                .where(ContentDiscoveryEvent.content_id.in_(content_ids))
+                .group_by(ContentDiscoveryEvent.content_id, ContentDiscoveryEvent.source_surface)
+            )
+        )
+        for content_id, surface, count in surface_rows:
+            entry = summaries.setdefault(
+                content_id,
+                {"source_surfaces": {}, "comment_snapshot_count": 0, "search_keywords": []},
+            )
+            entry["source_surfaces"][surface] = count
+        comment_rows = list(
+            self.db.execute(
+                select(CommentSnapshot.content_id, func.count(CommentSnapshot.id))
+                .where(CommentSnapshot.content_id.in_(content_ids))
+                .group_by(CommentSnapshot.content_id)
+            )
+        )
+        for content_id, comment_count in comment_rows:
+            summaries[content_id]["comment_snapshot_count"] = int(comment_count or 0)
+        meta_by_content = self._discovery_meta_rows_bulk(content_ids)
+        for content_id, meta_rows in meta_by_content.items():
+            keywords: set[str] = set()
+            for meta in meta_rows:
+                value = meta.get("search_keyword")
+                if value:
+                    keywords.add(str(value))
+                for item in meta.get("search_keywords") or []:
+                    if item:
+                        keywords.add(str(item))
+            summaries[content_id]["search_keywords"] = sorted(keywords)
+        return summaries
 
     def _best_feed_position(self, discovery_meta_rows: list[dict]) -> int | None:
         positions = [row.get("feed_position") for row in discovery_meta_rows if isinstance(row.get("feed_position"), int)]
         return min(positions) if positions else None
 
     def _discovery_summary(self, content_id: str) -> dict:
-        rows = list(
-            self.db.execute(
-                select(ContentDiscoveryEvent.source_surface, func.count(ContentDiscoveryEvent.id))
-                .where(ContentDiscoveryEvent.content_id == content_id)
-                .group_by(ContentDiscoveryEvent.source_surface)
-            )
+        return self._discovery_summaries_bulk([content_id]).get(
+            content_id,
+            {"source_surfaces": {}, "comment_snapshot_count": 0, "search_keywords": []},
         )
-        comment_count = self.db.scalar(select(func.count(CommentSnapshot.id)).where(CommentSnapshot.content_id == content_id)) or 0
-        keyword_rows = self._discovery_meta_rows(content_id)
-        search_keywords: set[str] = set()
-        for meta in keyword_rows:
-            for key in ("search_keyword",):
-                value = meta.get(key)
-                if value:
-                    search_keywords.add(str(value))
-            for value in meta.get("search_keywords") or []:
-                if value:
-                    search_keywords.add(str(value))
-        return {
-            "source_surfaces": {surface: count for surface, count in rows},
-            "comment_snapshot_count": comment_count,
-            "search_keywords": sorted(search_keywords),
-        }

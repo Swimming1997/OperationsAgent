@@ -132,7 +132,6 @@ class PlatformAccount(Base, TimestampMixin):
     business_account_type: Mapped[str | None] = mapped_column(String(128))
     business_account_type_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("business_account_types.id"))
     status: Mapped[str] = mapped_column(String(64), default="active", nullable=False)
-    default_agent_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("local_agents.id"))
     metadata_json: Mapped[dict] = mapped_column(JsonType, default=dict, nullable=False)
     last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_failure_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -179,6 +178,18 @@ class AccountSession(Base, TimestampMixin):
     session_meta_json: Mapped[dict] = mapped_column(JsonType, default=dict, nullable=False)
     last_validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AccountAgentBinding(Base, TimestampMixin):
+    __tablename__ = "account_agent_bindings"
+    __table_args__ = (UniqueConstraint("account_id", "agent_id", name="uq_account_agent_binding"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    account_id: Mapped[str] = mapped_column(String(36), ForeignKey("platform_accounts.id"), nullable=False)
+    agent_id: Mapped[str] = mapped_column(String(36), ForeignKey("local_agents.id"), nullable=False)
+    employee_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("employees.id"))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    last_claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Job(Base, TimestampMixin):
@@ -575,13 +586,14 @@ class ReferenceLibraryItem(Base, TimestampMixin):
     __tablename__ = "reference_library_items"
     __table_args__ = (
         Index(
-            "uq_reference_library_active_content_type",
+            "uq_reference_library_active_content",
             "content_id",
-            "library_type",
             unique=True,
             sqlite_where=text("status = 'active'"),
             postgresql_where=text("status = 'active'"),
         ),
+        Index("idx_reference_library_selected_at", "selected_at"),
+        Index("idx_reference_library_type_status", "library_type", "status"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
@@ -592,6 +604,9 @@ class ReferenceLibraryItem(Base, TimestampMixin):
     created_by_employee_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("employees.id"))
     selected_reason: Mapped[str | None] = mapped_column(Text)
     rating: Mapped[str | None] = mapped_column(String(8))
+    selection_sources_json: Mapped[list] = mapped_column(JsonType, default=list, nullable=False)
+    matched_keywords_json: Mapped[list] = mapped_column(JsonType, default=list, nullable=False)
+    selected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     manual_tags_json: Mapped[list] = mapped_column(JsonType, default=list, nullable=False)
     material_tags_json: Mapped[list] = mapped_column(JsonType, default=list, nullable=False)
     usage_status: Mapped[str] = mapped_column(String(32), default="unused", nullable=False)
@@ -612,6 +627,47 @@ class ReferenceLibraryEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 
+class OperationRule(Base, TimestampMixin):
+    __tablename__ = "operation_rules"
+    __table_args__ = (
+        Index("idx_operation_rules_type_platform", "rule_type", "platform"),
+        Index("idx_operation_rules_enabled", "enabled"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    rule_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    platform: Mapped[str | None] = mapped_column(String(32))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    created_by_user_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("users.id"))
+
+
+class RuleProfile(Base, TimestampMixin):
+    __tablename__ = "rule_profiles"
+    __table_args__ = (
+        Index(
+            "uq_rule_profile_enabled_scope",
+            "platform",
+            "library_type",
+            unique=True,
+            sqlite_where=text("enabled = 1"),
+            postgresql_where=text("enabled = true"),
+        ),
+        Index("idx_rule_profiles_scope", "platform", "library_type", "enabled"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    platform: Mapped[str] = mapped_column(String(32), nullable=False)
+    library_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    config_json: Mapped[dict] = mapped_column(JsonType, default=dict, nullable=False)
+    created_by_user_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("users.id"))
+
+
 Index("idx_jobs_status_priority", Job.status, Job.priority, Job.scheduled_at)
 Index("idx_jobs_task_run_id", Job.task_run_id)
 Index("idx_jobs_account_id", Job.account_id)
@@ -626,7 +682,9 @@ Index("idx_discovery_content_id", ContentDiscoveryEvent.content_id)
 Index("idx_discovery_account_id", ContentDiscoveryEvent.account_id)
 Index("idx_discovery_job_id", ContentDiscoveryEvent.job_id)
 Index("idx_discovery_discovered_at", ContentDiscoveryEvent.discovered_at)
+Index("idx_discovery_content_discovered_at", ContentDiscoveryEvent.content_id, ContentDiscoveryEvent.discovered_at)
 Index("idx_discovery_surface", ContentDiscoveryEvent.source_surface)
+Index("idx_reference_library_content_status", ReferenceLibraryItem.content_id, ReferenceLibraryItem.status)
 Index("idx_content_snapshots_content_id", ContentSnapshot.content_id, ContentSnapshot.fetched_at.desc())
 Index("idx_content_snapshots_publish_time", ContentSnapshot.publish_time)
 Index("idx_comments_content_id", CommentSnapshot.content_id)
@@ -640,6 +698,9 @@ Index("idx_employees_user_id", Employee.user_id)
 Index("idx_agents_employee_id", LocalAgent.employee_id)
 Index("idx_platform_accounts_employee_id", PlatformAccount.employee_id)
 Index("idx_platform_accounts_business_type_id", PlatformAccount.business_account_type_id)
+Index("idx_account_agent_bindings_account", AccountAgentBinding.account_id)
+Index("idx_account_agent_bindings_agent", AccountAgentBinding.agent_id)
+Index("idx_account_agent_bindings_employee", AccountAgentBinding.employee_id)
 Index("idx_benchmark_groups_enabled", BenchmarkGroup.enabled)
 Index("idx_benchmark_members_group_id", BenchmarkGroupMember.benchmark_group_id)
 Index("idx_task_templates_type_enabled", TaskTemplate.template_type, TaskTemplate.enabled)

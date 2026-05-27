@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from intelligence_engine.config import get_settings
 from intelligence_engine.domain.enums import ContentWorkflowStatus
 from intelligence_engine.services.enrichment_policy import should_enqueue_comment_fetch
+from intelligence_engine.services.benchmark_selection import BenchmarkSelectionService
 from intelligence_engine.storage.repositories.content_repository import ContentRepository
 from intelligence_engine.storage.repositories.job_repository import JobRepository
 from intelligence_engine.storage.repositories.reference_library_repository import ReferenceLibraryRepository
@@ -114,7 +115,6 @@ def create_account(request: AccountCreateRequest, db: Session = Depends(get_db))
         external_account_id=request.external_account_id,
         business_account_type=request.business_account_type,
         business_account_type_id=request.business_account_type_id,
-        default_agent_id=request.default_agent_id,
         metadata=request.metadata,
     )
     db.commit()
@@ -133,7 +133,6 @@ def list_accounts(platform: Platform | None = None, status: AccountStatus | None
             "platform": account.platform,
             "display_name": account.display_name,
             "status": account.status,
-            "default_agent_id": account.default_agent_id,
         }
         for account in accounts
     ]
@@ -199,7 +198,7 @@ def create_feed_job(request: FeedCollectCreateRequest, db: Session = Depends(get
     job = JobRepository(db).create_job(
         job_type=JobType.FEED_COLLECT,
         account_id=request.account_id,
-        local_agent_id=account.default_agent_id,
+        local_agent_id=None,
         payload=payload,
         priority=request.priority,
     )
@@ -328,12 +327,14 @@ def resume_job(job_id: str, db: Session = Depends(get_db)):
 def ingest_feed_candidates(request: FeedCandidateIngestionRequest, db: Session = Depends(get_db)):
     repo = ContentRepository(db)
     results = []
+    evaluated_content_ids: list[str] = []
     for candidate in request.candidates:
         content, is_new, event, detail_job_enqueued, feed_prelim_pass = repo.ingest_feed_candidate(
             job_id=request.job_id,
             account_id=request.account_id,
             candidate=candidate,
         )
+        evaluated_content_ids.append(content.id)
         results.append(
             FeedCandidateIngestionResult(
                 platform_content_id=candidate.platform_content_id,
@@ -344,6 +345,10 @@ def ingest_feed_candidates(request: FeedCandidateIngestionRequest, db: Session =
                 feed_prelim_pass=feed_prelim_pass,
             )
         )
+    db.commit()
+    selection = BenchmarkSelectionService(db)
+    for content_id in evaluated_content_ids:
+        selection.ai_select_by_rules(content_id=content_id, trigger_source="feed_ingestion")
     db.commit()
     return FeedCandidateIngestionResponse(results=results)
 
@@ -413,6 +418,7 @@ def ingest_detail(request: DetailIngestionRequest, db: Session = Depends(get_db)
     repo = ContentRepository(db)
     snapshot = repo.create_snapshot(content_id=request.content_id, account_id=job.account_id if job else None, snapshot=request.snapshot)
     repo.evaluate_candidate(content_id=request.content_id, snapshot_id=snapshot.id)
+    BenchmarkSelectionService(db).ai_select_by_rules(content_id=request.content_id, trigger_source="detail_ingestion")
     content_metadata = dict(content.metadata_json or {})
     content_context = content_metadata.get("platform_context") if isinstance(content_metadata.get("platform_context"), dict) else {}
     job_context = job.payload_json.get("platform_context") if job and isinstance(job.payload_json.get("platform_context"), dict) else {}
@@ -477,6 +483,7 @@ def ingest_comments(request: CommentIngestionRequest, db: Session = Depends(get_
     content = db.get(ContentIdentity, request.content_id)
     if content and content.latest_snapshot_id:
         ContentRepository(db).evaluate_candidate(content_id=request.content_id, snapshot_id=content.latest_snapshot_id)
+        BenchmarkSelectionService(db).ai_select_by_rules(content_id=request.content_id, trigger_source="comment_ingestion")
     db.commit()
     return CommentIngestionResponse(inserted=inserted, updated=updated, lead_keyword_hits=hits)
 

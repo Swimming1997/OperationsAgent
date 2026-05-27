@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -239,7 +239,7 @@ class TaskMaterializationService:
         job = JobRepository(self.db).create_job(
             job_type=JobType.FEED_COLLECT,
             account_id=account.id,
-            local_agent_id=account.default_agent_id,
+            local_agent_id=None,
             task_run_id=task_run_id,
             payload=job_payload,
             priority=priority or 100,
@@ -271,7 +271,7 @@ class TaskMaterializationService:
             job = JobRepository(self.db).create_job(
                 job_type=JobType.CREATOR_MONITOR,
                 account_id=account.id,
-                local_agent_id=account.default_agent_id,
+                local_agent_id=None,
                 creator_monitor_id=monitor.id,
                 task_run_id=task_run_id,
                 payload={
@@ -310,7 +310,7 @@ class TaskMaterializationService:
         job = JobRepository(self.db).create_job(
             job_type=JobType.SEARCH_COLLECT,
             account_id=account.id,
-            local_agent_id=account.default_agent_id,
+            local_agent_id=None,
             task_run_id=task_run_id,
             payload={
                 "platform": enum_value(payload.platform),
@@ -395,26 +395,45 @@ class TaskMaterializationService:
         account_id = config.get("executor_account_id")
         account = self.db.get(PlatformAccount, account_id) if account_id else None
         checks.append({"key": "executor_account", "ok": bool(account), "message": "执行账号存在" if account else "缺少执行账号"})
-        agent = self.db.get(LocalAgent, account.default_agent_id) if account and account.default_agent_id else None
-        if agent:
-            bound_message = f"账号已绑定 Agent：{agent.device_name or agent.id}（{agent.id}）"
-        else:
-            bound_message = "账号未绑定 Agent"
-        checks.append({"key": "agent_bound", "ok": bool(agent), "message": bound_message})
-        checks.append({"key": "agent_online", "ok": bool(agent and agent.status == AgentStatus.ONLINE.value), "message": "绑定 Agent 当前在线" if agent and agent.status == AgentStatus.ONLINE.value else "绑定 Agent 当前离线"})
+        pool_agents: list[LocalAgent] = []
+        if account and account.employee_id:
+            pool_agents = list(
+                self.db.scalars(
+                    select(LocalAgent).where(
+                        LocalAgent.employee_id == account.employee_id,
+                        LocalAgent.status != AgentStatus.RETIRED.value,
+                    )
+                )
+            )
+        checks.append(
+            {
+                "key": "agent_pool_bound",
+                "ok": bool(pool_agents),
+                "message": f"运营已登记 {len(pool_agents)} 台 Agent" if pool_agents else "运营尚未登记可用 Agent",
+            }
+        )
+        online_agents = [agent for agent in pool_agents if agent.status == AgentStatus.ONLINE.value]
+        checks.append(
+            {
+                "key": "agent_pool_online",
+                "ok": bool(online_agents),
+                "message": f"在线 Agent {len(online_agents)} 台" if online_agents else "绑定池中暂无在线 Agent",
+            }
+        )
         ready_session = None
-        if account and agent:
+        if account and pool_agents:
             ready_session = self.db.scalar(
                 select(AccountSession)
                 .where(AccountSession.account_id == account.id)
-                .where(AccountSession.local_agent_id == agent.id)
+                .where(AccountSession.local_agent_id.in_([item.id for item in pool_agents]))
                 .where(AccountSession.status == SessionStatus.READY.value)
                 .order_by(AccountSession.last_validated_at.desc().nullslast(), AccountSession.created_at.desc())
                 .limit(1)
             )
-        checks.append({"key": "session_ready", "ok": bool(ready_session), "message": "账号 Session 已就绪" if ready_session else "账号 Session 未就绪"})
+        checks.append({"key": "session_pool_ready", "ok": bool(ready_session), "message": "绑定池存在 ready 会话" if ready_session else "绑定池暂无 ready 会话"})
 
         expected_job_type = expected_job_type_for_template(template.template_type)
+        agent = online_agents[0] if online_agents else (pool_agents[0] if pool_agents else None)
         capabilities = agent.capabilities_json if agent else {}
         declared_job_types = list_declared_job_types(capabilities)
         supports = agent_supports_job_type(capabilities, expected_job_type) if expected_job_type else False

@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     xhs_probe_scroll_pause_ms: int = 1200
     auth_secret_key: str = "dev-change-me-in-production"
     auth_token_ttl_hours: int = 24
+    allow_header_auth: bool = False
 
 
 @lru_cache

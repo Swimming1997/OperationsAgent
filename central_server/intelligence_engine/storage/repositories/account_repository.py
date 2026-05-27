@@ -1,7 +1,7 @@
-﻿from sqlalchemy import select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from intelligence_engine.db.models import AccountSession, Employee, LocalAgent, PlatformAccount, utcnow
+from intelligence_engine.db.models import AccountAgentBinding, AccountSession, Employee, LocalAgent, PlatformAccount, utcnow
 from intelligence_engine.domain.enums import AccountStatus, AgentStatus
 
 
@@ -121,7 +121,7 @@ class AccountRepository:
         external_account_id: str | None,
         business_account_type: str | None,
         business_account_type_id: str | None = None,
-        default_agent_id: str | None,
+        default_agent_id: str | None = None,
         metadata: dict,
     ) -> PlatformAccount:
         self.ensure_employee(employee_id)
@@ -132,13 +132,29 @@ class AccountRepository:
             external_account_id=external_account_id,
             business_account_type=business_account_type,
             business_account_type_id=business_account_type_id,
-            default_agent_id=default_agent_id,
             metadata_json=metadata,
             status=AccountStatus.ACTIVE.value,
         )
         self.db.add(account)
         self.db.flush()
         return account
+
+    def bind_agent(self, *, account_id: str, agent_id: str, employee_id: str | None) -> AccountAgentBinding:
+        binding = self.db.scalar(
+            select(AccountAgentBinding).where(
+                AccountAgentBinding.account_id == account_id,
+                AccountAgentBinding.agent_id == agent_id,
+            )
+        )
+        if binding:
+            binding.enabled = True
+            binding.employee_id = employee_id
+            self.db.flush()
+            return binding
+        binding = AccountAgentBinding(account_id=account_id, agent_id=agent_id, employee_id=employee_id, enabled=True)
+        self.db.add(binding)
+        self.db.flush()
+        return binding
 
     def list_accounts(self, *, platform: str | None = None, status: str | None = None) -> list[PlatformAccount]:
         stmt = select(PlatformAccount)

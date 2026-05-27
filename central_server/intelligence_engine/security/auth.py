@@ -56,6 +56,8 @@ def get_optional_principal(
 
     injected_roles = x_user_roles or x_role
     if injected_roles:
+        if not get_settings().allow_header_auth:
+            raise HTTPException(status_code=401, detail="header auth is disabled")
         return Principal(user_id=x_user_id, role_names=frozenset(role.strip() for role in injected_roles.split(",") if role.strip()))
     if not x_user_id:
         return Principal(user_id=None, role_names=frozenset())

@@ -54,17 +54,41 @@ export type IntelligenceItem = {
   best_search_rank: number | null;
   best_feed_position: number | null;
   reference_library_count: number;
+  in_reference_library: boolean;
+  reference_library_type: string | null;
+  reference_library_rating: string | null;
+  reference_selection_sources: string[];
+  reference_matched_keywords: string[];
+  reference_ai_reason: string | null;
+  reference_manual_locked: boolean;
+};
+
+export type ReferenceLibraryReevaluateResult = {
+  content_id: string;
+  item_id: string | null;
+  status: string;
+  library_type: string | null;
+  rating: string | null;
+  reason: string | null;
+};
+
+export type ReferenceLibraryReevaluateResponse = {
+  results: ReferenceLibraryReevaluateResult[];
 };
 
 export type ReferenceLibraryItem = {
   id: string;
   content_id: string;
+  platform?: string;
   library_type: string;
   status: string;
   created_by_user_id: string | null;
   created_by_employee_id: string | null;
   selected_reason: string | null;
   rating: string | null;
+  selection_sources: string[];
+  matched_keywords: string[];
+  selected_at: string | null;
   manual_tags: string[];
   material_tags: string[];
   usage_status: string;
@@ -103,6 +127,22 @@ export type ReferenceLibraryListResponse = {
   page: number;
   page_size: number;
   total: number;
+};
+
+export type ReferenceLibraryEvent = {
+  id: string;
+  library_item_id: string;
+  content_id: string;
+  event_type: string;
+  user_id: string | null;
+  employee_id: string | null;
+  event_payload: Record<string, unknown>;
+  created_at: string;
+};
+
+export type ReferenceLibraryBulkResponse = {
+  succeeded: ReferenceLibraryItem[];
+  failed: Array<{ content_id: string; code: string; message: string }>;
 };
 
 export type IntelligenceListResponse = {
@@ -326,14 +366,56 @@ export type PlatformAccount = {
   platform_home_url: string | null;
   last_verified_at: string | null;
   login_cdp_port: number | null;
-  default_agent_id: string | null;
-  default_agent_device_name: string | null;
+  default_agent_id?: string | null;
+  default_agent_device_name?: string | null;
+  bindings?: AccountAgentBinding[];
   session_health_status: string | null;
   active_login_session_status: string | null;
+  usage_status: string;
   last_success_at: string | null;
   last_failure_at: string | null;
   consecutive_failures: number;
   metadata: Record<string, unknown>;
+};
+
+export type AccountAgentBinding = {
+  id: string;
+  account_id: string;
+  agent_id: string;
+  employee_id: string | null;
+  agent_device_name: string | null;
+  agent_status: string | null;
+  enabled: boolean;
+  session_status: string | null;
+  last_claimed_at: string | null;
+};
+
+export type LocalBridgeSessionStatus = {
+  account_id: string;
+  status: string;
+  message: string | null;
+  cdp_url: string | null;
+  platform_nickname: string | null;
+  platform_home_url: string | null;
+};
+
+export type LocalBridgeStartResult = {
+  account_id: string | null;
+  profile_key: string;
+  profile_dir: string;
+  cdp_url: string;
+  pid: number;
+  message: string;
+};
+
+export type LocalBridgeDiscoveredAgent = {
+  device_name: string;
+  machine_fingerprint: string;
+  agent_id: string | null;
+  center_url?: string | null;
+  bridge_url?: string | null;
+  bridge_port: number;
+  status: string;
 };
 
 export type AccountLoginSession = {
@@ -415,6 +497,19 @@ export type KeywordRule = {
   match_mode: string;
   enabled: boolean;
   weight: number;
+};
+
+export type OperationRule = {
+  id: string;
+  rule_type: string;
+  title: string;
+  content: string;
+  platform: string | null;
+  enabled: boolean;
+  version: number;
+  created_by_user_id: string | null;
+  created_at: string;
+  updated_at: string;
 };
 
 export type BusinessAccountTypeRuleSet = {

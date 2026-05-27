@@ -2,6 +2,8 @@
 
 from datetime import datetime
 
+from pydantic import Field
+
 from intelligence_engine.domain.enums import UserRoleName
 from intelligence_engine.domain.schemas import ApiModel
 
@@ -24,6 +26,18 @@ class LoginRequest(ApiModel):
     password: str
 
 
+class RegisterRequest(ApiModel):
+    username: str = Field(min_length=3, max_length=128)
+    display_name: str = Field(min_length=1, max_length=128)
+    email: str | None = None
+    password: str = Field(min_length=8)
+
+
+class ChangePasswordRequest(ApiModel):
+    current_password: str
+    new_password: str = Field(min_length=8)
+
+
 class AuthUserRead(ApiModel):
     id: str
     username: str
@@ -42,3 +56,7 @@ class LoginResponse(ApiModel):
 
 class LogoutResponse(ApiModel):
     message: str = "logged out"
+
+
+class ChangePasswordResponse(ApiModel):
+    message: str = "password updated"

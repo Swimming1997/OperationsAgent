@@ -36,6 +36,42 @@ const SOURCE_SURFACE_LABELS: Record<string, string> = {
   douyin_image_home_feed: '抖音图文流',
 };
 
+const REFERENCE_LIBRARY_TYPE_LABELS: Record<string, string> = {
+  lead: '获客库',
+  non_lead: '非获客库',
+  uncategorized: '待分类',
+  benchmark_work: '对标作品',
+  lead_case: '获客案例',
+  visual_material: '视觉素材',
+};
+
+const REFERENCE_LIBRARY_RATING_LABELS: Record<string, string> = {
+  poor: '差',
+  medium: '中',
+  good: '好',
+  watching: '待观察',
+  S: 'S',
+  A: 'A',
+  B: 'B',
+  C: 'C',
+};
+
+const SELECTION_SOURCE_LABELS: Record<string, string> = {
+  manual: '我的选中',
+  ai: '规则自动',
+};
+
+const REEVALUATE_STATUS_LABELS: Record<string, string> = {
+  created: '已自动入库',
+  updated: '已按规则更新',
+  skipped_manual_locked: '已跳过（人工锁定）',
+  skipped_no_candidate_decision: '已跳过（无候选决策）',
+  skipped_no_rule_match: '未命中规则',
+  skipped_no_rule_profile: '已跳过（无规则配置）',
+  skipped_duplicate_evaluation: '已跳过（同版本已评估）',
+  failed_not_found: '失败（内容不存在）',
+};
+
 export function labelPlatform(value: string | null | undefined): string {
   if (!value) return '-';
   return PLATFORM_LABELS[value] || value;
@@ -54,6 +90,30 @@ export function labelCandidateBucket(value: string | null | undefined): string {
 export function labelSourceSurface(value: string | null | undefined): string {
   if (!value) return '-';
   return SOURCE_SURFACE_LABELS[value] || value;
+}
+
+export function labelReferenceLibraryType(value: string | null | undefined): string {
+  if (!value) return '-';
+  return REFERENCE_LIBRARY_TYPE_LABELS[value] || value;
+}
+
+export function labelReferenceLibraryRating(value: string | null | undefined): string {
+  if (!value) return '-';
+  return REFERENCE_LIBRARY_RATING_LABELS[value] || value;
+}
+
+export function labelSelectionSource(value: string | null | undefined): string {
+  if (!value) return '-';
+  return SELECTION_SOURCE_LABELS[value] || value;
+}
+
+export function labelReevaluateStatus(value: string | null | undefined): string {
+  if (!value) return '-';
+  return REEVALUATE_STATUS_LABELS[value] || value;
+}
+
+export function isReferenceManualLocked(metadata: Record<string, unknown> | null | undefined): boolean {
+  return Boolean(metadata?.selection_locked_by_manual);
 }
 
 export function localizeOptionItems(

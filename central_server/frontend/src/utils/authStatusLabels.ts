@@ -136,3 +136,18 @@ export function labelAccountOperationalStatus(status: string): string {
       return status;
   }
 }
+
+export function labelUsageStatus(status: string): string {
+  switch (status) {
+    case 'ready':
+      return '可用';
+    case 'need_login':
+      return '需登录';
+    case 'need_verify':
+      return '需验证';
+    case 'unavailable':
+      return '不可用';
+    default:
+      return status;
+  }
+}

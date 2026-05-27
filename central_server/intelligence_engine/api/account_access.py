@@ -1,4 +1,4 @@
-﻿from fastapi import HTTPException
+from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -38,16 +38,6 @@ def ensure_agent_readable(db: Session, principal: Principal, agent: LocalAgent) 
     if not employee_id:
         raise HTTPException(status_code=403, detail="operator has no employee profile")
     if agent.employee_id == employee_id:
-        return
-    bound = db.scalar(
-        select(PlatformAccount.id)
-        .where(
-            PlatformAccount.employee_id == employee_id,
-            PlatformAccount.default_agent_id == agent.id,
-        )
-        .limit(1)
-    )
-    if bound:
         return
     raise HTTPException(status_code=403, detail="insufficient permission for this agent")
 

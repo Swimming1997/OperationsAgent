@@ -30,6 +30,6 @@ export function canAccessRoute(route: string, roles: string[]): boolean {
   if (route === 'benchmarks' || route === 'rules' || route === 'agents' || route === 'operations') return false;
   if (route === 'tasks') return set.has('operator');
   if (route === 'accounts') return set.has('operator');
-  if (route === 'intelligence') return set.has('operator') || set.has('sales');
+  if (route === 'intelligence' || route === 'reference-library') return set.has('operator') || set.has('sales');
   return false;
 }

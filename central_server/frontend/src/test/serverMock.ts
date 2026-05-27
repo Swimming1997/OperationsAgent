@@ -1,5 +1,5 @@
 import { vi } from 'vitest';
-import { agents, behaviorProfiles, benchmarkGroups, businessTypes, intelligenceList, networkProfiles, options, platformAccounts, productDetail, readinessBlocked, readinessReady, riskPolicies, ruleSets, taskDetail, taskList, taskRun } from './mockData';
+import { agents, behaviorProfiles, benchmarkGroups, businessTypes, intelligenceList, networkProfiles, options, platformAccounts, productDetail, readinessBlocked, readinessReady, referenceLibraryItems, riskPolicies, ruleSets, taskDetail, taskList, taskRun } from './mockData';
 import { operationsJobDetail, operationsJobs, operationsSummary, operationsTaskRunDetail, operationsTaskRuns } from './operationsMockData';
 
 type FetchMockConfig = {
@@ -33,7 +33,7 @@ export function installFetchMock(config: FetchMockConfig = {}) {
         employee_id: config.authEmployeeId ?? null,
       });
     }
-    if (url.includes('/api/auth/login') || url.includes('/api/auth/bootstrap-admin')) {
+    if (url.includes('/api/auth/login') || url.includes('/api/auth/bootstrap-admin') || url.includes('/api/auth/register')) {
       return json({
         access_token: 'test-token',
         token_type: 'bearer',
@@ -46,6 +46,43 @@ export function installFetchMock(config: FetchMockConfig = {}) {
           roles: ['supervisor'],
           employee_id: null,
         },
+      });
+    }
+    if (/^http:\/\/127\.0\.0\.1:\d+\/healthz$/.test(url)) {
+      return json({ status: 'ok' });
+    }
+    if (url.includes('/bridge/agents/discover')) {
+      const portMatch = url.match(/127\.0\.0\.1:(\d+)/);
+      const port = portMatch ? Number(portMatch[1]) : 18765;
+      return json({
+        items: [{
+          device_name: 'WIN-AGENT',
+          machine_fingerprint: 'fp',
+          agent_id: 'agent-1',
+          center_url: 'http://127.0.0.1:8000',
+          bridge_url: `http://127.0.0.1:${port}`,
+          status: 'online',
+        }],
+      });
+    }
+    if (url.includes('http://127.0.0.1:18765/bridge/chrome/start')) {
+      return json({
+        account_id: 'account-1',
+        profile_key: 'accounts/account-1',
+        profile_dir: 'profiles/accounts/account-1',
+        cdp_url: 'http://127.0.0.1:9222',
+        pid: 12345,
+        message: 'chrome started',
+      });
+    }
+    if (url.includes('/bridge/accounts/account-1/session-status') || url.includes('/bridge/accounts/account-1/revalidate')) {
+      return json({
+        account_id: 'account-1',
+        status: 'ready',
+        message: 'xhs session ready',
+        cdp_url: 'http://127.0.0.1:9222',
+        platform_nickname: '测试昵称',
+        platform_home_url: 'https://www.xiaohongshu.com/explore',
       });
     }
     if (url.includes('/api/users') && (!init?.method || init.method === 'GET')) {
@@ -75,6 +112,16 @@ export function installFetchMock(config: FetchMockConfig = {}) {
       });
     }
     if (url.includes('/api/product/options')) return json(options);
+    if (url.includes('/bridge-chrome-context') && init?.method === 'POST') {
+      return json({ account_id: 'account-1', profile_key: 'accounts/account-1', login_cdp_port: 9301 });
+    }
+    if (url.includes('/sync-local-login') && init?.method === 'POST') {
+      return json({
+        account_id: 'account-1',
+        auth_status: 'active',
+        message: '本机会话已同步到中央，账号登录态已更新为可用',
+      });
+    }
     if (url.includes('/login-sessions/active')) return json(null);
     if (url.includes('/login-sessions/reset') && init?.method === 'POST') {
       return json({ account_id: 'account-1', auth_status: 'not_logged_in', message: '登录态已重置为未登录，可重新发起登录' });
@@ -101,6 +148,12 @@ export function installFetchMock(config: FetchMockConfig = {}) {
     if (url.includes('/api/product/accounts')) return json(init?.method === 'PATCH' || init?.method === 'POST' ? platformAccounts[0] : platformAccounts);
     if (url.includes('/api/business-account-types/type-1/rule-sets')) return json([{ id: 'bind-1', business_account_type_id: 'type-1', rule_set_id: 'rule-set-1', rule_set_name: 'SCI 关键词', is_default: false }]);
     if (url.includes('/api/business-account-types')) return json(init?.method === 'PATCH' || init?.method === 'POST' ? businessTypes[0] : businessTypes);
+    if (url.includes('/api/product/me/local-agents/resolve-discover') && init?.method === 'POST') {
+      const body = init.body ? JSON.parse(String(init.body)) : { items: [] };
+      const item = body.items?.[0];
+      const agent = agents.find((row) => row.machine_fingerprint === item?.machine_fingerprint) || agents[0];
+      return json([{ agent: { ...agent, last_heartbeat_at: new Date().toISOString() }, bridge_port: item?.bridge_port ?? 18765 }]);
+    }
     if (url.includes('/api/local-agents/') && init?.method === 'PATCH') {
       const body = init.body ? JSON.parse(String(init.body)) : {};
       const agentId = url.split('/api/local-agents/')[1]?.split('?')[0] || 'agent-1';
@@ -125,6 +178,22 @@ export function installFetchMock(config: FetchMockConfig = {}) {
     if (url.includes('/api/benchmark-groups/group-1/members')) return json(init?.method === 'POST' ? { id: 'member-2', benchmark_group_id: 'group-1', platform: 'xhs', enabled: true } : [{ id: 'member-1', benchmark_group_id: 'group-1', creator_monitor_id: 'monitor-1', platform: 'xhs', creator_platform_id: 'creator-1', creator_profile_url: null, display_name: '对标作者', platform_context: {}, enabled: true }]);
     if (url.includes('/api/benchmark-groups/group-1/business-account-types')) return json(init?.method === 'POST' ? { binding_id: 'gbind-1' } : [{ id: 'gbind-1', benchmark_group_id: 'group-1', business_account_type_id: 'type-1', business_account_type_name: '论文服务号' }]);
     if (url.includes('/api/benchmark-groups')) return json(init?.method === 'PATCH' || init?.method === 'POST' ? benchmarkGroups[0] : benchmarkGroups);
+    if (url.includes('/api/operation-rules')) {
+      const operationRule = {
+        id: 'op-rule-1',
+        rule_type: 'title',
+        title: '标题控制',
+        content: '小红书标题建议不超过 20 字',
+        platform: 'xhs',
+        enabled: true,
+        version: 1,
+        created_by_user_id: 'supervisor-user',
+        created_at: '2026-05-19T01:00:00Z',
+        updated_at: '2026-05-19T01:00:00Z',
+      };
+      if (init?.method === 'POST' || init?.method === 'PATCH') return json(operationRule);
+      return json([operationRule]);
+    }
     if (url.includes('/api/keyword-rule-sets/rule-set-1/rules')) return json(init?.method === 'POST' ? { id: 'rule-2', rule_set_id: 'rule-set-1', keyword: '投稿', normalized_keyword: null, match_mode: 'contains', enabled: true, weight: 1 } : [{ id: 'rule-1', rule_set_id: 'rule-set-1', keyword: 'SCI', normalized_keyword: 'sci', match_mode: 'contains', enabled: true, weight: 2 }]);
     if (url.includes('/api/keyword-rule-sets')) return json(init?.method === 'PATCH' || init?.method === 'POST' ? ruleSets[0] : ruleSets);
     if (url.includes('/api/keyword-rules')) return json({ id: 'rule-1', rule_set_id: 'rule-set-1', keyword: 'SCI', normalized_keyword: 'sci', match_mode: 'contains', enabled: true, weight: 2 });
@@ -151,7 +220,28 @@ export function installFetchMock(config: FetchMockConfig = {}) {
         filter_context_note: '当前只能记录 requested filter，尚不能证明 Local Agent 已实际点选小红书筛选控件。',
       });
     }
-    if (url.includes('/api/reference-library/items')) return json({ items: [], page: 1, page_size: 20, total: 0 });
+    if (url.includes('/api/reference-library/items/re-evaluate') && init?.method === 'POST') {
+      return json({
+        results: [{
+          content_id: 'content-1',
+          item_id: 'ref-1',
+          status: 'skipped_manual_locked',
+          library_type: 'non_lead',
+          rating: 'poor',
+          reason: '人工锁定，规则重评已跳过',
+        }],
+      });
+    }
+    if (url.includes('/api/reference-library/items/bulk')) return json({ succeeded: referenceLibraryItems, failed: [] });
+    if (url.includes('/api/reference-library/items/ref-1/events')) return json([
+      { id: 'event-ref-1', library_item_id: 'ref-1', content_id: 'content-1', event_type: 'created', user_id: 'supervisor-user', employee_id: null, event_payload: {}, created_at: '2026-05-19T01:00:00Z' },
+    ]);
+    if (url.includes('/api/reference-library/items/ref-1/archive')) return json({ ...referenceLibraryItems[0], status: 'archived', usage_status: 'archived' });
+    if (url.includes('/api/reference-library/items/ref-1') && init?.method === 'PATCH') {
+      const body = init.body ? JSON.parse(String(init.body)) : {};
+      return json({ ...referenceLibraryItems[0], ...body });
+    }
+    if (url.includes('/api/reference-library/items')) return json({ items: referenceLibraryItems, page: 1, page_size: 20, total: referenceLibraryItems.length });
     if (url.includes('/api/intelligence/contents/content-1/product-detail')) return json(productDetail);
     if (url.includes('/api/intelligence/contents/content-1/assign')) return json(productDetail.workflow_state);
     if (url.includes('/api/intelligence/contents/content-1/select')) return json({ ...productDetail.workflow_state, workflow_status: 'selected' });

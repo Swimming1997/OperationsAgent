@@ -11,9 +11,12 @@ from intelligence_engine.domain.auth_schemas import (
     AuthUserRead,
     BootstrapAdminRequest,
     BootstrapStatusResponse,
+    ChangePasswordRequest,
+    ChangePasswordResponse,
     LoginRequest,
     LoginResponse,
     LogoutResponse,
+    RegisterRequest,
 )
 from intelligence_engine.domain.enums import UserRoleName
 from intelligence_engine.security.auth import Principal, get_current_principal
@@ -96,9 +99,55 @@ def login(request: LoginRequest, db: Session = Depends(get_db)) -> LoginResponse
     return _issue_token(repo, user)
 
 
+@router.post("/register", response_model=LoginResponse)
+def register(request: RegisterRequest, db: Session = Depends(get_db)) -> LoginResponse:
+    users_count = db.scalar(select(func.count()).select_from(User)) or 0
+    if users_count == 0:
+        raise HTTPException(status_code=409, detail="system needs bootstrap admin")
+    repo = ProductRepository(db)
+    username = request.username.strip()
+    display_name = request.display_name.strip()
+    email = request.email.strip() if request.email else None
+    if not username:
+        raise HTTPException(status_code=422, detail="username is required")
+    if not display_name:
+        raise HTTPException(status_code=422, detail="display name is required")
+    if repo.get_user_by_username(username):
+        raise HTTPException(status_code=409, detail="username already exists")
+    user = repo.create_user(
+        username=username,
+        display_name=display_name,
+        email=email or None,
+        password_hash=hash_password(request.password),
+        role_names=[UserRoleName.OPERATOR.value],
+        metadata={},
+    )
+    db.commit()
+    db.refresh(user)
+    return _issue_token(repo, user)
+
+
 @router.post("/logout", response_model=LogoutResponse)
 def logout() -> LogoutResponse:
     return LogoutResponse()
+
+
+@router.post("/change-password", response_model=ChangePasswordResponse)
+def change_password(
+    request: ChangePasswordRequest,
+    principal: Principal = Depends(get_current_principal),
+    db: Session = Depends(get_db),
+) -> ChangePasswordResponse:
+    user = db.get(User, principal.user_id)
+    if not user:
+        raise HTTPException(status_code=401, detail="unknown user")
+    if not verify_password(request.current_password, user.password_hash):
+        raise HTTPException(status_code=401, detail="current password is incorrect")
+    if request.current_password == request.new_password:
+        raise HTTPException(status_code=400, detail="new password must be different")
+    ProductRepository(db).set_password(user, hash_password(request.new_password))
+    db.commit()
+    return ChangePasswordResponse()
 
 
 @router.get("/me", response_model=AuthUserRead)

@@ -13,6 +13,9 @@ from intelligence_engine.domain.account_login_schemas import (
     AccountLoginSessionRead,
     AccountLoginStartRequest,
     AccountLoginSessionStartResponse,
+    BridgeChromeContextResponse,
+    SyncLocalBridgeLoginRequest,
+    SyncLocalBridgeLoginResponse,
 )
 from intelligence_engine.domain.enums import LoginSessionStatus, UserRoleName
 from intelligence_engine.security.auth import Principal, get_optional_principal, require_any_role
@@ -22,18 +25,22 @@ router = APIRouter(prefix="/api", tags=["account-login"])
 
 
 def _session_read(session: AccountLoginSession) -> AccountLoginSessionRead:
+    from intelligence_engine.services.account_login_service import FRESH_PROFILE_MARKER
+
+    fresh = session.error_message == FRESH_PROFILE_MARKER
     return AccountLoginSessionRead(
         id=session.id,
         platform_account_id=session.platform_account_id,
         agent_id=session.agent_id,
         status=session.status,
-        error_message=session.error_message,
+        error_message=None if fresh else session.error_message,
         profile_key=session.profile_key,
         cdp_port=session.cdp_port,
         claimed_by_agent_id=session.claimed_by_agent_id,
         started_at=session.started_at,
         finished_at=session.finished_at,
         expires_at=session.expires_at,
+        fresh_profile=fresh,
     )
 
 
@@ -68,6 +75,65 @@ def reset_account_login(
     )
 
 
+@router.post("/product/accounts/{account_id}/bridge-chrome-context", response_model=BridgeChromeContextResponse)
+def prepare_bridge_chrome_context(
+    account_id: str,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+):
+    account = db.get(PlatformAccount, account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="account not found")
+    ensure_account_writable(db, principal, account)
+    service = AccountLoginService(db)
+    profile_key = service.ensure_account_profile_key(account)
+    cdp_port = service.allocate_cdp_port(account)
+    db.commit()
+    return BridgeChromeContextResponse(
+        account_id=account.id,
+        profile_key=profile_key,
+        login_cdp_port=cdp_port,
+    )
+
+
+@router.post("/product/accounts/{account_id}/sync-local-login", response_model=SyncLocalBridgeLoginResponse)
+def sync_local_bridge_login(
+    account_id: str,
+    request: SyncLocalBridgeLoginRequest | None = None,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+):
+    account = db.get(PlatformAccount, account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="account not found")
+    ensure_account_writable(db, principal, account)
+    body = request or SyncLocalBridgeLoginRequest()
+    service = AccountLoginService(db)
+    try:
+        account = service.sync_local_bridge_login(
+            account,
+            preferred_agent_id=body.preferred_agent_id,
+            login_cdp_port=body.login_cdp_port,
+            platform_nickname=body.platform_nickname,
+            platform_home_url=body.platform_home_url,
+            bridge_status=body.bridge_status,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    db.commit()
+    if body.bridge_status == "ready":
+        message = "本机会话已同步到中央，账号登录态已更新为可用"
+    elif body.bridge_status == "manual_verify_required":
+        message = "本机会话需要人工验证，中央状态已更新为待验证"
+    else:
+        message = "本地会话显示需重新登录，中央状态已回落为未登录/过期"
+    return SyncLocalBridgeLoginResponse(
+        account_id=account.id,
+        auth_status=account.auth_status,
+        message=message,
+    )
+
+
 @router.post("/product/accounts/{account_id}/login-sessions", response_model=AccountLoginSessionStartResponse)
 def start_account_login(
     account_id: str,
@@ -81,7 +147,10 @@ def start_account_login(
     ensure_account_writable(db, principal, account)
     service = AccountLoginService(db)
     body = request or AccountLoginStartRequest()
-    session = service.start_login(account, force=body.force)
+    try:
+        session = service.start_login(account, force=body.force, preferred_agent_id=body.preferred_agent_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     db.commit()
     return AccountLoginSessionStartResponse(session=_session_read(session), message=_waiting_message(session))
 

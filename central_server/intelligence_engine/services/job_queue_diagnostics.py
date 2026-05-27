@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
@@ -112,11 +112,6 @@ def build_task_run_queue_context(db: Session, run: TaskRun) -> dict[str, Any]:
     target_job = pending_jobs[0]
     priority_hint = target_job.priority
     account_agent_id = target_job.local_agent_id
-    if not account_agent_id and target_job.account_id:
-        from intelligence_engine.db.models import PlatformAccount
-
-        account = db.get(PlatformAccount, target_job.account_id)
-        account_agent_id = account.default_agent_id if account else None
 
     ahead = 0
     agent_running_job: Job | None = None

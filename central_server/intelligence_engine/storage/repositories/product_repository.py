@@ -1,9 +1,10 @@
-﻿from collections.abc import Sequence
+from collections.abc import Sequence
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from intelligence_engine.db.models import (
+    AccountAgentBinding,
     AccountSession,
     BehaviorProfile,
     BenchmarkGroup,
@@ -177,29 +178,24 @@ class ProductRepository:
         return list(self.db.scalars(stmt.order_by(LocalAgent.last_heartbeat_at.desc().nullslast(), LocalAgent.created_at.desc())))
 
     def list_bindable_agents_for_employee(self, employee_id: str) -> list[LocalAgent]:
-        """Agents owned by employee or already bound as default_agent on their accounts."""
+        """本运营已绑定 + 中央未绑定运营（employee_id 为空）的设备，供登记与选机。"""
+        from sqlalchemy import or_
+
         from intelligence_engine.services.agent_selection import sort_agents_for_display
 
-        bound_agent_ids = {
-            row
-            for row in self.db.scalars(
-                select(PlatformAccount.default_agent_id).where(
-                    PlatformAccount.employee_id == employee_id,
-                    PlatformAccount.default_agent_id.isnot(None),
+        agents = list(
+            self.db.scalars(
+                select(LocalAgent)
+                .where(
+                    or_(
+                        LocalAgent.employee_id == employee_id,
+                        LocalAgent.employee_id.is_(None),
+                    )
                 )
-            ).all()
-            if row
-        }
-        clauses = [LocalAgent.employee_id == employee_id]
-        if bound_agent_ids:
-            clauses.append(LocalAgent.id.in_(bound_agent_ids))
-        stmt = select(LocalAgent).where(or_(*clauses))
-        agents = list(self.db.scalars(stmt))
-        visible = [
-            agent
-            for agent in agents
-            if agent.status != "retired" or agent.id in bound_agent_ids
-        ]
+                .order_by(LocalAgent.last_heartbeat_at.desc().nullslast())
+            )
+        )
+        visible = [agent for agent in agents if agent.status != "retired"]
         return sort_agents_for_display(visible)
 
     def list_accounts(
@@ -230,7 +226,7 @@ class ProductRepository:
         external_account_id: str | None,
         business_account_type: str | None,
         business_account_type_id: str | None,
-        default_agent_id: str | None,
+        default_agent_id: str | None = None,
         metadata: dict,
         account_role: str = "intelligence_collector",
         health_status: str = "healthy",
@@ -242,7 +238,6 @@ class ProductRepository:
             external_account_id=external_account_id,
             business_account_type=business_account_type,
             business_account_type_id=business_account_type_id,
-            default_agent_id=default_agent_id,
             metadata_json=metadata,
             auth_status="not_logged_in",
             account_role=account_role,
@@ -263,6 +258,59 @@ class ProductRepository:
             account.metadata_json = metadata
         self.db.flush()
         return account
+
+    def list_account_agent_bindings(self, account_id: str) -> list[AccountAgentBinding]:
+        return list(
+            self.db.scalars(
+                select(AccountAgentBinding)
+                .where(AccountAgentBinding.account_id == account_id)
+                .where(AccountAgentBinding.enabled.is_(True))
+                .order_by(AccountAgentBinding.updated_at.desc())
+            )
+        )
+
+    def list_agent_bindings_for_employee(self, employee_id: str) -> list[AccountAgentBinding]:
+        return list(
+            self.db.scalars(
+                select(AccountAgentBinding)
+                .where(AccountAgentBinding.employee_id == employee_id)
+                .where(AccountAgentBinding.enabled.is_(True))
+            )
+        )
+
+    def ensure_account_agent_binding(
+        self,
+        *,
+        account_id: str,
+        agent_id: str,
+        employee_id: str | None,
+    ) -> AccountAgentBinding:
+        binding = self.db.scalar(
+            select(AccountAgentBinding).where(
+                AccountAgentBinding.account_id == account_id,
+                AccountAgentBinding.agent_id == agent_id,
+            )
+        )
+        if binding:
+            binding.enabled = True
+            binding.employee_id = employee_id
+            self.db.flush()
+            return binding
+        binding = AccountAgentBinding(account_id=account_id, agent_id=agent_id, employee_id=employee_id, enabled=True)
+        self.db.add(binding)
+        self.db.flush()
+        return binding
+
+    def disable_account_agent_binding(self, *, account_id: str, agent_id: str) -> None:
+        binding = self.db.scalar(
+            select(AccountAgentBinding).where(
+                AccountAgentBinding.account_id == account_id,
+                AccountAgentBinding.agent_id == agent_id,
+            )
+        )
+        if binding:
+            binding.enabled = False
+            self.db.flush()
 
     def latest_session_status(self, account_id: str) -> str | None:
         stmt = (

@@ -467,9 +467,9 @@ def audit_reference_library(db: Session) -> dict[str, Any]:
     items = list(db.scalars(select(ReferenceLibraryItem)))
     duplicate_active = list(
         db.execute(
-            select(ReferenceLibraryItem.content_id, ReferenceLibraryItem.library_type, func.count(ReferenceLibraryItem.id))
+            select(ReferenceLibraryItem.content_id, func.count(ReferenceLibraryItem.id))
             .where(ReferenceLibraryItem.status == "active")
-            .group_by(ReferenceLibraryItem.content_id, ReferenceLibraryItem.library_type)
+            .group_by(ReferenceLibraryItem.content_id)
             .having(func.count(ReferenceLibraryItem.id) > 1)
         )
     )
@@ -494,8 +494,8 @@ def audit_reference_library(db: Session) -> dict[str, Any]:
         "manual_tags_top_50": _top_counter(manual_tags),
         "material_tags_top_50": _top_counter(material_tags),
         "duplicate_active_groups": [
-            {"content_id": content_id, "library_type": library_type, "count": count}
-            for content_id, library_type, count in duplicate_active
+            {"content_id": content_id, "count": count}
+            for content_id, count in duplicate_active
         ],
         "missing_created_by_user_id": missing_user[:20],
         "missing_selected_reason": missing_reason[:20],

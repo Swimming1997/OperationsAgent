@@ -41,24 +41,55 @@ def evaluate_xhs_session_state(*, url: str, visible_text: str) -> tuple[SessionS
     url_lower = url.lower()
     if "login" in url_lower or "signin" in url_lower:
         return SessionStatus.EXPIRED, "xhs redirected to login page"
-    if "登录" in visible_text and any(token in visible_text for token in ("手机号", "验证码", "扫码", "密码", "注册")):
-        return SessionStatus.EXPIRED, "xhs login is required"
     if "验证码" in visible_text or "安全验证" in visible_text or "滑块" in visible_text:
         return SessionStatus.MANUAL_VERIFY_REQUIRED, "xhs page requires manual verification"
-    logged_in_markers = (
+    strong_ready_markers = (
         "退出登录",
         "创作者中心",
         "创作中心",
         "个人主页",
-        "我 的",
-        "消息",
-        "通知",
+        "我的",
     )
-    if any(marker in visible_text for marker in logged_in_markers):
+    nav_markers = ("首页", "发现", "关注")
+    action_markers = ("消息", "通知", "发布", "我的")
+    # 部分登录后的页面仍可能出现“登录”字样（例如按钮文案），先用已登录特征兜底，避免误判。
+    if any(marker in visible_text for marker in strong_ready_markers):
         return SessionStatus.READY, "xhs session ready"
-    if "发布" in visible_text and ("发现" in visible_text or "explore" in url_lower):
+    if "xiaohongshu.com/user/profile" in url_lower and any(marker in visible_text for marker in nav_markers) and any(
+        marker in visible_text for marker in action_markers
+    ):
         return SessionStatus.READY, "xhs session ready"
+    if "登录" in visible_text and any(token in visible_text for token in ("手机号", "验证码", "扫码", "密码", "注册")):
+        return SessionStatus.EXPIRED, "xhs login is required"
     return SessionStatus.EXPIRED, "xhs logged-in state not detected; finish login in the browser window"
+
+
+def evaluate_xhs_selfinfo_payload(payload: Any) -> tuple[SessionStatus | None, str | None]:
+    """优先用 selfinfo API 判定登录态；返回 None 表示无法判断，交给 UI 文案兜底。"""
+    if not isinstance(payload, dict):
+        return None, None
+    text = " ".join(
+        str(payload.get(key, ""))
+        for key in ("msg", "message", "detail")
+        if payload.get(key) is not None
+    )
+    lowered = text.lower()
+    if any(token in lowered for token in ("verify",)) or any(token in text for token in ("验证", "滑块")):
+        return SessionStatus.MANUAL_VERIFY_REQUIRED, "xhs page requires manual verification"
+    if any(token in lowered for token in ("login", "not login", "unauthorized")) or any(
+        token in text for token in ("未登录", "登录")
+    ):
+        return SessionStatus.EXPIRED, "xhs login is required"
+    if payload.get("success") is True:
+        data = payload.get("data")
+        if isinstance(data, dict):
+            profile = data.get("basic_info") if isinstance(data.get("basic_info"), dict) else data
+            nickname = profile.get("nickname") if isinstance(profile, dict) else None
+            user_id = profile.get("user_id") if isinstance(profile, dict) else None
+            if nickname or user_id:
+                return SessionStatus.READY, "xhs session ready"
+        return SessionStatus.EXPIRED, "xhs login is required"
+    return None, None
 
 
 class XhsBrowserSessionProvider:
@@ -119,6 +150,18 @@ class XhsBrowserSessionProvider:
                 page = await context.new_page()
             if probe_only and cdp_url:
                 await page.wait_for_timeout(300)
+                api_status, api_message = await self._probe_selfinfo_via_fetch(page)
+                if api_status and api_message:
+                    return XhsSessionAcquireResult(
+                        status=api_status,
+                        message=api_message,
+                        playwright=playwright,
+                        browser=browser,
+                        context=context,
+                        page=page,
+                        diagnostics={**diagnostics, "url": page.url, "probe": "selfinfo"},
+                        detached_cdp=bool(cdp_url and probe_only),
+                    )
             else:
                 await page.goto(self.home_url, wait_until="domcontentloaded", timeout=int(session_meta.get("navigation_timeout_ms", 45000)))
                 await page.wait_for_timeout(1500)
@@ -145,3 +188,31 @@ class XhsBrowserSessionProvider:
                 message=f"session_connect_failed: {exc}",
                 diagnostics=diagnostics,
             )
+
+    async def _probe_selfinfo_via_fetch(self, page: Page) -> tuple[SessionStatus | None, str | None]:
+        try:
+            payload = await page.evaluate(
+                """async () => {
+                    try {
+                        const resp = await fetch('/api/sns/web/v1/user/selfinfo', {
+                            method: 'GET',
+                            credentials: 'include',
+                        });
+                        const text = await resp.text();
+                        let body = null;
+                        try { body = JSON.parse(text); } catch (_) { body = { message: text }; }
+                        return { ok: resp.ok, status: resp.status, body };
+                    } catch (err) {
+                        return { ok: false, status: 0, body: { message: String(err) } };
+                    }
+                }"""
+            )
+        except Exception:
+            return None, None
+        if not isinstance(payload, dict):
+            return None, None
+        status = payload.get("status")
+        body = payload.get("body")
+        if status in (401, 403):
+            return SessionStatus.EXPIRED, "xhs login is required"
+        return evaluate_xhs_selfinfo_payload(body)

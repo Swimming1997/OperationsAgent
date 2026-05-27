@@ -92,3 +92,7 @@ storage_state.json
 Thumbs.db
 .vscode/
 .idea/
+
+# Office temporary lock files
+~$*.docx
+~$*.doc

@@ -88,13 +88,15 @@ export function formatAgentOptionLabel(agent: {
   status?: string;
   last_heartbeat_at?: string | null;
   machine_fingerprint?: string | null;
+  login_cdp_port?: number | null;
 }): string {
   const name = formatAgentDeviceLabel(agent);
   const live = isAgentLive(agent);
   const heartbeat = live ? formatAgentHeartbeat(agent) : '暂无心跳';
   const owner = agent.employee_display_name || '未绑定员工';
+  const cdp = agent.login_cdp_port ? ` · CDP :${agent.login_cdp_port}` : '';
   const suffix = agent.machine_fingerprint ? ` · ${agent.machine_fingerprint.slice(-6)}` : ` · ${agent.id.slice(0, 8)}`;
-  return `${name} · ${live ? '在线' : '离线'} · ${owner} · ${heartbeat}${suffix}`;
+  return `${name} · ${live ? '在线' : '离线'} · ${owner}${cdp} · ${heartbeat}${suffix}`;
 }
 
 export function formatAgentHeartbeat(agent: { last_heartbeat_at?: string | null }): string {

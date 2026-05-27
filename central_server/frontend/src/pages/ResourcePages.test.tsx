@@ -80,6 +80,14 @@ describe('resource configuration pages', () => {
     expect(await screen.findByText('SCI')).toBeInTheDocument();
   });
 
+  it('renders operation rules tab', async () => {
+    installFetchMock();
+    const user = userEvent.setup();
+    render(<RulesPage role="supervisor" userId="supervisor-user" />);
+    await user.click(screen.getByRole('button', { name: '运营规则' }));
+    expect(await screen.findByText('标题控制')).toBeInTheDocument();
+  });
+
   it('renders agent list and detail', async () => {
     installFetchMock();
     render(<AgentsPage role="supervisor" userId="supervisor-user" />);

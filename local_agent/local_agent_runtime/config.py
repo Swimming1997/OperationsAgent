@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import tomllib
@@ -25,6 +25,7 @@ def load_agent_runtime_config(path: str | Path) -> AgentRuntimeConfig:
             }
         else:
             account_sessions[str(account_id)] = dict(account_config)
+    bridge = data.get("local_bridge") if isinstance(data.get("local_bridge"), dict) else {}
     return AgentRuntimeConfig(
         center_base_url=data.get("center_url", "http://127.0.0.1:8000"),
         agent_id=data.get("agent_id"),
@@ -36,6 +37,10 @@ def load_agent_runtime_config(path: str | Path) -> AgentRuntimeConfig:
         poll_interval_seconds=float(data.get("claim_interval_seconds", data.get("poll_interval_seconds", 5))),
         heartbeat_interval_seconds=float(data.get("heartbeat_interval_seconds", 30)),
         max_jobs_per_claim=int(data.get("max_concurrent_jobs", data.get("max_jobs_per_claim", 1))),
+        local_bridge_enabled=bool(bridge.get("enabled", True)),
+        local_bridge_host=str(bridge.get("host", "127.0.0.1")),
+        local_bridge_port=int(bridge.get("port", 18765)),
+        local_bridge_token=bridge.get("token"),
         supported_job_types=tuple(data.get("supported_job_types") or AgentRuntimeConfig().supported_job_types),
         account_sessions=account_sessions,
         project_root=_resolve_project_root(data.get("project_root"), config_path),

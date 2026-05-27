@@ -6,6 +6,7 @@ import { AccountsPage } from './pages/AccountsPage';
 import { AgentsPage } from './pages/AgentsPage';
 import { BenchmarksPage } from './pages/BenchmarksPage';
 import { BootstrapAdminPage } from './pages/BootstrapAdminPage';
+import { BenchmarkLibraryPage } from './pages/BenchmarkLibraryPage';
 import { IntelligencePage } from './pages/IntelligencePage';
 import { LoginPage } from './pages/LoginPage';
 import { OrganizationPage } from './pages/OrganizationPage';
@@ -15,7 +16,7 @@ import { TasksPage } from './pages/TasksPage';
 import { canAccessRoute } from './utils/roleLabels';
 import './styles.css';
 
-const routes = ['intelligence', 'tasks', 'operations', 'accounts', 'benchmarks', 'rules', 'agents', 'organization'];
+const routes = ['intelligence', 'reference-library', 'tasks', 'operations', 'accounts', 'benchmarks', 'rules', 'agents', 'organization'];
 
 function routeFromPath() {
   const segment = window.location.pathname.replace(/^\//, '').split('/')[0];
@@ -26,15 +27,21 @@ function taskRunIdFromSearch() {
   return new URLSearchParams(window.location.search).get('task_run') || undefined;
 }
 
+function intelligenceContentIdFromSearch() {
+  return new URLSearchParams(window.location.search).get('content_id') || undefined;
+}
+
 function AuthenticatedApp() {
   const auth = useAuth();
   const [route, setRoute] = useState(routeFromPath);
   const [opsTaskRunId, setOpsTaskRunId] = useState<string | undefined>(taskRunIdFromSearch);
+  const [intelligenceContentId, setIntelligenceContentId] = useState<string | undefined>(intelligenceContentIdFromSearch);
 
   useEffect(() => {
     const onPop = () => {
       setRoute(routeFromPath());
       setOpsTaskRunId(taskRunIdFromSearch());
+      setIntelligenceContentId(intelligenceContentIdFromSearch());
     };
     window.addEventListener('popstate', onPop);
     return () => window.removeEventListener('popstate', onPop);
@@ -85,7 +92,20 @@ function AuthenticatedApp() {
       {route === 'rules' && <RulesPage role={role} userId={userId} />}
       {route === 'agents' && <AgentsPage role={role} userId={userId} />}
       {route === 'organization' && <OrganizationPage role={role} userId={userId} />}
-      {route === 'intelligence' && <IntelligencePage role={role} userId={userId} />}
+      {route === 'intelligence' && (
+        <IntelligencePage role={role} userId={userId} initialContentId={intelligenceContentId} />
+      )}
+      {route === 'reference-library' && (
+        <BenchmarkLibraryPage
+          role={role}
+          userId={userId}
+          onOpenIntelligencePool={(contentId) => {
+            const params = new URLSearchParams();
+            params.set('content_id', contentId);
+            changeRoute('intelligence', params);
+          }}
+        />
+      )}
     </Shell>
   );
 }

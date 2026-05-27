@@ -1,4 +1,4 @@
-﻿from fastapi.testclient import TestClient
+from fastapi.testclient import TestClient
 
 from intelligence_engine.db.models import AccountSession
 from intelligence_engine.db.session import get_db
@@ -80,9 +80,9 @@ def test_platform_account_product_api_includes_business_type_agent_and_session_h
         external_account_id="xhs-a",
         business_account_type="legacy",
         business_account_type_id=business_type["id"],
-        default_agent_id=agent.id,
         metadata={"persona": "paper"},
     )
+    agent.employee_id = employee["id"]
     db_session.add(
         AccountSession(
             account_id=account.id,
@@ -100,8 +100,9 @@ def test_platform_account_product_api_includes_business_type_agent_and_session_h
     body = response.json()
     assert body["employee_display_name"] == "Bob"
     assert body["business_account_type_name"] == "论文咨询型"
-    assert body["default_agent_device_name"] == "bob-pc"
+    assert body["bindings"] == []
     assert body["session_health_status"] == "ready"
+    assert body["usage_status"] == "need_login"
     assert body["consecutive_failures"] == 0
 
 

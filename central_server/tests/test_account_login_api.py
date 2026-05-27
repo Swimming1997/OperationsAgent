@@ -134,6 +134,28 @@ def test_reset_login_clears_false_positive_active(client: TestClient, db_session
     assert get_account.json()["auth_status"] == "not_logged_in"
 
 
+def test_relogin_with_force_sets_fresh_profile_flag(client: TestClient):
+    headers = _auth_headers(client)
+    create = client.post(
+        "/api/product/accounts",
+        headers=headers,
+        json={"platform": "xhs", "display_name": "Fresh-Relogin", "employee_id": None},
+    )
+    account_id = create.json()["id"]
+    client.post(
+        f"/api/product/accounts/{account_id}/login-sessions",
+        headers=headers,
+        json={"force": True},
+    )
+    start = client.post(
+        f"/api/product/accounts/{account_id}/login-sessions",
+        headers=headers,
+        json={"force": True},
+    )
+    assert start.status_code == 200
+    assert start.json()["session"]["fresh_profile"] is True
+
+
 def test_relogin_with_force_resets_then_starts(client: TestClient):
     headers = _auth_headers(client)
     create = client.post(
@@ -152,6 +174,94 @@ def test_relogin_with_force_resets_then_starts(client: TestClient):
     )
     assert start.status_code == 200
     assert start.json()["session"]["status"] in {"waiting_agent", "created", "launching_browser"}
+
+
+def test_sync_local_bridge_login_updates_auth_status(client: TestClient, db_session):
+    from intelligence_engine.db.models import PlatformAccount, utcnow
+
+    headers = _auth_headers(client)
+    create = client.post(
+        "/api/product/accounts",
+        headers=headers,
+        json={"platform": "xhs", "display_name": "Bridge-Sync-A", "employee_id": None},
+    )
+    assert create.status_code == 200
+    account_id = create.json()["id"]
+
+    agent = LocalAgent(
+        employee_id=None,
+        device_name="WIN-BRIDGE",
+        machine_fingerprint="fp-bridge",
+        status="online",
+        capabilities_json={"supports_account_login": True, "job_types": ["feed_collect"]},
+        last_heartbeat_at=utcnow(),
+    )
+    db_session.add(agent)
+    account = db_session.get(PlatformAccount, account_id)
+    account.auth_status = "error"
+    db_session.commit()
+
+    sync = client.post(
+        f"/api/product/accounts/{account_id}/sync-local-login",
+        headers=headers,
+        json={
+            "preferred_agent_id": agent.id,
+            "login_cdp_port": 9426,
+            "platform_nickname": "测试昵称",
+            "bridge_status": "ready",
+        },
+    )
+    assert sync.status_code == 200, sync.text
+    assert sync.json()["auth_status"] == "active"
+
+    detail = client.get(f"/api/product/accounts/{account_id}", headers=headers)
+    assert detail.status_code == 200
+    assert detail.json()["auth_status"] == "active"
+    assert detail.json()["usage_status"] == "ready"
+    assert detail.json()["login_cdp_port"] == 9426
+
+
+def test_sync_local_bridge_login_expired_rolls_back_auth_status(client: TestClient, db_session):
+    from intelligence_engine.db.models import PlatformAccount, utcnow
+
+    headers = _auth_headers(client)
+    create = client.post(
+        "/api/product/accounts",
+        headers=headers,
+        json={"platform": "xhs", "display_name": "Bridge-Sync-Expired", "employee_id": None},
+    )
+    assert create.status_code == 200
+    account_id = create.json()["id"]
+
+    agent = LocalAgent(
+        employee_id=None,
+        device_name="WIN-BRIDGE-2",
+        machine_fingerprint="fp-bridge-2",
+        status="online",
+        capabilities_json={"supports_account_login": True, "job_types": ["feed_collect"]},
+        last_heartbeat_at=utcnow(),
+    )
+    db_session.add(agent)
+    account = db_session.get(PlatformAccount, account_id)
+    account.auth_status = "active"
+    db_session.commit()
+
+    sync = client.post(
+        f"/api/product/accounts/{account_id}/sync-local-login",
+        headers=headers,
+        json={
+            "preferred_agent_id": agent.id,
+            "login_cdp_port": 9426,
+            "bridge_status": "expired",
+        },
+    )
+    assert sync.status_code == 200, sync.text
+    assert sync.json()["auth_status"] == "expired"
+
+    detail = client.get(f"/api/product/accounts/{account_id}", headers=headers)
+    assert detail.status_code == 200
+    assert detail.json()["auth_status"] == "expired"
+    assert detail.json()["usage_status"] == "need_login"
 
 
 def test_is_agent_online_requires_recent_heartbeat():

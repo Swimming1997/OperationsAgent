@@ -43,7 +43,15 @@ async function authFetch<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {
       detail = await response.text();
     }
-    const message = response.status === 401 ? '用户名或密码错误' : `请求失败 (${response.status})`;
+    const serverDetail = typeof detail === 'object' && detail && 'detail' in detail ? (detail as { detail?: unknown }).detail : detail;
+    const detailText = typeof serverDetail === 'string' ? serverDetail : '';
+    const message = response.status === 401
+      ? (detailText === 'current password is incorrect' ? '当前密码不正确' : '用户名或密码错误')
+      : response.status === 409 && detailText === 'username already exists'
+        ? '用户名已存在'
+        : response.status === 422
+          ? '请检查填写内容'
+          : `请求失败 (${response.status})`;
     const error = new Error(message) as ApiError;
     error.status = response.status;
     error.detail = detail;
@@ -75,12 +83,31 @@ export function login(payload: { username: string; password: string }) {
   });
 }
 
+export function register(payload: {
+  username: string;
+  display_name: string;
+  email?: string;
+  password: string;
+}) {
+  return authFetch<LoginResponse>('/api/auth/register', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
 export function logoutApi() {
   return authFetch<{ message: string }>('/api/auth/logout', { method: 'POST' });
 }
 
 export function fetchMe() {
   return authFetch<AuthUser>('/api/auth/me');
+}
+
+export function changePassword(payload: { current_password: string; new_password: string }) {
+  return authFetch<{ message: string }>('/api/auth/change-password', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
 }
 
 export function persistLogin(response: LoginResponse) {

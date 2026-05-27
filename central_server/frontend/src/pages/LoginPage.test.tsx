@@ -23,4 +23,24 @@ describe('LoginPage', () => {
     await user.click(screen.getByRole('button', { name: '登录' }));
     expect(screen.getByRole('button', { name: '登录' })).toBeInTheDocument();
   });
+
+  it('allows switching to registration', async () => {
+    installFetchMock();
+    setStoredToken(null);
+    const user = userEvent.setup();
+    render(
+      <AuthProvider>
+        <LoginPage />
+      </AuthProvider>,
+    );
+
+    await user.click(screen.getByRole('tab', { name: '注册' }));
+    await user.type(screen.getByLabelText('用户名'), 'operator2');
+    await user.type(screen.getByLabelText('显示名'), '运营二号');
+    await user.type(screen.getByLabelText('密码'), 'OperatorPass123!');
+    await user.type(screen.getByLabelText('确认密码'), 'OperatorPass123!');
+    await user.click(screen.getByRole('button', { name: '注册并进入系统' }));
+
+    expect(screen.getByRole('button', { name: '注册并进入系统' })).toBeInTheDocument();
+  });
 });

@@ -1,17 +1,24 @@
 import { LogIn, Plus, RefreshCw, Save } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { getActiveAccountLogin, resetAccountLogin, startAccountLogin } from '../api/accountLogin';
+import { getActiveAccountLogin, prepareBridgeChromeContext, resetAccountLogin, startAccountLogin, syncLocalBridgeLogin } from '../api/accountLogin';
+import {
+  discoverLocalBridgeAgents,
+  fetchLocalBridgeSessionStatus,
+  getLocalBridgeScanPorts,
+  localBridgeHealthcheck,
+  revalidateLocalBridgeSession,
+  startLocalBridgeChrome,
+} from '../api/localBridge';
 import { fetchOptions } from '../api/options';
-import { createAccount, createBusinessAccountType, getAccount, listAccounts, listAgents, listBusinessAccountTypes, listEmployees, updateAccount, updateBusinessAccountType } from '../api/resources';
+import { createAccount, createBusinessAccountType, getAccount, listAccounts, listAgents, listBusinessAccountTypes, listEmployees, registerMyLocalAgents, resolveDiscoveredLocalAgents, updateAccount, updateBusinessAccountType } from '../api/resources';
 import { useAuth } from '../auth/AuthContext';
 import { ResourceSelect } from '../components/ResourceSelect';
 import { EmptyState, ErrorState, LoadingState } from '../components/Status';
-import type { AccountLoginSession, BusinessAccountType, Employee, LocalAgent, PlatformAccount, ProductOptions, Role } from '../types/api';
+import type { AccountLoginSession, BusinessAccountType, Employee, LocalAgent, LocalBridgeDiscoveredAgent, LocalBridgeSessionStatus, PlatformAccount, ProductOptions, Role } from '../types/api';
 import {
   formatAgentHeartbeat,
   formatAgentOptionLabel,
   isAgentLive,
-  pickPreferredAgent,
   sortAgentsForDisplay,
   supportsAccountLogin,
 } from '../utils/agentCapabilities';
@@ -20,9 +27,9 @@ import {
   isLoginSessionInProgress,
   isWaitingForAgent,
   labelAccountLoginBadge,
-  labelAccountOperationalStatus,
   labelAuthStatus,
   labelLoginSessionStatus,
+  labelUsageStatus,
 } from '../utils/authStatusLabels';
 
 type Props = { role: Role; userId: string };
@@ -50,7 +57,6 @@ function emptyCreateForm(defaults: { employeeId?: string; agentId?: string }): P
     display_name: '',
     status: 'active',
     employee_id: defaults.employeeId,
-    default_agent_id: defaults.agentId,
   };
 }
 
@@ -71,6 +77,16 @@ export function AccountsPage({ role, userId }: Props) {
   const [loginSession, setLoginSession] = useState<AccountLoginSession | null>(null);
   const [loginMessage, setLoginMessage] = useState('');
   const [loginBusy, setLoginBusy] = useState(false);
+  const [bridgeReady, setBridgeReady] = useState(false);
+  const [bridgeBusy, setBridgeBusy] = useState(false);
+  const [bridgeError, setBridgeError] = useState('');
+  const [bridgeSession, setBridgeSession] = useState<LocalBridgeSessionStatus | null>(null);
+  const [adminEmployeeFilter, setAdminEmployeeFilter] = useState('');
+  const [selectedLoginAgentId, setSelectedLoginAgentId] = useState('');
+  const [registerPickerOpen, setRegisterPickerOpen] = useState(false);
+  const [registerSelection, setRegisterSelection] = useState<string[]>([]);
+  const [registerCandidates, setRegisterCandidates] = useState<Array<{ agentId: string; discovered: LocalBridgeDiscoveredAgent }>>([]);
+  const [bridgeAlivePorts, setBridgeAlivePorts] = useState<number[]>([]);
   const readonly = false;
 
   const myEmployee = useMemo(
@@ -87,6 +103,11 @@ export function AccountsPage({ role, userId }: Props) {
     [bindableAgents],
   );
 
+  const ownedAgents = useMemo(
+    () => (scopedEmployeeId ? bindableAgents.filter((item) => item.employee_id === scopedEmployeeId) : bindableAgents),
+    [bindableAgents, scopedEmployeeId],
+  );
+
   const connectedAgent = useMemo(() => {
     const ownedLive = scopedEmployeeId
       ? liveLoginAgents.filter((item) => item.employee_id === scopedEmployeeId)
@@ -94,20 +115,26 @@ export function AccountsPage({ role, userId }: Props) {
     return ownedLive[0] || liveLoginAgents[0];
   }, [liveLoginAgents, scopedEmployeeId]);
 
-  const preferredAgent = useMemo(
-    () => pickPreferredAgent(bindableAgents, scopedEmployeeId),
-    [bindableAgents, scopedEmployeeId],
+  const loginAgentPickerOptions = useMemo(
+    () => ownedAgents.map((item) => ({
+      id: item.id,
+      label: formatAgentOptionLabel(item),
+      online: isAgentLive(item),
+    })),
+    [ownedAgents],
   );
 
   const employeeOptions = useMemo(() => employees.map((item) => ({ value: item.id, label: item.display_name, description: item.status })), [employees]);
-  const agentOptions = useMemo(() => bindableAgents.map((item) => ({
-    value: item.id,
-    label: formatAgentOptionLabel(item),
-    description: supportsAccountLogin(item.capabilities) ? '支持账号登录' : '未声明登录能力',
-  })), [bindableAgents]);
-
+  const managementEmployeeOptions = useMemo(
+    () => [{ value: '', label: '全部运营账号', description: '显示全部' }, ...employeeOptions],
+    [employeeOptions],
+  );
   const platformOptions = options.platforms.length > 0 ? options.platforms : FALLBACK_OPTIONS.platforms;
   const canCreate = Boolean(accountForm.display_name?.trim());
+  const visibleAccounts = useMemo(
+    () => (adminEmployeeFilter ? accounts.filter((item) => item.employee_id === adminEmployeeFilter) : accounts),
+    [accounts, adminEmployeeFilter],
+  );
 
   const operationalStatusOptions = [
     { value: 'active', label: '启用' },
@@ -120,16 +147,17 @@ export function AccountsPage({ role, userId }: Props) {
       return { ...account, active_login_session_status: null };
     }
     if (session.status === 'logged_in') {
-      return { ...account, auth_status: 'active', active_login_session_status: session.status };
+    return { ...account, auth_status: 'active', active_login_session_status: session.status, usage_status: 'ready' };
     }
     return {
       ...account,
       auth_status: account.auth_status === 'active' ? 'active' : 'login_pending',
       active_login_session_status: session.status,
+    usage_status: session.status === 'waiting_user_login' ? 'need_verify' : 'need_login',
     };
   }
 
-  const reload = useCallback(async () => {
+  const reload = useCallback(async (): Promise<LocalAgent[]> => {
     setLoading(true);
     setError('');
     try {
@@ -165,6 +193,7 @@ export function AccountsPage({ role, userId }: Props) {
         if (mode === 'create') return 'create';
         return mode;
       });
+      return nextAgents;
     } catch (err) {
       const apiErr = err as { status?: number };
       if (apiErr.status === 403) {
@@ -172,6 +201,7 @@ export function AccountsPage({ role, userId }: Props) {
       } else {
         setError(err instanceof Error ? err.message : '账号资源加载失败');
       }
+      return [];
     } finally {
       setLoading(false);
     }
@@ -180,7 +210,31 @@ export function AccountsPage({ role, userId }: Props) {
   useEffect(() => { void reload(); }, [reload]);
 
   useEffect(() => {
+    let cancelled = false;
+    async function checkBridge() {
+      try {
+        const result = await localBridgeHealthcheck();
+        if (cancelled) return;
+        setBridgeReady(result.status === 'ok');
+        setBridgeAlivePorts(result.ports);
+        if (result.status === 'ok') setBridgeError('');
+      } catch (err) {
+        if (cancelled) return;
+        setBridgeReady(false);
+        setBridgeError(err instanceof Error ? err.message : '本机助手不可达');
+      }
+    }
+    void checkBridge();
+    const timer = window.setInterval(() => { void checkBridge(); }, 15000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  useEffect(() => {
     if (!selected?.id) {
+      setBridgeSession(null);
       setLoginSession(null);
       setLoginMessage('');
       return;
@@ -189,16 +243,25 @@ export function AccountsPage({ role, userId }: Props) {
     const accountId = selected.id;
     async function poll() {
       try {
-        const active = await getActiveAccountLogin(role, accountId, userId);
+        const [active, localSession] = await Promise.all([
+          getActiveAccountLogin(role, accountId, userId),
+          fetchLocalBridgeSessionStatus(accountId, {
+            ports: bridgeAlivePorts.length ? bridgeAlivePorts : undefined,
+            cdp_port: selected?.login_cdp_port ?? null,
+          }).catch(() => null),
+        ]);
         if (cancelled) return;
         const inProgress = active && ['created', 'waiting_agent', 'launching_browser', 'waiting_user_login', 'checking_auth'].includes(active.status);
         setLoginSession(active);
+        setBridgeSession(localSession);
         if (active) {
           setAccounts((items) => items.map((item) => (item.id === accountId ? patchAccountLoginState(item, active) : item)));
           setSelected((item) => (item && item.id === accountId ? patchAccountLoginState(item, active) : item));
-          if (active.status === 'logged_in') {
+          if (active.status === 'logged_in' && localSession?.status === 'ready') {
             setAccountForm((item) => (item && 'id' in item && item.id === accountId ? { ...item, auth_status: 'active' } : item));
             setLoginMessage('登录已完成，可在浏览器中确认后手动关闭 Chrome 窗口。');
+          } else if (active.status === 'logged_in' && localSession?.status && localSession.status !== 'ready') {
+            setLoginMessage(localSession.message || '中央显示已登录，但本机会话尚未就绪，请先完成浏览器登录后再校验。');
           } else if (!inProgress) {
             setLoginMessage(labelLoginSessionStatus(active.status));
           }
@@ -210,7 +273,7 @@ export function AccountsPage({ role, userId }: Props) {
             setAccounts((items) => items.map((item) => (item.id === accountId ? fresh : item)));
             setSelected((item) => (item && item.id === accountId ? fresh : item));
             setAccountForm((item) => (item && 'id' in item && item.id === accountId ? { ...fresh } : item));
-            if (fresh.auth_status === 'active') {
+            if (fresh.auth_status === 'active' && localSession?.status === 'ready') {
               setLoginMessage('登录已完成，可在浏览器中确认后手动关闭 Chrome 窗口。');
             }
           } catch {
@@ -228,16 +291,16 @@ export function AccountsPage({ role, userId }: Props) {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [role, userId, selected?.id]);
+  }, [role, userId, selected?.id, selected?.login_cdp_port, bridgeAlivePorts]);
 
   function openCreate() {
     setSelected(null);
     setRightPanel('create');
     setLoginSession(null);
+    setBridgeSession(null);
     setLoginMessage('');
     setAccountForm(emptyCreateForm({
       employeeId: myEmployee?.id ?? authEmployeeId ?? undefined,
-      agentId: preferredAgent?.id,
     }));
   }
 
@@ -247,6 +310,8 @@ export function AccountsPage({ role, userId }: Props) {
     setAccountForm({ ...account });
     setLoginSession(null);
     setLoginMessage('');
+    setBridgeSession(null);
+    setSelectedLoginAgentId('');
   }
 
   async function saveAccount() {
@@ -258,7 +323,6 @@ export function AccountsPage({ role, userId }: Props) {
         display_name: accountForm.display_name!.trim(),
         employee_id: accountForm.employee_id ?? myEmployee?.id ?? authEmployeeId ?? null,
         business_account_type_id: accountForm.business_account_type_id ?? null,
-        default_agent_id: accountForm.default_agent_id || null,
       };
       const saved = selected?.id
         ? await updateAccount(role, selected.id, { ...base, status: accountForm.status || 'active' }, userId)
@@ -292,9 +356,16 @@ export function AccountsPage({ role, userId }: Props) {
     setLoginBusy(true);
     setError('');
     try {
-      const fresh = await getAccount(role, selected.id, userId);
-      const active = await getActiveAccountLogin(role, selected.id, userId);
+      const [fresh, active, localSession] = await Promise.all([
+        getAccount(role, selected.id, userId),
+        getActiveAccountLogin(role, selected.id, userId),
+        fetchLocalBridgeSessionStatus(selected.id, {
+          ports: bridgeAlivePorts.length ? bridgeAlivePorts : undefined,
+          cdp_port: selected.login_cdp_port,
+        }).catch(() => null),
+      ]);
       setLoginSession(active);
+      setBridgeSession(localSession);
       const patched = patchAccountLoginState(fresh, active);
       setSelected(patched);
       setAccounts((items) => items.map((item) => (item.id === selected.id ? patched : item)));
@@ -304,6 +375,247 @@ export function AccountsPage({ role, userId }: Props) {
       setLoginMessage(err instanceof Error ? err.message : '刷新失败');
     } finally {
       setLoginBusy(false);
+    }
+  }
+
+  async function handleBridgeStart() {
+    if (!selected?.id) return;
+    const ports = bridgeAlivePorts.length ? bridgeAlivePorts : getLocalBridgeScanPorts();
+    if (!bridgeAlivePorts.length) {
+      setBridgeError(`本机助手未连接。请先启动 local_agent（bridge 端口 ${ports.join(', ')}）`);
+      return;
+    }
+    setBridgeBusy(true);
+    setLoginBusy(true);
+    setBridgeError('');
+    setLoginMessage('正在准备 CDP 端口并拉起 Chrome…');
+    try {
+      const ctx = await prepareBridgeChromeContext(role, selected.id, userId);
+      const start = await startLocalBridgeChrome(
+        {
+          account_id: selected.id,
+          profile_key: ctx.profile_key,
+          port: ctx.login_cdp_port,
+        },
+        { ports },
+      );
+      const session = await fetchLocalBridgeSessionStatus(selected.id, { ports, cdp_port: ctx.login_cdp_port });
+      setBridgeSession(session);
+      const patched = { ...selected, profile_key: ctx.profile_key, login_cdp_port: ctx.login_cdp_port };
+      setSelected(patched);
+      setAccountForm({ ...patched });
+      setAccounts((items) => items.map((item) => (item.id === selected.id ? patched : item)));
+      setLoginMessage(`浏览器已拉起（${start.cdp_url}），请在新窗口完成登录后点击「校验会话」。`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : '拉起浏览器失败';
+      setBridgeError(message);
+      setLoginMessage(message);
+    } finally {
+      setBridgeBusy(false);
+      setLoginBusy(false);
+    }
+  }
+
+  async function handleBridgeRevalidate() {
+    if (!selected?.id) return;
+    const ports = bridgeAlivePorts.length ? bridgeAlivePorts : getLocalBridgeScanPorts();
+    if (!bridgeAlivePorts.length) {
+      setBridgeError(`本机助手未连接。请先启动 local_agent（bridge 端口 ${ports.join(', ')}）`);
+      return;
+    }
+    setBridgeBusy(true);
+    setLoginBusy(true);
+    setBridgeError('');
+    setLoginMessage('正在校验本机会话…');
+    try {
+      let cdpPort = selected.login_cdp_port;
+      if (!cdpPort) {
+        const ctx = await prepareBridgeChromeContext(role, selected.id, userId);
+        cdpPort = ctx.login_cdp_port;
+        const patched = { ...selected, profile_key: ctx.profile_key, login_cdp_port: ctx.login_cdp_port };
+        setSelected(patched);
+        setAccountForm({ ...patched });
+      }
+      const session = await revalidateLocalBridgeSession(selected.id, { ports, cdp_port: cdpPort });
+      setBridgeSession(session);
+      if (session.status === 'ready') {
+        if (session.message && session.message !== 'xhs session ready') {
+          setLoginMessage(
+            `检测到疑似会话可用（${session.message}），但为避免误判，暂不自动同步中央登录态。请在浏览器确认已进入个人主页后再重试校验。`,
+          );
+          return;
+        }
+        const sync = await syncLocalBridgeLogin(role, selected.id, {
+          preferred_agent_id: selectedLoginAgentId || null,
+          login_cdp_port: cdpPort,
+          platform_nickname: session.platform_nickname,
+          platform_home_url: session.platform_home_url,
+          bridge_status: session.status,
+        }, userId);
+        const fresh = await getAccount(role, selected.id, userId);
+        const patched = { ...fresh, auth_status: sync.auth_status };
+        setSelected(patched);
+        setAccountForm({ ...patched });
+        setAccounts((items) => items.map((item) => (item.id === selected.id ? patched : item)));
+        setLoginSession(null);
+        setLoginMessage(sync.message || `本机会话已同步（CDP :${cdpPort}），中央登录态已更新。`);
+      } else if (session.status === 'manual_verify_required') {
+        const sync = await syncLocalBridgeLogin(role, selected.id, {
+          preferred_agent_id: selectedLoginAgentId || null,
+          login_cdp_port: cdpPort,
+          platform_nickname: session.platform_nickname,
+          platform_home_url: session.platform_home_url,
+          bridge_status: session.status,
+        }, userId);
+        const fresh = await getAccount(role, selected.id, userId);
+        setSelected(fresh);
+        setAccountForm({ ...fresh });
+        setAccounts((items) => items.map((item) => (item.id === selected.id ? fresh : item)));
+        setLoginMessage(sync.message || '当前会话需要人工验证，请在浏览器中完成验证码后重试。');
+      } else {
+        // 保守降级：只有明确“跳转登录页”才自动把中央状态回落，避免一次误判把已登录打回未登录。
+        if (session.status === 'expired' && session.message !== 'xhs redirected to login page') {
+          setLoginMessage(
+            `本地校验提示需登录（${session.message || 'xhs login is required'}），但未检测到明确跳转登录页，暂不自动回落中央状态。请在浏览器确认后再点一次校验。`,
+          );
+          return;
+        }
+        const sync = await syncLocalBridgeLogin(role, selected.id, {
+          preferred_agent_id: selectedLoginAgentId || null,
+          login_cdp_port: cdpPort,
+          bridge_status: session.status,
+        }, userId);
+        const fresh = await getAccount(role, selected.id, userId);
+        setSelected(fresh);
+        setAccountForm({ ...fresh });
+        setAccounts((items) => items.map((item) => (item.id === selected.id ? fresh : item)));
+        setLoginMessage(sync.message || session.message || '会话暂不可用，请重新登录。');
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : '会话校验失败';
+      setBridgeError(message);
+      setLoginMessage(message);
+    } finally {
+      setBridgeBusy(false);
+      setLoginBusy(false);
+    }
+  }
+
+  async function submitRegisterAgents(agentIds: string[], force: boolean) {
+    await registerMyLocalAgents(role, { agent_ids: agentIds, force }, userId);
+    await reload();
+    setRegisterPickerOpen(false);
+    setRegisterSelection([]);
+    setLoginMessage(`已将 ${agentIds.length} 台设备登记到当前运营账号`);
+  }
+
+  async function handleRegisterLocalAgent() {
+    if (!scopedEmployeeId) {
+      setBridgeError('当前登录账号未关联运营员工，无法登记设备');
+      return;
+    }
+    setBridgeBusy(true);
+    setBridgeError('');
+    setLoginMessage('');
+    try {
+      const scan = await discoverLocalBridgeAgents();
+      setBridgeAlivePorts(scan.alive_ports);
+      const localItems = scan.items;
+      if (!scan.alive_ports.length) {
+        const portsHint = getLocalBridgeScanPorts().join(', ');
+        setBridgeError(`未扫描到本机 bridge（端口 ${portsHint}）。请确认 local_agent 已用脚本启动。`);
+        return;
+      }
+      if (!localItems.length) {
+        setBridgeError(`已发现 ${scan.alive_ports.length} 个 bridge 端口，但 discover 无数据，请刷新后重试`);
+        return;
+      }
+      const resolved = await resolveDiscoveredLocalAgents(
+        role,
+        {
+          items: localItems.map((item) => ({
+            agent_id: item.agent_id,
+            device_name: item.device_name,
+            machine_fingerprint: item.machine_fingerprint,
+            bridge_port: item.bridge_port,
+          })),
+        },
+        userId,
+      );
+      const candidates = resolved.map((row) => ({
+        agentId: row.agent.id,
+        discovered: localItems.find(
+          (item) => item.agent_id === row.agent.id
+            || (item.machine_fingerprint && item.machine_fingerprint === row.agent.machine_fingerprint)
+            || item.device_name === row.agent.device_name,
+        ) || {
+          device_name: row.agent.device_name || '',
+          machine_fingerprint: row.agent.machine_fingerprint || '',
+          agent_id: row.agent.id,
+          bridge_port: row.bridge_port ?? scan.alive_ports[0] ?? 18765,
+          status: row.agent.status,
+        },
+      }));
+      if (!candidates.length) {
+        const hint = localItems
+          .map((item) => `${item.device_name || '?'}${item.machine_fingerprint ? ` (${item.machine_fingerprint.slice(0, 12)}…)` : ''}`)
+          .join('；');
+        setBridgeError(
+          `本机已发现 Agent（${hint}），但中央库中尚无对应设备记录。请查看 local_agent 窗口是否已 Registered；若已注册仍失败，请核对配置 center_url 是否与浏览器访问的中央地址一致（如 http://127.0.0.1:8000）。`,
+        );
+        return;
+      }
+      setRegisterCandidates(candidates);
+      const matchIds = candidates.map((item) => item.agentId);
+      if (matchIds.length > 1) {
+        setRegisterSelection(matchIds);
+        setRegisterPickerOpen(true);
+        setLoginMessage(`扫描到 ${scan.alive_ports.length} 个 bridge 端口，${candidates.length} 台设备可登记，请勾选后确认`);
+        return;
+      }
+      try {
+        await submitRegisterAgents(matchIds, false);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : '登记失败';
+        if (message.includes('agent_bound_conflict')) {
+          const confirmed = window.confirm('该设备已绑定其他运营，是否确认抢占并转绑到当前运营？');
+          if (!confirmed) return;
+          await submitRegisterAgents(matchIds, true);
+        } else {
+          throw err;
+        }
+      }
+    } catch (err) {
+      setBridgeError(err instanceof Error ? err.message : '登记本地 Agent 失败');
+    } finally {
+      setBridgeBusy(false);
+    }
+  }
+
+  async function handleConfirmRegisterSelection() {
+    if (!registerSelection.length) {
+      setBridgeError('请至少选择一台设备');
+      return;
+    }
+    setBridgeBusy(true);
+    setBridgeError('');
+    try {
+      try {
+        await submitRegisterAgents(registerSelection, false);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : '登记失败';
+        if (message.includes('agent_bound_conflict')) {
+          const confirmed = window.confirm('所选设备中有已绑定其他运营的，是否全部抢占并转绑到当前运营？');
+          if (!confirmed) return;
+          await submitRegisterAgents(registerSelection, true);
+        } else {
+          throw err;
+        }
+      }
+    } catch (err) {
+      setBridgeError(err instanceof Error ? err.message : '登记失败');
+    } finally {
+      setBridgeBusy(false);
     }
   }
 
@@ -333,9 +645,16 @@ export function AccountsPage({ role, userId }: Props) {
     setLoginMessage('');
     setError('');
     try {
-      const result = await startAccountLogin(role, selected.id, userId, { force });
+      const result = await startAccountLogin(role, selected.id, userId, {
+        force,
+        preferred_agent_id: selectedLoginAgentId || null,
+      });
       setLoginSession(result.session);
-      setLoginMessage(result.message);
+      setLoginMessage(
+        force
+          ? `${result.message} 将打开新的登录浏览器（已清空本账号旧 Cookie、分配新调试端口），请在新窗口完成登录，勿使用之前打开的窗口。`
+          : result.message,
+      );
       const patched = patchAccountLoginState(selected, result.session);
       setSelected(patched);
       setAccounts((items) => items.map((item) => (item.id === selected.id ? patched : item)));
@@ -346,7 +665,53 @@ export function AccountsPage({ role, userId }: Props) {
     }
   }
 
+  function renderRegisterPicker() {
+    if (!registerPickerOpen) return null;
+    return (
+      <div className="detail-section">
+        <b>选择要登记的设备</b>
+        <p className="login-hint">
+          已扫描端口：{bridgeAlivePorts.length ? bridgeAlivePorts.join(', ') : getLocalBridgeScanPorts().join(', ')}
+          （可通过环境变量 VITE_LOCAL_BRIDGE_PORTS 配置）
+        </p>
+        {registerCandidates.map(({ agentId, discovered }) => {
+          const agent = agents.find((item) => item.id === agentId);
+          if (!agent) return null;
+          return (
+            <label key={`${agentId}-${discovered.bridge_port}`} className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={registerSelection.includes(agentId)}
+                onChange={(event) => {
+                  if (event.target.checked) {
+                    setRegisterSelection((prev) => (prev.includes(agentId) ? prev : [...prev, agentId]));
+                  } else {
+                    setRegisterSelection((prev) => prev.filter((id) => id !== agentId));
+                  }
+                }}
+              />
+              <span>
+                {formatAgentOptionLabel(agent)}
+                <span className="login-hint"> · bridge :{discovered.bridge_port}</span>
+              </span>
+            </label>
+          );
+        })}
+        <div className="detail-actions">
+          <button type="button" disabled={bridgeBusy} onClick={() => void handleConfirmRegisterSelection()}>
+            确认登记
+          </button>
+          <button type="button" className="secondary" disabled={bridgeBusy} onClick={() => setRegisterPickerOpen(false)}>
+            取消
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   function renderAgentStatus() {
+    const canRegister = role === 'operator' && Boolean(scopedEmployeeId);
+
     if (connectedAgent) {
       return (
         <div className="agent-status-card agent-status-online">
@@ -354,22 +719,50 @@ export function AccountsPage({ role, userId }: Props) {
           <span>设备：{connectedAgent.device_name || connectedAgent.id}</span>
           <span>归属：{connectedAgent.employee_display_name || '—'}</span>
           <span>最近心跳：{formatAgentHeartbeat(connectedAgent)}</span>
-          <p className="login-hint">新建账号将默认绑定此 Agent；发起登录后可自动拉起浏览器。</p>
-          {bindableAgents.length > 1 ? (
-            <span className="login-hint">其它登记设备：{bindableAgents.filter((item) => item.id !== connectedAgent.id).map((item) => formatAgentOptionLabel(item)).join('；')}</span>
+          <p className="login-hint">设备登记在运营账号下；小红书账号任务会按空闲设备自动调度。</p>
+          <span>本机助手：{bridgeReady ? `已连接（${bridgeAlivePorts.length || 1} 个端口）` : '未连接'}</span>
+          {bridgeAlivePorts.length ? (
+            <span className="login-hint">bridge 端口：{bridgeAlivePorts.join(', ')}</span>
           ) : null}
+          {ownedAgents.length > 1 ? (
+            <span className="login-hint">运营设备池：{ownedAgents.map((item) => formatAgentOptionLabel(item)).join('；')}</span>
+          ) : null}
+          {canRegister ? (
+            <div className="detail-actions">
+              <button type="button" className="secondary" disabled={bridgeBusy || !bridgeReady} onClick={() => void handleRegisterLocalAgent()}>
+                登记本地 Agent
+              </button>
+            </div>
+          ) : null}
+          {bridgeError ? <p className="inline-error">{bridgeError}</p> : null}
+          {loginMessage && !selected ? <p className="login-hint">{loginMessage}</p> : null}
+          {renderRegisterPicker()}
         </div>
       );
     }
     return (
       <div className="agent-status-card agent-status-offline">
         <b>本地 Agent 未连接</b>
-        <span>账号可以先创建；发起登录后会进入「等待 Agent 上线」，Agent 启动后将自动打开浏览器。</span>
-        {bindableAgents.length > 0 ? (
-          <span>已登记设备：{bindableAgents.map((item) => formatAgentOptionLabel(item)).join('；')}</span>
+        <span>请先在本机运行 Local Agent；登记到运营账号后，其下小红书账号任务将按空闲设备调度。</span>
+        <span>本机助手：{bridgeReady ? `已连接（${bridgeAlivePorts.length || 1} 个端口）` : '未连接'}</span>
+        {bridgeAlivePorts.length ? (
+          <span className="login-hint">bridge 端口：{bridgeAlivePorts.join(', ')}</span>
+        ) : null}
+        {ownedAgents.length > 0 ? (
+          <span>已登记设备：{ownedAgents.map((item) => formatAgentOptionLabel(item)).join('；')}</span>
         ) : (
-          <span>尚未登记本机 Agent。请在本机运行 Local Agent，并由管理员在「Agent 管理」中将该设备绑定到本员工。</span>
+          <span>尚未登记本机设备到当前运营账号。</span>
         )}
+        {canRegister ? (
+          <div className="detail-actions">
+            <button type="button" className="secondary" disabled={bridgeBusy || !bridgeReady} onClick={() => void handleRegisterLocalAgent()}>
+              登记本地 Agent
+            </button>
+          </div>
+        ) : null}
+        {bridgeError ? <p className="inline-error">{bridgeError}</p> : null}
+        {loginMessage && !selected ? <p className="login-hint">{loginMessage}</p> : null}
+        {renderRegisterPicker()}
       </div>
     );
   }
@@ -408,15 +801,8 @@ export function AccountsPage({ role, userId }: Props) {
           {role !== 'operator' ? (
             <ResourceSelect label="绑定员工" value={accountForm.employee_id} options={employeeOptions} onChange={(value) => setAccountForm({ ...accountForm, employee_id: value })} />
           ) : null}
-          <ResourceSelect
-            label="绑定 Agent（可选）"
-            value={accountForm.default_agent_id}
-            options={agentOptions}
-            onChange={(value) => setAccountForm({ ...accountForm, default_agent_id: value || undefined })}
-            allowEmpty
-          />
           {isCreate && !liveLoginAgents.length ? (
-            <p className="login-hint">暂无在线 Agent，账号仍可先创建；发起登录后将等待 Agent 上线。</p>
+            <p className="login-hint">暂无在线 Agent，账号仍可先创建；请先在上方「登记本地 Agent」将设备挂到运营账号。</p>
           ) : null}
           {!isCreate && selected ? (
             <>
@@ -432,12 +818,14 @@ export function AccountsPage({ role, userId }: Props) {
             <div className="detail-section">
               <b>登录信息</b>
               <span>登录态：{labelAccountLoginBadge({ ...selected, active_login_session_status: sessionStatus })}</span>
+              <span>使用状态：{labelUsageStatus(selected.usage_status)}</span>
               <span>账号用途：{selected.account_role === 'operated_account' ? '运营号' : '情报采集号'}</span>
               <span>健康状态：{selected.health_status || 'healthy'}</span>
-              <span>Local Agent：{selected.default_agent_device_name || '—'}</span>
+              <span>运营设备数：{scopedEmployeeId ? bindableAgents.filter((item) => item.employee_id === scopedEmployeeId).length : bindableAgents.length}</span>
               <span>Profile Key：{selected.profile_key || '—'}</span>
               <span>CDP 端口：{selected.login_cdp_port ?? '—'}</span>
               {selected.platform_nickname ? <span>平台昵称：{selected.platform_nickname}</span> : null}
+              {bridgeSession ? <span>本机会话：{labelUsageStatus(bridgeSession.status === 'ready' ? 'ready' : bridgeSession.status === 'manual_verify_required' ? 'need_verify' : bridgeSession.status === 'expired' ? 'need_login' : 'unavailable')}</span> : null}
             </div>
           ) : null}
           <button type="button" onClick={() => void saveAccount()} disabled={readonly || !canCreate}>
@@ -448,12 +836,26 @@ export function AccountsPage({ role, userId }: Props) {
         {!isCreate && selected ? (
           <div className="login-session-panel">
             <div className="panel-title">平台登录</div>
+            <label>登录执行设备</label>
+            <select
+              value={selectedLoginAgentId}
+              onChange={(event) => setSelectedLoginAgentId(event.target.value)}
+              disabled={loginInProgress || waitingAgent}
+            >
+              <option value="">自动选择（在线且支持登录的设备中择优）</option>
+              {loginAgentPickerOptions.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.label}{item.online ? '' : '（离线）'}
+                </option>
+              ))}
+            </select>
             <div className="login-session-card">
               <span className={`auth-pill ${authPillClassForAccount({ ...selected, active_login_session_status: sessionStatus })}`}>
                 {labelAccountLoginBadge({ ...selected, active_login_session_status: sessionStatus })}
               </span>
               {loginSession ? <span>{labelLoginSessionStatus(loginSession.status)}</span> : null}
               {loginMessage ? <p className="login-hint">{loginMessage}</p> : null}
+              {bridgeError ? <p className="inline-error">{bridgeError}</p> : null}
               {loginSession?.error_message && loginSession.status === 'waiting_user_login' && /验证|滑块|安全/.test(loginSession.error_message) ? (
                 <p className="login-hint">{loginSession.error_message}</p>
               ) : null}
@@ -465,7 +867,16 @@ export function AccountsPage({ role, userId }: Props) {
                 <p className="login-hint">请在 Agent 打开的 Chrome 窗口完成小红书登录（扫码/验证码）。登录成功前请勿关闭该窗口；Agent 会连续两次确认登录态后才标记完成。</p>
               ) : null}
             </div>
+            {!bridgeReady && !bridgeAlivePorts.length ? (
+              <p className="login-hint">本机助手未连接，无法直接拉起浏览器。请先运行 local_agent；或使用下方「发起登录」由 Agent 自动打开。</p>
+            ) : null}
             <div className="detail-actions">
+              <button type="button" className="secondary" disabled={bridgeBusy || loginBusy} onClick={() => void handleBridgeStart()}>
+                启动登录浏览器
+              </button>
+              <button type="button" className="secondary" disabled={bridgeBusy || loginBusy || !bridgeAlivePorts.length} onClick={() => void handleBridgeRevalidate()}>
+                校验会话
+              </button>
               {loginInProgress || waitingAgent ? (
                 <button type="button" className="secondary" disabled={loginBusy} onClick={() => void handleResetLogin()}>
                   取消登录
@@ -503,6 +914,15 @@ export function AccountsPage({ role, userId }: Props) {
         <div className="panel-title">账号筛选</div>
         <label>平台</label>
         <select disabled><option>全部</option>{platformOptions.map((item) => <option key={item.value}>{item.label}</option>)}</select>
+        {role !== 'operator' ? (
+          <ResourceSelect
+            label="运营员工"
+            value={adminEmployeeFilter}
+            options={managementEmployeeOptions}
+            onChange={(value) => setAdminEmployeeFilter(value || '')}
+            allowEmpty
+          />
+        ) : null}
         <button type="button" className="secondary" onClick={() => void reload()}><RefreshCw size={14} />刷新</button>
       </aside>
       <section className="list-panel">
@@ -510,26 +930,26 @@ export function AccountsPage({ role, userId }: Props) {
           <div>
             <h1>账号管理</h1>
             <p className="ops-intro">添加运营账号并由本地 Agent 拉起浏览器完成平台登录，无需手工填写平台 ID。</p>
-            <span>{accounts.length} 个运营账号</span>
+            <span>{visibleAccounts.length} 个运营账号</span>
           </div>
           <button type="button" className={rightPanel === 'create' ? 'primary-btn' : undefined} onClick={openCreate}><Plus size={14} />添加运营账号</button>
         </div>
         {error ? <ErrorState text={error} /> : null}
-        {loading ? <LoadingState text="账号加载中" /> : accounts.length === 0 ? (
+        {loading ? <LoadingState text="账号加载中" /> : visibleAccounts.length === 0 ? (
           <EmptyState text="暂无运营账号，点击右上角「添加运营账号」" />
         ) : (
           <div className="data-table">
             <div className="table-row table-head account-row account-row-v2">
-              <span>备注名</span><span>平台</span><span>用途</span><span>健康</span><span>登录态</span><span>Agent</span><span>Profile</span>
+              <span>备注名</span><span>ID</span><span>平台</span><span>使用状态</span><span>登录态</span><span>运营</span><span>Profile</span>
             </div>
-            {accounts.map((account) => (
+            {visibleAccounts.map((account) => (
               <button key={account.id} type="button" className={`table-row account-row account-row-v2 ${selected?.id === account.id ? 'selected' : ''}`} onClick={() => chooseAccount(account)}>
                 <span className="strong">{account.display_name}</span>
+                <span>{account.id.slice(0, 8)}...</span>
                 <span>{account.platform}</span>
-                <span>{account.account_role === 'operated_account' ? '运营号' : '采集号'}</span>
-                <span>{account.health_status || 'healthy'}</span>
+                <span>{labelUsageStatus(account.usage_status)}</span>
                 <span><span className={`auth-pill ${authPillClassForAccount(account)}`}>{labelAccountLoginBadge(account)}</span></span>
-                <span>{account.default_agent_device_name || '—'}</span>
+                <span>{account.employee_display_name || '—'}</span>
                 <span>{account.profile_key || '—'}</span>
               </button>
             ))}
