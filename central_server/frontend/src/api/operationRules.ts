@@ -34,3 +34,7 @@ export function updateOperationRule(
 ) {
   return apiRequest<OperationRule>(`/api/operation-rules/${ruleId}`, { method: 'PATCH', body, role, userId });
 }
+
+export function deleteOperationRule(role: Role, ruleId: string, userId?: string) {
+  return apiRequest<void>(`/api/operation-rules/${ruleId}`, { method: 'DELETE', role, userId });
+}

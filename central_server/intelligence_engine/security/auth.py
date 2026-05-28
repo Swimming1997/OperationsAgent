@@ -1,6 +1,7 @@
-﻿from dataclasses import dataclass
+from dataclasses import dataclass
 
 from fastapi import Depends, Header, HTTPException
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from intelligence_engine.config import get_settings
@@ -58,7 +59,17 @@ def get_optional_principal(
     if injected_roles:
         if not get_settings().allow_header_auth:
             raise HTTPException(status_code=401, detail="header auth is disabled")
-        return Principal(user_id=x_user_id, role_names=frozenset(role.strip() for role in injected_roles.split(",") if role.strip()))
+        normalized_user_id = x_user_id
+        if x_user_id:
+            user = db.get(User, x_user_id)
+            if not user:
+                user = db.scalar(select(User).where(User.username == x_user_id))
+            if user:
+                normalized_user_id = user.id
+        return Principal(
+            user_id=normalized_user_id,
+            role_names=frozenset(role.strip() for role in injected_roles.split(",") if role.strip()),
+        )
     if not x_user_id:
         return Principal(user_id=None, role_names=frozenset())
     user = db.get(User, x_user_id)

@@ -7,11 +7,16 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from intelligence_engine.db.models import (
+    AccountAgentBinding,
     AccountSession,
     BenchmarkGroup,
     BenchmarkGroupMember,
+    BusinessAccountType,
+    BusinessAccountTypeBenchmarkGroup,
+    BusinessAccountTypeRuleSet,
     CreatorMonitor,
     Job,
+    KeywordRuleSet,
     LocalAgent,
     PlatformAccount,
     TaskRun,
@@ -221,6 +226,7 @@ class TaskMaterializationService:
         payload = RecommendationFeedTaskPayload.model_validate(config)
         account = self._get_account(payload.executor_account_id)
         self._ensure_intelligence_collector(account, JobType.FEED_COLLECT.value)
+        self._ensure_rule_set_allowed(account, payload.rule_set_id)
         job_payload = {
             "platform": account.platform,
             "account_id": account.id,
@@ -239,7 +245,7 @@ class TaskMaterializationService:
         job = JobRepository(self.db).create_job(
             job_type=JobType.FEED_COLLECT,
             account_id=account.id,
-            local_agent_id=None,
+            local_agent_id=account.default_agent_id,
             task_run_id=task_run_id,
             payload=job_payload,
             priority=priority or 100,
@@ -257,6 +263,8 @@ class TaskMaterializationService:
         payload = CreatorMonitorTaskPayload.model_validate(config)
         account = self._get_account(payload.executor_account_id)
         self._ensure_intelligence_collector(account, JobType.CREATOR_MONITOR.value)
+        self._ensure_rule_set_allowed(account, payload.rule_set_id)
+        self._ensure_benchmark_group_allowed(account, payload.benchmark_group_id)
         members = list(
             self.db.scalars(
                 select(BenchmarkGroupMember)
@@ -271,7 +279,7 @@ class TaskMaterializationService:
             job = JobRepository(self.db).create_job(
                 job_type=JobType.CREATOR_MONITOR,
                 account_id=account.id,
-                local_agent_id=None,
+                local_agent_id=account.default_agent_id,
                 creator_monitor_id=monitor.id,
                 task_run_id=task_run_id,
                 payload={
@@ -307,10 +315,11 @@ class TaskMaterializationService:
         payload = KeywordSearchTaskPayload.model_validate(config)
         account = self._get_account(payload.executor_account_id)
         self._ensure_intelligence_collector(account, JobType.SEARCH_COLLECT.value)
+        self._ensure_rule_set_allowed(account, payload.rule_set_id)
         job = JobRepository(self.db).create_job(
             job_type=JobType.SEARCH_COLLECT,
             account_id=account.id,
-            local_agent_id=None,
+            local_agent_id=account.default_agent_id,
             task_run_id=task_run_id,
             payload={
                 "platform": enum_value(payload.platform),
@@ -346,6 +355,60 @@ class TaskMaterializationService:
         role = getattr(account, "account_role", None) or AccountRole.INTELLIGENCE_COLLECTOR.value
         if role != AccountRole.INTELLIGENCE_COLLECTOR.value:
             raise ValueError(f"account {account.id} role {role} cannot run {job_type}")
+
+    def _ensure_rule_set_allowed(self, account: PlatformAccount, rule_set_id: str | None) -> None:
+        ok, message = self._rule_set_binding_status(account, rule_set_id)
+        if not ok:
+            raise ValueError(message)
+
+    def _rule_set_binding_status(self, account: PlatformAccount | None, rule_set_id: str | None) -> tuple[bool, str]:
+        if not rule_set_id:
+            return True, "未选择规则集"
+        rule_set = self.db.get(KeywordRuleSet, rule_set_id)
+        if not rule_set:
+            return False, f"规则集不存在: {rule_set_id}"
+        if not account:
+            return False, "缺少执行账号，无法校验规则集绑定"
+        if not account.business_account_type_id:
+            return False, f"执行账号 {account.display_name or account.id} 未设置业务类型，不能使用规则集 {rule_set.name}"
+        binding = self.db.scalar(
+            select(BusinessAccountTypeRuleSet).where(
+                BusinessAccountTypeRuleSet.business_account_type_id == account.business_account_type_id,
+                BusinessAccountTypeRuleSet.rule_set_id == rule_set_id,
+            )
+        )
+        business_type = self.db.get(BusinessAccountType, account.business_account_type_id)
+        business_type_name = business_type.name if business_type else account.business_account_type_id
+        if not binding:
+            return False, f"规则集 {rule_set.name} 未绑定到业务类型 {business_type_name}"
+        return True, f"规则集 {rule_set.name} 已绑定到业务类型 {business_type_name}"
+
+    def _ensure_benchmark_group_allowed(self, account: PlatformAccount, benchmark_group_id: str | None) -> None:
+        ok, message = self._benchmark_group_binding_status(account, benchmark_group_id)
+        if not ok:
+            raise ValueError(message)
+
+    def _benchmark_group_binding_status(self, account: PlatformAccount | None, benchmark_group_id: str | None) -> tuple[bool, str]:
+        if not benchmark_group_id:
+            return False, "缺少对标账号组"
+        group = self.db.get(BenchmarkGroup, benchmark_group_id)
+        if not group:
+            return False, f"对标账号组不存在: {benchmark_group_id}"
+        if not account:
+            return False, "缺少执行账号，无法校验对标账号组绑定"
+        if not account.business_account_type_id:
+            return False, f"执行账号 {account.display_name or account.id} 未设置业务类型，不能使用对标账号组 {group.name}"
+        binding = self.db.scalar(
+            select(BusinessAccountTypeBenchmarkGroup).where(
+                BusinessAccountTypeBenchmarkGroup.business_account_type_id == account.business_account_type_id,
+                BusinessAccountTypeBenchmarkGroup.benchmark_group_id == benchmark_group_id,
+            )
+        )
+        business_type = self.db.get(BusinessAccountType, account.business_account_type_id)
+        business_type_name = business_type.name if business_type else account.business_account_type_id
+        if not binding:
+            return False, f"对标账号组 {group.name} 未绑定到业务类型 {business_type_name}"
+        return True, f"对标账号组 {group.name} 已绑定到业务类型 {business_type_name}"
 
     def _ensure_member_monitor(self, member: BenchmarkGroupMember) -> CreatorMonitor:
         if member.creator_monitor_id:
@@ -395,21 +458,12 @@ class TaskMaterializationService:
         account_id = config.get("executor_account_id")
         account = self.db.get(PlatformAccount, account_id) if account_id else None
         checks.append({"key": "executor_account", "ok": bool(account), "message": "执行账号存在" if account else "缺少执行账号"})
-        pool_agents: list[LocalAgent] = []
-        if account and account.employee_id:
-            pool_agents = list(
-                self.db.scalars(
-                    select(LocalAgent).where(
-                        LocalAgent.employee_id == account.employee_id,
-                        LocalAgent.status != AgentStatus.RETIRED.value,
-                    )
-                )
-            )
+        pool_agents = self._agent_pool_for_account(account) if account else []
         checks.append(
             {
                 "key": "agent_pool_bound",
                 "ok": bool(pool_agents),
-                "message": f"运营已登记 {len(pool_agents)} 台 Agent" if pool_agents else "运营尚未登记可用 Agent",
+                "message": f"账号已绑定/可用 Agent {len(pool_agents)} 台" if pool_agents else "账号未绑定 Agent",
             }
         )
         online_agents = [agent for agent in pool_agents if agent.status == AgentStatus.ONLINE.value]
@@ -432,6 +486,11 @@ class TaskMaterializationService:
             )
         checks.append({"key": "session_pool_ready", "ok": bool(ready_session), "message": "绑定池存在 ready 会话" if ready_session else "绑定池暂无 ready 会话"})
 
+        rule_set_id = config.get("rule_set_id")
+        if rule_set_id:
+            ok, message = self._rule_set_binding_status(account, rule_set_id)
+            checks.append({"key": "rule_set_business_type_binding", "ok": ok, "message": message})
+
         expected_job_type = expected_job_type_for_template(template.template_type)
         agent = online_agents[0] if online_agents else (pool_agents[0] if pool_agents else None)
         capabilities = agent.capabilities_json if agent else {}
@@ -452,6 +511,8 @@ class TaskMaterializationService:
 
         if template.template_type == TaskTemplateType.CREATOR_MONITOR_TASK.value:
             group_id = config.get("benchmark_group_id")
+            ok, message = self._benchmark_group_binding_status(account, group_id)
+            checks.append({"key": "benchmark_group_business_type_binding", "ok": ok, "message": message})
             group = self.db.get(BenchmarkGroup, group_id) if group_id else None
             member_count = 0
             if group:
@@ -465,6 +526,32 @@ class TaskMaterializationService:
             ok = bool(config.get("feed_type") and config.get("target_count") and config.get("refresh_rounds") and config.get("per_round_scroll_target"))
             checks.append({"key": "recommendation_feed_config", "ok": ok, "message": "推荐页任务关键字段完整" if ok else "推荐页任务关键字段不完整"})
         return checks
+
+    def _agent_pool_for_account(self, account: PlatformAccount | None) -> list[LocalAgent]:
+        if not account:
+            return []
+        agents_by_id: dict[str, LocalAgent] = {}
+        bindings = list(
+            self.db.scalars(
+                select(AccountAgentBinding)
+                .where(AccountAgentBinding.account_id == account.id)
+                .where(AccountAgentBinding.enabled.is_(True))
+                .order_by(AccountAgentBinding.updated_at.desc())
+            )
+        )
+        for binding in bindings:
+            agent = self.db.get(LocalAgent, binding.agent_id)
+            if agent and agent.status != AgentStatus.RETIRED.value:
+                agents_by_id[agent.id] = agent
+        if account.employee_id:
+            for agent in self.db.scalars(
+                select(LocalAgent).where(
+                    LocalAgent.employee_id == account.employee_id,
+                    LocalAgent.status != AgentStatus.RETIRED.value,
+                )
+            ):
+                agents_by_id.setdefault(agent.id, agent)
+        return list(agents_by_id.values())
 
 
 def expected_job_type_for_template(template_type: str) -> str | None:

@@ -9,7 +9,7 @@ def test_xhs_slo_report_builds_job_type_summary(db_session):
     job.status = JobStatus.SUCCESS.value
     db_session.commit()
 
-    report = build_report(window_hours=24)
+    report = build_report(window_hours=24, session=db_session)
     detail = next(item for item in report["job_types"] if item["job_type"] == JobType.DETAIL_FETCH.value)
     assert detail["terminal_total"] >= 1
     assert detail["success_total"] >= 1

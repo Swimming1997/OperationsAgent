@@ -27,7 +27,8 @@ export function canAccessRoute(route: string, roles: string[]): boolean {
   const set = new Set(roles);
   if (set.has('admin') || set.has('supervisor')) return true;
   if (route === 'organization') return false;
-  if (route === 'benchmarks' || route === 'rules' || route === 'agents' || route === 'operations') return false;
+  if (route === 'agents' || route === 'operations') return false;
+  if (route === 'benchmarks' || route === 'rules') return set.has('operator');
   if (route === 'tasks') return set.has('operator');
   if (route === 'accounts') return set.has('operator');
   if (route === 'intelligence' || route === 'reference-library') return set.has('operator') || set.has('sales');

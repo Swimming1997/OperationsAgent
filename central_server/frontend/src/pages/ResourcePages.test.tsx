@@ -58,8 +58,10 @@ describe('resource configuration pages', () => {
     const createBtn = screen.getByRole('button', { name: '创建账号' });
     expect(createBtn).toBeDisabled();
     await user.type(screen.getByPlaceholderText('如：XHS-账号A'), 'XHS-新账号');
+    const createPanelSelects = Array.from(document.querySelectorAll('.detail-panel-create select')) as HTMLSelectElement[];
+    await user.selectOptions(createPanelSelects[1], 'type-1');
     expect(createBtn).toBeEnabled();
-    const platformSelect = document.querySelector('.detail-panel-create select') as HTMLSelectElement;
+    const platformSelect = createPanelSelects[0];
     expect(platformSelect?.value).toBe('xhs');
   });
 
@@ -71,13 +73,12 @@ describe('resource configuration pages', () => {
     expect(await screen.findByText('论文服务号')).toBeInTheDocument();
   });
 
-  it('renders rules and switches to keyword rules', async () => {
+  it('renders rules and selected set keyword rules', async () => {
     installFetchMock();
-    const user = userEvent.setup();
     render(<RulesPage role="supervisor" userId="supervisor-user" />);
     expect(await screen.findByText('SCI 关键词')).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: '关键词规则' }));
     expect(await screen.findByText('SCI')).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: /新增关键词规则/ })).toBeInTheDocument();
   });
 
   it('renders operation rules tab', async () => {

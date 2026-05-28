@@ -4,7 +4,15 @@ from pathlib import Path
 
 from local_agent_runtime.connectors.xhs.comment_normalizer import comment_field_report, comment_keyword_hits, normalize_xhs_comments
 from local_agent_runtime.connectors.xhs.comment_probe import XhsCommentProbe, detect_comment_surface_status
-from local_agent_runtime.connectors.xhs.creator import normalize_xhs_creator_item, parse_user_posted_response, parse_xhs_creator_context
+from local_agent_runtime.connectors.xhs.creator import (
+    _build_user_posted_fetch_error,
+    _candidate_to_creator_context,
+    _choose_profile_candidate,
+    _dom_card_to_creator_note,
+    normalize_xhs_creator_item,
+    parse_user_posted_response,
+    parse_xhs_creator_context,
+)
 from local_agent_runtime.connectors.xhs.detail_normalizer import detail_field_report, normalize_xhs_detail_payload
 
 
@@ -54,3 +62,60 @@ def test_xhs_creator_helpers():
     notes, meta = parse_user_posted_response({"success": True, "data": {"notes": [{"note_id": "n1"}], "cursor": "c"}})
     assert notes[0]["note_id"] == "n1"
     assert meta["has_notes"] is True
+
+
+def test_xhs_creator_context_accepts_red_id_as_public_identifier():
+    creator_context = parse_xhs_creator_context("1479543583")
+
+    assert creator_context.creator_platform_id == "1479543583"
+    assert creator_context.public_identifier == "1479543583"
+    assert creator_context.resolve_source == "xhs_public_identifier"
+
+
+def test_xhs_creator_profile_candidate_resolves_internal_user_id():
+    candidates = [
+        {"href": "https://www.xiaohongshu.com/user/profile/5eb8e1d400000000010075ae?xsec_token=T&xsec_source=pc_search", "text": "小红书号：1479543583"},
+    ]
+
+    chosen = _choose_profile_candidate(candidates, "1479543583")
+    resolved = _candidate_to_creator_context(chosen or {})
+
+    assert resolved is not None
+    assert resolved["creator_platform_id"] == "5eb8e1d400000000010075ae"
+    assert resolved["xsec_token"] == "T"
+
+
+def test_xhs_creator_dom_card_fallback_builds_note_payload():
+    note = _dom_card_to_creator_note(
+        {
+            "href": "https://www.xiaohongshu.com/explore/66fad51c000000001b0224b8?xsec_token=NOTE_TOKEN&xsec_source=pc_feed",
+            "title": "SCI 投稿经验",
+            "cover_url": "https://sns-img.example/cover.jpg",
+        },
+        fallback_xsec_source="pc_feed",
+    )
+
+    assert note is not None
+    assert note["note_id"] == "66fad51c000000001b0224b8"
+    assert note["display_title"] == "SCI 投稿经验"
+    assert note["xsec_token"] == "NOTE_TOKEN"
+    assert note["source_path"] == "creator_profile_dom_fallback"
+
+
+def test_xhs_creator_user_posted_gateway_error_is_retryable():
+    payload = {
+        "http_status": 500,
+        "parse_error": 'SyntaxError: Unexpected token "c"',
+        "raw_text": "create invoker failed, service: jarvis-gateway-default",
+    }
+
+    notes, meta = parse_user_posted_response(payload)
+    error = _build_user_posted_fetch_error(payload, meta)
+
+    assert notes == []
+    assert meta["has_notes"] is False
+    assert meta["parse_error"]
+    assert "jarvis-gateway" in (meta["raw_text_prefix"] or "")
+    assert error.error_code == "retryable_network_error"
+    assert error.retryable is True
+    assert "这不是对标账号没有笔记" in str(error)

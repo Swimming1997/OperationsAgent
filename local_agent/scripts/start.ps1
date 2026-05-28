@@ -52,6 +52,9 @@ if (!(Test-Path -LiteralPath $ConfigPath)) {
     throw "Local Agent config not found: $ConfigPath"
 }
 
+$bridgeSettings = Get-ConfigBridgeSettings -ConfigPath $ConfigPath
+Clear-StaleBridgePortOccupants -BindHost $bridgeSettings.Host -PreferredPort $bridgeSettings.PreferredPort -MaxAttempts $bridgeSettings.MaxAttempts | Out-Null
+
 New-Item -ItemType Directory -Force -Path $LogsDir, (Join-Path $LogsDir "runtime"), (Join-Path $LocalAgentRoot "profiles\accounts") | Out-Null
 
 $HealthUrl = "http://127.0.0.1:8000/api/health"

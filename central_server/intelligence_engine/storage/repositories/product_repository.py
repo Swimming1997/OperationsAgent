@@ -1,6 +1,6 @@
 from collections.abc import Sequence
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from intelligence_engine.db.models import (
@@ -246,14 +246,20 @@ class ProductRepository:
         self.db.add(account)
         self.db.flush()
         account.profile_key = f"accounts/{account.id}"
+        if default_agent_id:
+            self.ensure_account_agent_binding(account_id=account.id, agent_id=default_agent_id, employee_id=employee_id)
         self.db.flush()
         return account
 
     def update_account(self, account: PlatformAccount, **values) -> PlatformAccount:
         metadata = values.pop("metadata", None)
+        default_agent_id_marker = object()
+        default_agent_id = values.pop("default_agent_id", default_agent_id_marker)
         for key, value in values.items():
             if value is not None:
                 setattr(account, key, value)
+        if default_agent_id is not default_agent_id_marker:
+            account.default_agent_id = default_agent_id
         if metadata is not None:
             account.metadata_json = metadata
         self.db.flush()
@@ -356,6 +362,12 @@ class ProductRepository:
         self.db.flush()
         return group
 
+    def delete_benchmark_group(self, group: BenchmarkGroup) -> None:
+        self.db.execute(delete(BenchmarkGroupMember).where(BenchmarkGroupMember.benchmark_group_id == group.id))
+        self.db.execute(delete(BusinessAccountTypeBenchmarkGroup).where(BusinessAccountTypeBenchmarkGroup.benchmark_group_id == group.id))
+        self.db.delete(group)
+        self.db.flush()
+
     def add_benchmark_member(
         self,
         *,
@@ -385,6 +397,10 @@ class ProductRepository:
     def list_benchmark_members(self, benchmark_group_id: str) -> list[BenchmarkGroupMember]:
         stmt = select(BenchmarkGroupMember).where(BenchmarkGroupMember.benchmark_group_id == benchmark_group_id)
         return list(self.db.scalars(stmt.order_by(BenchmarkGroupMember.created_at.desc())))
+
+    def delete_benchmark_member(self, member: BenchmarkGroupMember) -> None:
+        self.db.delete(member)
+        self.db.flush()
 
     def bind_business_type_to_benchmark_group(self, *, business_account_type_id: str, benchmark_group_id: str) -> BusinessAccountTypeBenchmarkGroup:
         existing = self.db.scalar(
@@ -534,11 +550,36 @@ class ProductRepository:
         )
         return rule_count, group_count
 
+    def business_type_account_count(self, business_account_type_id: str) -> int:
+        return self.db.scalar(
+            select(func.count(PlatformAccount.id)).where(PlatformAccount.business_account_type_id == business_account_type_id)
+        ) or 0
+
+    def delete_business_account_type(self, item: BusinessAccountType) -> None:
+        self.db.delete(item)
+        self.db.flush()
+
     def list_keyword_rule_sets(self) -> list[KeywordRuleSet]:
         return list(self.db.scalars(select(KeywordRuleSet).order_by(KeywordRuleSet.created_at.desc())))
 
-    def create_keyword_rule_set(self, *, name: str, rule_scope: str, enabled: bool, config: dict) -> KeywordRuleSet:
-        row = KeywordRuleSet(name=name, rule_scope=rule_scope, enabled=enabled, config_json=config)
+    def create_keyword_rule_set(
+        self,
+        *,
+        name: str,
+        rule_scope: str,
+        enabled: bool,
+        config: dict,
+        created_by_user_id: str | None = None,
+        created_by_employee_id: str | None = None,
+    ) -> KeywordRuleSet:
+        row = KeywordRuleSet(
+            name=name,
+            rule_scope=rule_scope,
+            enabled=enabled,
+            config_json=config,
+            created_by_user_id=created_by_user_id,
+            created_by_employee_id=created_by_employee_id,
+        )
         self.db.add(row)
         self.db.flush()
         return row
@@ -552,6 +593,12 @@ class ProductRepository:
             row.config_json = config
         self.db.flush()
         return row
+
+    def delete_keyword_rule_set(self, row: KeywordRuleSet) -> None:
+        self.db.execute(delete(KeywordRule).where(KeywordRule.rule_set_id == row.id))
+        self.db.execute(delete(BusinessAccountTypeRuleSet).where(BusinessAccountTypeRuleSet.rule_set_id == row.id))
+        self.db.delete(row)
+        self.db.flush()
 
     def list_keyword_rules(self, rule_set_id: str) -> list[KeywordRule]:
         return list(self.db.scalars(select(KeywordRule).where(KeywordRule.rule_set_id == rule_set_id).order_by(KeywordRule.created_at.desc())))
@@ -568,3 +615,7 @@ class ProductRepository:
                 setattr(row, key, value)
         self.db.flush()
         return row
+
+    def delete_keyword_rule(self, row: KeywordRule) -> None:
+        self.db.delete(row)
+        self.db.flush()

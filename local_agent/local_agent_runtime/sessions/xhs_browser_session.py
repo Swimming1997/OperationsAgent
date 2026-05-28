@@ -1,6 +1,6 @@
 ﻿from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from playwright.async_api import Browser, BrowserContext, Page, Playwright, async_playwright
 
@@ -92,6 +92,32 @@ def evaluate_xhs_selfinfo_payload(payload: Any) -> tuple[SessionStatus | None, s
     return None, None
 
 
+def evaluate_xhs_browser_markers(
+    *,
+    url: str,
+    visible_text: str,
+    cookie_names: Sequence[str],
+    hrefs: Sequence[str],
+) -> tuple[SessionStatus | None, str | None]:
+    """Use current web UI markers when selfinfo is temporarily unavailable."""
+    url_lower = url.lower()
+    if "login" in url_lower or "signin" in url_lower:
+        return SessionStatus.EXPIRED, "xhs redirected to login page"
+    login_dialog_visible = "登录" in visible_text and any(
+        token in visible_text for token in ("手机号", "验证码", "扫码", "密码", "注册")
+    )
+    if login_dialog_visible:
+        return SessionStatus.EXPIRED, "xhs login is required"
+
+    normalized_cookies = {name.lower() for name in cookie_names}
+    has_session_cookie = bool({"web_session", "id_token"} & normalized_cookies)
+    has_profile_link = any("/user/profile/" in href.lower() for href in hrefs)
+    has_logged_in_nav = "消息" in visible_text and "发布" in visible_text
+    if has_session_cookie and has_profile_link and has_logged_in_nav:
+        return SessionStatus.READY, "xhs session ready"
+    return None, None
+
+
 class XhsBrowserSessionProvider:
     """First-pass XHS browser session provider for a single local account session."""
 
@@ -167,6 +193,10 @@ class XhsBrowserSessionProvider:
                 await page.wait_for_timeout(1500)
             visible_text = await page.locator("body").inner_text(timeout=5000)
             status, message = evaluate_xhs_session_state(url=page.url, visible_text=visible_text)
+            if status == SessionStatus.EXPIRED:
+                marker_status, marker_message = await self._probe_browser_markers(page, context, visible_text)
+                if marker_status and marker_message:
+                    status, message = marker_status, marker_message
             return XhsSessionAcquireResult(
                 status=status,
                 message=message,
@@ -216,3 +246,29 @@ class XhsBrowserSessionProvider:
         if status in (401, 403):
             return SessionStatus.EXPIRED, "xhs login is required"
         return evaluate_xhs_selfinfo_payload(body)
+
+    async def _probe_browser_markers(
+        self,
+        page: Page,
+        context: BrowserContext,
+        visible_text: str,
+    ) -> tuple[SessionStatus | None, str | None]:
+        try:
+            cookies = await context.cookies(["https://www.xiaohongshu.com"])
+            cookie_names = [str(cookie.get("name", "")) for cookie in cookies]
+            hrefs = await page.evaluate(
+                """() => Array.from(document.querySelectorAll('a[href]'))
+                    .map((link) => link.href || link.getAttribute('href') || '')
+                    .filter(Boolean)
+                    .slice(0, 200)"""
+            )
+        except Exception:
+            return None, None
+        if not isinstance(hrefs, list):
+            hrefs = []
+        return evaluate_xhs_browser_markers(
+            url=page.url,
+            visible_text=visible_text,
+            cookie_names=cookie_names,
+            hrefs=[str(href) for href in hrefs],
+        )

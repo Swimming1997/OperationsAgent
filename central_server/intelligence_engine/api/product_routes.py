@@ -1,4 +1,4 @@
-﻿from datetime import datetime
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy import select
@@ -8,7 +8,10 @@ from intelligence_engine.db.models import (
     AccountAgentBinding,
     AccountSession,
     BenchmarkGroup,
+    BenchmarkGroupMember,
     BusinessAccountType,
+    BusinessAccountTypeBenchmarkGroup,
+    BusinessAccountTypeRuleSet,
     Employee,
     CandidateDecision,
     CommentSnapshot,
@@ -52,6 +55,7 @@ from intelligence_engine.domain.product_schemas import (
     BenchmarkGroupBusinessAccountTypeRead,
     BenchmarkGroupMemberCreateRequest,
     BenchmarkGroupMemberRead,
+    BenchmarkGroupMemberUpdateRequest,
     BenchmarkGroupRead,
     BenchmarkGroupUpdateRequest,
     BindBenchmarkGroupRequest,
@@ -210,6 +214,134 @@ def _business_type(db: Session, business_account_type_id: str | None) -> Busines
     return db.get(BusinessAccountType, business_account_type_id) if business_account_type_id else None
 
 
+def _operator_business_type_ids(db: Session, principal: Principal) -> set[str]:
+    employee_id = get_principal_employee_id(db, principal)
+    if not employee_id:
+        raise HTTPException(status_code=403, detail="operator has no employee profile")
+    rows = db.scalars(
+        select(PlatformAccount.business_account_type_id)
+        .where(PlatformAccount.employee_id == employee_id)
+        .where(PlatformAccount.business_account_type_id.is_not(None))
+        .distinct()
+    )
+    return {item for item in rows if item}
+
+
+def _ensure_operator_has_business_types(db: Session, principal: Principal) -> tuple[str, set[str]]:
+    employee_id = get_principal_employee_id(db, principal)
+    if not employee_id:
+        raise HTTPException(status_code=403, detail="operator has no employee profile")
+    business_type_ids = _operator_business_type_ids(db, principal)
+    if not business_type_ids:
+        raise HTTPException(status_code=409, detail="当前运营账号未配置业务类型，请先在账号管理中配置后再创建")
+    return employee_id, business_type_ids
+
+
+def _group_submitter_name(db: Session, group: BenchmarkGroup) -> str | None:
+    if not group.owner_employee_id:
+        return None
+    employee = db.get(Employee, group.owner_employee_id)
+    return employee.display_name if employee else None
+
+
+def _rule_set_submitter_name(db: Session, row: KeywordRuleSet) -> str | None:
+    if row.created_by_employee_id:
+        employee = db.get(Employee, row.created_by_employee_id)
+        if employee:
+            return employee.display_name
+    if row.created_by_user_id:
+        user = db.get(User, row.created_by_user_id)
+        if user:
+            return user.display_name
+    return None
+
+
+def _benchmark_group_read(db: Session, group: BenchmarkGroup) -> BenchmarkGroupRead:
+    employee = db.get(Employee, group.owner_employee_id) if group.owner_employee_id else None
+    return BenchmarkGroupRead(
+        id=group.id,
+        name=group.name,
+        description=group.description,
+        owner_employee_id=group.owner_employee_id,
+        submitter_user_id=employee.user_id if employee else None,
+        submitter_employee_id=group.owner_employee_id,
+        submitter_name=employee.display_name if employee else None,
+        enabled=group.enabled,
+        metadata=group.metadata_json or {},
+    )
+
+
+def _keyword_rule_set_read(db: Session, row: KeywordRuleSet) -> KeywordRuleSetRead:
+    config = {
+        "visible_like_threshold": 50,
+        "lead_intent_keywords": ["求推", "求推荐", "推一下", "求渠道", "有没有推荐"],
+        **(row.config_json or {}),
+    }
+    return KeywordRuleSetRead(
+        id=row.id,
+        name=row.name,
+        rule_scope=row.rule_scope,
+        enabled=row.enabled,
+        created_by_user_id=row.created_by_user_id,
+        created_by_employee_id=row.created_by_employee_id,
+        submitter_name=_rule_set_submitter_name(db, row),
+        config=config,
+    )
+
+
+def _is_operator(principal: Principal) -> bool:
+    return principal.has_role(UserRoleName.OPERATOR) and not principal.has_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR)
+
+
+def _ensure_benchmark_group_readable(db: Session, principal: Principal, group: BenchmarkGroup) -> None:
+    if not _is_operator(principal):
+        return
+    business_type_ids = _operator_business_type_ids(db, principal)
+    if not business_type_ids:
+        raise HTTPException(status_code=403, detail="operator has no business account type scope")
+    binding = db.scalar(
+        select(BusinessAccountTypeBenchmarkGroup.id).where(
+            BusinessAccountTypeBenchmarkGroup.benchmark_group_id == group.id,
+            BusinessAccountTypeBenchmarkGroup.business_account_type_id.in_(list(business_type_ids)),
+        )
+    )
+    if not binding:
+        raise HTTPException(status_code=403, detail="insufficient permission for this benchmark group")
+
+
+def _ensure_benchmark_group_writable(db: Session, principal: Principal, group: BenchmarkGroup) -> None:
+    if not _is_operator(principal):
+        return
+    employee_id = get_principal_employee_id(db, principal)
+    if not employee_id:
+        raise HTTPException(status_code=403, detail="operator has no employee profile")
+    if group.owner_employee_id != employee_id:
+        raise HTTPException(status_code=403, detail="仅提交人可编辑/删除该对标组")
+
+
+def _ensure_rule_set_readable(db: Session, principal: Principal, rule_set: KeywordRuleSet) -> None:
+    if not _is_operator(principal):
+        return
+    business_type_ids = _operator_business_type_ids(db, principal)
+    if not business_type_ids:
+        raise HTTPException(status_code=403, detail="operator has no business account type scope")
+    binding = db.scalar(
+        select(BusinessAccountTypeRuleSet.id).where(
+            BusinessAccountTypeRuleSet.rule_set_id == rule_set.id,
+            BusinessAccountTypeRuleSet.business_account_type_id.in_(list(business_type_ids)),
+        )
+    )
+    if not binding:
+        raise HTTPException(status_code=403, detail="insufficient permission for this rule set")
+
+
+def _ensure_rule_set_writable(db: Session, principal: Principal, rule_set: KeywordRuleSet) -> None:
+    if not _is_operator(principal):
+        return
+    if rule_set.created_by_user_id != principal.user_id:
+        raise HTTPException(status_code=403, detail="仅提交人可编辑/删除该业务规则")
+
+
 def _account_read(db: Session, repo: ProductRepository, account: PlatformAccount) -> PlatformAccountRead:
     business_type = _business_type(db, account.business_account_type_id)
     active_login = AccountLoginService(db).get_active_session(account.id)
@@ -234,6 +366,7 @@ def _account_read(db: Session, repo: ProductRepository, account: PlatformAccount
         platform_home_url=getattr(account, "platform_home_url", None),
         last_verified_at=getattr(account, "last_verified_at", None),
         login_cdp_port=getattr(account, "login_cdp_port", None),
+        default_agent_id=getattr(account, "default_agent_id", None),
         bindings=[],
         session_health_status=session_health_status,
         active_login_session_status=active_login_session_status,
@@ -804,8 +937,22 @@ def update_business_account_type(business_account_type_id: str, request: Busines
     return BusinessAccountTypeRead(id=item.id, name=item.name, description=item.description, enabled=item.enabled, rule_set_count=rule_count, benchmark_group_count=group_count)
 
 
+@router.delete("/business-account-types/{business_account_type_id}", status_code=204)
+def delete_business_account_type(business_account_type_id: str, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+    item = db.get(BusinessAccountType, business_account_type_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="business account type not found")
+    repo = ProductRepository(db)
+    rule_count, group_count = repo.business_type_relation_counts(item.id)
+    account_count = repo.business_type_account_count(item.id)
+    if rule_count or group_count or account_count:
+        raise HTTPException(status_code=409, detail="业务账号类型已被账号、规则集或对标组引用，不能删除")
+    repo.delete_business_account_type(item)
+    db.commit()
+
+
 @router.get("/business-account-types", response_model=list[BusinessAccountTypeRead])
-def list_business_account_types(db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+def list_business_account_types(db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR))):
     repo = ProductRepository(db)
     def read(item):
         rule_count, group_count = repo.business_type_relation_counts(item.id)
@@ -858,6 +1005,7 @@ def create_product_account(
         external_account_id=request.external_account_id,
         business_account_type=request.business_account_type,
         business_account_type_id=request.business_account_type_id,
+        default_agent_id=request.default_agent_id,
         account_role=request.account_role,
         health_status=request.health_status,
         metadata=request.metadata,
@@ -894,6 +1042,8 @@ def update_product_account(
     repo = ProductRepository(db)
     payload = request.model_dump(exclude_unset=True)
     updated = repo.update_account(account, **payload)
+    if "default_agent_id" in payload:
+        AccountLoginService(db).reroute_waiting_sessions_for_account(updated, agent_id=payload.get("default_agent_id"))
     db.commit()
     return _account_read(db, repo, updated)
 
@@ -1000,40 +1150,97 @@ def delete_account_agent_binding(
 
 
 @router.post("/benchmark-groups", response_model=BenchmarkGroupRead)
-def create_benchmark_group(request: BenchmarkGroupCreateRequest, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+def create_benchmark_group(
+    request: BenchmarkGroupCreateRequest,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+):
+    owner_employee_id = request.owner_employee_id
+    auto_bind_business_types: set[str] = set()
+    if _is_operator(principal):
+        owner_employee_id, auto_bind_business_types = _ensure_operator_has_business_types(db, principal)
     group = ProductRepository(db).create_benchmark_group(
         name=request.name,
         description=request.description,
-        owner_employee_id=request.owner_employee_id,
+        owner_employee_id=owner_employee_id,
         enabled=request.enabled,
         metadata=request.metadata,
     )
+    if _is_operator(principal):
+        for business_type_id in auto_bind_business_types:
+            ProductRepository(db).bind_business_type_to_benchmark_group(
+                business_account_type_id=business_type_id,
+                benchmark_group_id=group.id,
+            )
     db.commit()
-    return BenchmarkGroupRead(id=group.id, name=group.name, description=group.description, owner_employee_id=group.owner_employee_id, enabled=group.enabled, metadata=group.metadata_json)
+    return _benchmark_group_read(db, group)
 
 
 @router.patch("/benchmark-groups/{group_id}", response_model=BenchmarkGroupRead)
-def update_benchmark_group(group_id: str, request: BenchmarkGroupUpdateRequest, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+def update_benchmark_group(
+    group_id: str,
+    request: BenchmarkGroupUpdateRequest,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+):
     group = db.get(BenchmarkGroup, group_id)
     if not group:
         raise HTTPException(status_code=404, detail="benchmark group not found")
+    _ensure_benchmark_group_readable(db, principal, group)
+    _ensure_benchmark_group_writable(db, principal, group)
     group = ProductRepository(db).update_benchmark_group(group, **request.model_dump(exclude_unset=True))
     db.commit()
-    return BenchmarkGroupRead(id=group.id, name=group.name, description=group.description, owner_employee_id=group.owner_employee_id, enabled=group.enabled, metadata=group.metadata_json or {})
+    return _benchmark_group_read(db, group)
+
+
+@router.delete("/benchmark-groups/{group_id}", status_code=204)
+def delete_benchmark_group(
+    group_id: str,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+):
+    group = db.get(BenchmarkGroup, group_id)
+    if not group:
+        raise HTTPException(status_code=404, detail="benchmark group not found")
+    _ensure_benchmark_group_readable(db, principal, group)
+    _ensure_benchmark_group_writable(db, principal, group)
+    ProductRepository(db).delete_benchmark_group(group)
+    db.commit()
 
 
 @router.get("/benchmark-groups", response_model=list[BenchmarkGroupRead])
-def list_benchmark_groups(db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
-    return [
-        BenchmarkGroupRead(id=group.id, name=group.name, description=group.description, owner_employee_id=group.owner_employee_id, enabled=group.enabled, metadata=group.metadata_json or {})
-        for group in ProductRepository(db).list_benchmark_groups()
-    ]
+def list_benchmark_groups(
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+):
+    groups = ProductRepository(db).list_benchmark_groups()
+    if _is_operator(principal):
+        business_type_ids = _operator_business_type_ids(db, principal)
+        if not business_type_ids:
+            return []
+        allowed_group_ids = set(
+            db.scalars(
+                select(BusinessAccountTypeBenchmarkGroup.benchmark_group_id).where(
+                    BusinessAccountTypeBenchmarkGroup.business_account_type_id.in_(list(business_type_ids))
+                )
+            )
+        )
+        groups = [group for group in groups if group.id in allowed_group_ids]
+    return [_benchmark_group_read(db, group) for group in groups]
 
 
 @router.post("/benchmark-groups/{group_id}/members", response_model=BenchmarkGroupMemberRead)
-def add_benchmark_group_member(group_id: str, request: BenchmarkGroupMemberCreateRequest, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
-    if not db.get(BenchmarkGroup, group_id):
+def add_benchmark_group_member(
+    group_id: str,
+    request: BenchmarkGroupMemberCreateRequest,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+):
+    group = db.get(BenchmarkGroup, group_id)
+    if not group:
         raise HTTPException(status_code=404, detail="benchmark group not found")
+    _ensure_benchmark_group_readable(db, principal, group)
+    _ensure_benchmark_group_writable(db, principal, group)
     member = ProductRepository(db).add_benchmark_member(
         benchmark_group_id=group_id,
         creator_monitor_id=request.creator_monitor_id,
@@ -1059,7 +1266,15 @@ def add_benchmark_group_member(group_id: str, request: BenchmarkGroupMemberCreat
 
 
 @router.get("/benchmark-groups/{group_id}/members", response_model=list[BenchmarkGroupMemberRead])
-def list_benchmark_group_members(group_id: str, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+def list_benchmark_group_members(
+    group_id: str,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+):
+    group = db.get(BenchmarkGroup, group_id)
+    if not group:
+        raise HTTPException(status_code=404, detail="benchmark group not found")
+    _ensure_benchmark_group_readable(db, principal, group)
     return [
         BenchmarkGroupMemberRead(
             id=member.id,
@@ -1076,10 +1291,78 @@ def list_benchmark_group_members(group_id: str, db: Session = Depends(get_db), _
     ]
 
 
-@router.post("/benchmark-groups/{group_id}/business-account-types")
-def bind_benchmark_group_business_type(group_id: str, request: BindBenchmarkGroupRequest, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
-    if not db.get(BenchmarkGroup, group_id):
+@router.delete("/benchmark-groups/{group_id}/members/{member_id}", status_code=204)
+def delete_benchmark_group_member(
+    group_id: str,
+    member_id: str,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+):
+    group = db.get(BenchmarkGroup, group_id)
+    if not group:
         raise HTTPException(status_code=404, detail="benchmark group not found")
+    _ensure_benchmark_group_readable(db, principal, group)
+    _ensure_benchmark_group_writable(db, principal, group)
+    member = db.get(BenchmarkGroupMember, member_id)
+    if not member or member.benchmark_group_id != group_id:
+        raise HTTPException(status_code=404, detail="benchmark group member not found")
+    ProductRepository(db).delete_benchmark_member(member)
+    db.commit()
+
+
+@router.patch("/benchmark-groups/{group_id}/members/{member_id}", response_model=BenchmarkGroupMemberRead)
+def update_benchmark_group_member(
+    group_id: str,
+    member_id: str,
+    request: BenchmarkGroupMemberUpdateRequest,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+):
+    group = db.get(BenchmarkGroup, group_id)
+    if not group:
+        raise HTTPException(status_code=404, detail="benchmark group not found")
+    _ensure_benchmark_group_readable(db, principal, group)
+    _ensure_benchmark_group_writable(db, principal, group)
+    member = db.get(BenchmarkGroupMember, member_id)
+    if not member or member.benchmark_group_id != group_id:
+        raise HTTPException(status_code=404, detail="benchmark group member not found")
+    if request.platform is not None:
+        member.platform = _enum_value(request.platform)
+    if request.creator_platform_id is not None:
+        member.creator_platform_id = request.creator_platform_id
+    if request.creator_profile_url is not None:
+        member.creator_profile_url = request.creator_profile_url
+    if request.display_name is not None:
+        member.display_name = request.display_name
+    if request.enabled is not None:
+        member.enabled = request.enabled
+    db.commit()
+    db.refresh(member)
+    return BenchmarkGroupMemberRead(
+        id=member.id,
+        benchmark_group_id=member.benchmark_group_id,
+        creator_monitor_id=member.creator_monitor_id,
+        platform=member.platform,
+        creator_platform_id=member.creator_platform_id,
+        creator_profile_url=member.creator_profile_url,
+        display_name=member.display_name,
+        platform_context=member.platform_context_json,
+        enabled=member.enabled,
+    )
+
+
+@router.post("/benchmark-groups/{group_id}/business-account-types")
+def bind_benchmark_group_business_type(
+    group_id: str,
+    request: BindBenchmarkGroupRequest,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+):
+    group = db.get(BenchmarkGroup, group_id)
+    if not group:
+        raise HTTPException(status_code=404, detail="benchmark group not found")
+    _ensure_benchmark_group_readable(db, principal, group)
+    _ensure_benchmark_group_writable(db, principal, group)
     if not db.get(BusinessAccountType, request.business_account_type_id):
         raise HTTPException(status_code=404, detail="business account type not found")
     binding = ProductRepository(db).bind_business_type_to_benchmark_group(business_account_type_id=request.business_account_type_id, benchmark_group_id=group_id)
@@ -1088,9 +1371,15 @@ def bind_benchmark_group_business_type(group_id: str, request: BindBenchmarkGrou
 
 
 @router.get("/benchmark-groups/{group_id}/business-account-types", response_model=list[BenchmarkGroupBusinessAccountTypeRead])
-def list_benchmark_group_business_types(group_id: str, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
-    if not db.get(BenchmarkGroup, group_id):
+def list_benchmark_group_business_types(
+    group_id: str,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+):
+    group = db.get(BenchmarkGroup, group_id)
+    if not group:
         raise HTTPException(status_code=404, detail="benchmark group not found")
+    _ensure_benchmark_group_readable(db, principal, group)
     return [
         BenchmarkGroupBusinessAccountTypeRead(
             id=binding.id,
@@ -1396,7 +1685,7 @@ def bind_business_account_type_rule_set(business_account_type_id: str, request: 
 
 
 @router.get("/business-account-types/{business_account_type_id}/rule-sets", response_model=list[BusinessAccountTypeRuleSetRead])
-def list_business_account_type_rule_sets(business_account_type_id: str, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+def list_business_account_type_rule_sets(business_account_type_id: str, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR))):
     if not db.get(BusinessAccountType, business_account_type_id):
         raise HTTPException(status_code=404, detail="business account type not found")
     return [
@@ -1412,32 +1701,98 @@ def list_business_account_type_rule_sets(business_account_type_id: str, db: Sess
 
 
 @router.get("/keyword-rule-sets", response_model=list[KeywordRuleSetRead])
-def list_keyword_rule_sets(db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
-    return [
-        KeywordRuleSetRead(id=row.id, name=row.name, rule_scope=row.rule_scope, enabled=row.enabled, config=row.config_json or {})
-        for row in ProductRepository(db).list_keyword_rule_sets()
-    ]
+def list_keyword_rule_sets(
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+):
+    rows = ProductRepository(db).list_keyword_rule_sets()
+    if _is_operator(principal):
+        business_type_ids = _operator_business_type_ids(db, principal)
+        if not business_type_ids:
+            return []
+        allowed_rule_set_ids = set(
+            db.scalars(
+                select(BusinessAccountTypeRuleSet.rule_set_id).where(
+                    BusinessAccountTypeRuleSet.business_account_type_id.in_(list(business_type_ids))
+                )
+            )
+        )
+        rows = [row for row in rows if row.id in allowed_rule_set_ids]
+    return [_keyword_rule_set_read(db, row) for row in rows]
 
 
 @router.post("/keyword-rule-sets", response_model=KeywordRuleSetRead)
-def create_keyword_rule_set(request: KeywordRuleSetCreateRequest, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
-    row = ProductRepository(db).create_keyword_rule_set(name=request.name, rule_scope=request.rule_scope, enabled=request.enabled, config=request.config)
+def create_keyword_rule_set(
+    request: KeywordRuleSetCreateRequest,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+):
+    created_by_user_id = principal.user_id
+    created_by_employee_id = None
+    auto_bind_business_types: set[str] = set()
+    if _is_operator(principal):
+        created_by_employee_id, auto_bind_business_types = _ensure_operator_has_business_types(db, principal)
+    row = ProductRepository(db).create_keyword_rule_set(
+        name=request.name,
+        rule_scope=request.rule_scope,
+        enabled=request.enabled,
+        config=request.config,
+        created_by_user_id=created_by_user_id,
+        created_by_employee_id=created_by_employee_id,
+    )
+    if _is_operator(principal):
+        for business_type_id in auto_bind_business_types:
+            ProductRepository(db).bind_rule_set_to_business_type(
+                business_account_type_id=business_type_id,
+                rule_set_id=row.id,
+                is_default=False,
+            )
     db.commit()
-    return KeywordRuleSetRead(id=row.id, name=row.name, rule_scope=row.rule_scope, enabled=row.enabled, config=row.config_json or {})
+    return _keyword_rule_set_read(db, row)
 
 
 @router.patch("/keyword-rule-sets/{rule_set_id}", response_model=KeywordRuleSetRead)
-def update_keyword_rule_set(rule_set_id: str, request: KeywordRuleSetUpdateRequest, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+def update_keyword_rule_set(
+    rule_set_id: str,
+    request: KeywordRuleSetUpdateRequest,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+):
     row = db.get(KeywordRuleSet, rule_set_id)
     if not row:
         raise HTTPException(status_code=404, detail="rule set not found")
+    _ensure_rule_set_readable(db, principal, row)
+    _ensure_rule_set_writable(db, principal, row)
     row = ProductRepository(db).update_keyword_rule_set(row, **request.model_dump(exclude_unset=True))
     db.commit()
-    return KeywordRuleSetRead(id=row.id, name=row.name, rule_scope=row.rule_scope, enabled=row.enabled, config=row.config_json or {})
+    return _keyword_rule_set_read(db, row)
+
+
+@router.delete("/keyword-rule-sets/{rule_set_id}", status_code=204)
+def delete_keyword_rule_set(
+    rule_set_id: str,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+):
+    row = db.get(KeywordRuleSet, rule_set_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="rule set not found")
+    _ensure_rule_set_readable(db, principal, row)
+    _ensure_rule_set_writable(db, principal, row)
+    ProductRepository(db).delete_keyword_rule_set(row)
+    db.commit()
 
 
 @router.get("/keyword-rule-sets/{rule_set_id}/rules", response_model=list[KeywordRuleRead])
-def list_keyword_rules(rule_set_id: str, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+def list_keyword_rules(
+    rule_set_id: str,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+):
+    rule_set = db.get(KeywordRuleSet, rule_set_id)
+    if not rule_set:
+        raise HTTPException(status_code=404, detail="rule set not found")
+    _ensure_rule_set_readable(db, principal, rule_set)
     return [
         KeywordRuleRead(id=row.id, rule_set_id=row.rule_set_id, keyword=row.keyword, normalized_keyword=row.normalized_keyword, match_mode=row.match_mode, enabled=row.enabled, weight=row.weight)
         for row in ProductRepository(db).list_keyword_rules(rule_set_id)
@@ -1445,22 +1800,58 @@ def list_keyword_rules(rule_set_id: str, db: Session = Depends(get_db), _princip
 
 
 @router.post("/keyword-rule-sets/{rule_set_id}/rules", response_model=KeywordRuleRead)
-def create_keyword_rule(rule_set_id: str, request: KeywordRuleCreateRequest, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
-    if not db.get(KeywordRuleSet, rule_set_id):
+def create_keyword_rule(
+    rule_set_id: str,
+    request: KeywordRuleCreateRequest,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+):
+    rule_set = db.get(KeywordRuleSet, rule_set_id)
+    if not rule_set:
         raise HTTPException(status_code=404, detail="rule set not found")
+    _ensure_rule_set_readable(db, principal, rule_set)
+    _ensure_rule_set_writable(db, principal, rule_set)
     row = ProductRepository(db).create_keyword_rule(rule_set_id=rule_set_id, keyword=request.keyword, normalized_keyword=request.normalized_keyword, match_mode=request.match_mode, enabled=request.enabled, weight=request.weight)
     db.commit()
     return KeywordRuleRead(id=row.id, rule_set_id=row.rule_set_id, keyword=row.keyword, normalized_keyword=row.normalized_keyword, match_mode=row.match_mode, enabled=row.enabled, weight=row.weight)
 
 
 @router.patch("/keyword-rules/{rule_id}", response_model=KeywordRuleRead)
-def update_keyword_rule(rule_id: str, request: KeywordRuleUpdateRequest, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+def update_keyword_rule(
+    rule_id: str,
+    request: KeywordRuleUpdateRequest,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+):
     row = db.get(KeywordRule, rule_id)
     if not row:
         raise HTTPException(status_code=404, detail="rule not found")
+    rule_set = db.get(KeywordRuleSet, row.rule_set_id)
+    if not rule_set:
+        raise HTTPException(status_code=404, detail="rule set not found")
+    _ensure_rule_set_readable(db, principal, rule_set)
+    _ensure_rule_set_writable(db, principal, rule_set)
     row = ProductRepository(db).update_keyword_rule(row, **request.model_dump(exclude_unset=True))
     db.commit()
     return KeywordRuleRead(id=row.id, rule_set_id=row.rule_set_id, keyword=row.keyword, normalized_keyword=row.normalized_keyword, match_mode=row.match_mode, enabled=row.enabled, weight=row.weight)
+
+
+@router.delete("/keyword-rules/{rule_id}", status_code=204)
+def delete_keyword_rule(
+    rule_id: str,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+):
+    row = db.get(KeywordRule, rule_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="rule not found")
+    rule_set = db.get(KeywordRuleSet, row.rule_set_id)
+    if not rule_set:
+        raise HTTPException(status_code=404, detail="rule set not found")
+    _ensure_rule_set_readable(db, principal, rule_set)
+    _ensure_rule_set_writable(db, principal, rule_set)
+    ProductRepository(db).delete_keyword_rule(row)
+    db.commit()
 
 
 @router.get("/product/options", response_model=ProductOptions)
@@ -2115,6 +2506,20 @@ def update_operation_rule(
     )
     db.commit()
     return _operation_rule_read(rule)
+
+
+@router.delete("/operation-rules/{rule_id}", status_code=204)
+def delete_operation_rule(
+    rule_id: str,
+    db: Session = Depends(get_db),
+    _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR)),
+):
+    repo = OperationRuleRepository(db)
+    rule = repo.get(rule_id)
+    if not rule:
+        raise HTTPException(status_code=404, detail="operation rule not found")
+    repo.delete(rule)
+    db.commit()
 
 
 @router.post("/xhs/search-suggestions/tasks", response_model=EnqueueFetchResponse)

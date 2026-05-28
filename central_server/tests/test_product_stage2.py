@@ -4,11 +4,13 @@ from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
 from intelligence_engine.db.models import (
+    BusinessAccountTypeRuleSet,
     ContentAssignment,
     ContentIdentity,
     ContentOperatorNote,
     ContentWorkflowState,
     Job,
+    KeywordRule,
     KeywordRuleSet,
     LocalAgent,
     utcnow,
@@ -37,7 +39,7 @@ def _client(db_session) -> TestClient:
     return client
 
 
-def _account(db_session):
+def _account(db_session, *, business_account_type_id=None):
     agent = AccountRepository(db_session).register_agent(
         employee_id=None,
         device_name="stage2-pc",
@@ -51,6 +53,7 @@ def _account(db_session):
         display_name="stage2-account",
         external_account_id=None,
         business_account_type=None,
+        business_account_type_id=business_account_type_id,
         default_agent_id=agent.id,
         metadata={},
     )
@@ -116,9 +119,11 @@ def test_recommendation_task_template_materializes_feed_collect_job(db_session):
 
 
 def test_creator_task_template_materializes_multiple_creator_monitor_jobs(db_session):
-    account = _account(db_session)
     repo = ProductRepository(db_session)
+    business_type = repo.create_business_account_type(name="对标账号类型", description=None, enabled=True)
+    account = _account(db_session, business_account_type_id=business_type.id)
     group = repo.create_benchmark_group(name="对标组", description=None, owner_employee_id=None, enabled=True, metadata={})
+    repo.bind_business_type_to_benchmark_group(business_account_type_id=business_type.id, benchmark_group_id=group.id)
     monitor = CreatorMonitorRepository(db_session).create_monitor(
         platform=Platform.XHS.value,
         creator_platform_id="creator-a",
@@ -368,9 +373,11 @@ def test_manual_run_creates_task_run_and_job_detail_aggregates_feed_summary(db_s
 
 def test_task_run_detail_aggregates_creator_summary(db_session):
     client = _client(db_session)
-    account = _account(db_session)
     repo = ProductRepository(db_session)
+    business_type = repo.create_business_account_type(name="摘要账号类型", description=None, enabled=True)
+    account = _account(db_session, business_account_type_id=business_type.id)
     group = repo.create_benchmark_group(name="对标组摘要", description=None, owner_employee_id=None, enabled=True, metadata={})
+    repo.bind_business_type_to_benchmark_group(business_account_type_id=business_type.id, benchmark_group_id=group.id)
     monitor = CreatorMonitorRepository(db_session).create_monitor(
         platform=Platform.XHS.value,
         creator_platform_id="creator-summary",
@@ -453,6 +460,24 @@ def test_intelligence_contents_query_includes_workflow_info(db_session):
     assert item["discovery_sources_summary"]["source_surfaces"]["xhs_home_feed"] == 1
 
 
+def test_discarded_intelligence_is_hidden_from_default_pool_but_filterable(db_session):
+    client = _client(db_session)
+    content = _content(db_session)
+
+    discard_response = client.post(f"/api/intelligence/contents/{content.id}/discard", json={"user_id": "user-a", "note": "质量不行"})
+    assert discard_response.status_code == 200
+    assert discard_response.json()["workflow_status"] == "discarded"
+
+    default_response = client.get("/api/intelligence/contents/product")
+    assert default_response.status_code == 200, default_response.text
+    assert default_response.json()["total"] == 0
+
+    discarded_response = client.get("/api/intelligence/contents/product", params={"workflow_status": "discarded"})
+    assert discarded_response.status_code == 200, discarded_response.text
+    assert discarded_response.json()["total"] == 1
+    assert discarded_response.json()["items"][0]["content_id"] == content.id
+
+
 def test_business_account_type_rule_set_binding_api(db_session):
     client = _client(db_session)
     business_type = client.post("/api/business-account-types", json={"name": "论文账号"}).json()
@@ -467,3 +492,130 @@ def test_business_account_type_rule_set_binding_api(db_session):
     list_response = client.get(f"/api/business-account-types/{business_type['id']}/rule-sets")
     assert list_response.status_code == 200
     assert list_response.json()[0]["is_default"] is True
+
+
+def test_keyword_rule_set_delete_removes_rules_and_bindings(db_session):
+    client = _client(db_session)
+    business_type = client.post("/api/business-account-types", json={"name": "论文账号"}).json()
+    rule_set = KeywordRuleSet(name="待删除业务规则", rule_scope="xhs", enabled=True, config_json={})
+    db_session.add(rule_set)
+    db_session.flush()
+    db_session.add(KeywordRule(rule_set_id=rule_set.id, keyword="SCI", normalized_keyword="sci", match_mode="contains", enabled=True, weight=1))
+    ProductRepository(db_session).bind_rule_set_to_business_type(business_account_type_id=business_type["id"], rule_set_id=rule_set.id, is_default=False)
+    db_session.commit()
+
+    response = client.delete(f"/api/keyword-rule-sets/{rule_set.id}")
+
+    assert response.status_code == 204
+    assert db_session.get(KeywordRuleSet, rule_set.id) is None
+    assert db_session.scalar(select(func.count()).select_from(KeywordRule).where(KeywordRule.rule_set_id == rule_set.id)) == 0
+    assert db_session.scalar(select(func.count()).select_from(BusinessAccountTypeRuleSet).where(BusinessAccountTypeRuleSet.rule_set_id == rule_set.id)) == 0
+
+
+def test_task_rule_set_must_match_account_business_type(db_session):
+    client = _client(db_session)
+    repo = ProductRepository(db_session)
+    business_type = repo.create_business_account_type(name="论文服务号", description=None, enabled=True)
+    account = _account(db_session, business_account_type_id=business_type.id)
+    bound_rule_set = KeywordRuleSet(name="论文规则", rule_scope="xhs", enabled=True, config_json={})
+    unbound_rule_set = KeywordRuleSet(name="留学规则", rule_scope="xhs", enabled=True, config_json={})
+    db_session.add_all([bound_rule_set, unbound_rule_set])
+    db_session.flush()
+    repo.bind_rule_set_to_business_type(business_account_type_id=business_type.id, rule_set_id=bound_rule_set.id, is_default=False)
+    blocked_template = repo.create_task_template(
+        name="未绑定规则任务",
+        template_type="recommendation_feed_task",
+        platform=Platform.XHS.value,
+        account_id=account.id,
+        business_account_type_id=business_type.id,
+        config={
+            "executor_account_id": account.id,
+            "feed_type": "xhs_home_feed",
+            "target_count": 5,
+            "refresh_rounds": 1,
+            "per_round_scroll_target": 5,
+            "rule_set_id": unbound_rule_set.id,
+        },
+        enabled=True,
+    )
+    allowed_template = repo.create_task_template(
+        name="已绑定规则任务",
+        template_type="recommendation_feed_task",
+        platform=Platform.XHS.value,
+        account_id=account.id,
+        business_account_type_id=business_type.id,
+        config={
+            "executor_account_id": account.id,
+            "feed_type": "xhs_home_feed",
+            "target_count": 5,
+            "refresh_rounds": 1,
+            "per_round_scroll_target": 5,
+            "rule_set_id": bound_rule_set.id,
+        },
+        enabled=True,
+    )
+    db_session.commit()
+
+    blocked_readiness = client.get(f"/api/task-templates/{blocked_template.id}/readiness")
+    assert blocked_readiness.status_code == 200
+    assert blocked_readiness.json()["ready"] is False
+    assert "未绑定到业务类型" in "；".join(blocked_readiness.json()["messages"])
+
+    blocked_run = client.post(f"/api/task-templates/{blocked_template.id}/run")
+    assert blocked_run.status_code == 409
+
+    allowed_run = client.post(f"/api/task-templates/{allowed_template.id}/run")
+    assert allowed_run.status_code == 200
+    assert allowed_run.json()["jobs_created"] == 1
+
+
+def test_creator_task_benchmark_group_must_match_account_business_type(db_session):
+    client = _client(db_session)
+    repo = ProductRepository(db_session)
+    business_type = repo.create_business_account_type(name="论文服务号", description=None, enabled=True)
+    account = _account(db_session, business_account_type_id=business_type.id)
+    allowed_group = repo.create_benchmark_group(name="论文对标组", description=None, owner_employee_id=None, enabled=True, metadata={})
+    blocked_group = repo.create_benchmark_group(name="留学对标组", description=None, owner_employee_id=None, enabled=True, metadata={})
+    for group, creator_id in ((allowed_group, "creator-allowed"), (blocked_group, "creator-blocked")):
+        repo.add_benchmark_member(
+            benchmark_group_id=group.id,
+            creator_monitor_id=None,
+            platform=Platform.XHS.value,
+            creator_platform_id=creator_id,
+            creator_profile_url=None,
+            display_name=creator_id,
+            platform_context={},
+            enabled=True,
+        )
+    repo.bind_business_type_to_benchmark_group(business_account_type_id=business_type.id, benchmark_group_id=allowed_group.id)
+    blocked_template = repo.create_task_template(
+        name="未绑定对标组任务",
+        template_type="creator_monitor_task",
+        platform=Platform.XHS.value,
+        account_id=account.id,
+        business_account_type_id=business_type.id,
+        config={"executor_account_id": account.id, "benchmark_group_id": blocked_group.id, "max_latest_items": 20},
+        enabled=True,
+    )
+    allowed_template = repo.create_task_template(
+        name="已绑定对标组任务",
+        template_type="creator_monitor_task",
+        platform=Platform.XHS.value,
+        account_id=account.id,
+        business_account_type_id=business_type.id,
+        config={"executor_account_id": account.id, "benchmark_group_id": allowed_group.id, "max_latest_items": 20},
+        enabled=True,
+    )
+    db_session.commit()
+
+    blocked_readiness = client.get(f"/api/task-templates/{blocked_template.id}/readiness")
+    assert blocked_readiness.status_code == 200
+    assert blocked_readiness.json()["ready"] is False
+    assert "对标账号组" in "；".join(blocked_readiness.json()["messages"])
+
+    blocked_run = client.post(f"/api/task-templates/{blocked_template.id}/run")
+    assert blocked_run.status_code == 409
+
+    allowed_run = client.post(f"/api/task-templates/{allowed_template.id}/run")
+    assert allowed_run.status_code == 200
+    assert allowed_run.json()["jobs_created"] == 1

@@ -137,6 +137,8 @@ class AccountRepository:
         )
         self.db.add(account)
         self.db.flush()
+        if default_agent_id:
+            self.bind_agent(account_id=account.id, agent_id=default_agent_id, employee_id=employee_id)
         return account
 
     def bind_agent(self, *, account_id: str, agent_id: str, employee_id: str | None) -> AccountAgentBinding:

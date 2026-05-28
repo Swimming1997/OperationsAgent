@@ -16,6 +16,7 @@ from local_agent_runtime.runtime import (
     XhsJobExecutor,
 )
 from local_agent_runtime.contracts import FeedCandidateInput
+from local_agent_runtime.connectors.xhs.creator import XhsCreatorFetchError
 from local_agent_runtime.enums import ContentType, ErrorCode, FeedType, JobStatus, JobType, Platform, SourceSurface
 
 
@@ -146,6 +147,64 @@ def test_runtime_routes_creator_monitor_job_type():
 
     assert executor.seen == [("agent-1", JobType.CREATOR_MONITOR.value)]
     assert any(event[0] == "complete" and event[3]["items_seen"] == 3 for event in client.events)
+
+
+def test_creator_monitor_fetch_error_maps_to_runtime_failure(monkeypatch):
+    async def fail_fetch_latest(self, page, **kwargs):
+        raise XhsCreatorFetchError(
+            "小红书 user_posted 接口暂时不可用（HTTP 500，jarvis-gateway 创建调用器失败），请稍后重试；这不是对标账号没有笔记。",
+            error_code=ErrorCode.RETRYABLE_NETWORK_ERROR.value,
+            retryable=True,
+            raw_context={"response_meta": {"http_status": 500}},
+        )
+
+    monkeypatch.setattr(runtime_module.XhsCreatorConnector, "fetch_latest", fail_fetch_latest)
+    executor = XhsJobExecutor(client=FakeIngestionClient(), config=AgentRuntimeConfig(agent_id="agent-1"))
+    job = ClaimedJobPayload(
+        job_id="job-creator",
+        job_type=JobType.CREATOR_MONITOR.value,
+        account_id="account-1",
+        payload={"creator_monitor_id": "monitor-1"},
+        checkpoint={},
+    )
+
+    try:
+        asyncio.run(executor._run_creator_monitor(job, object()))
+    except RuntimeFailure as exc:
+        assert exc.code == ErrorCode.RETRYABLE_NETWORK_ERROR
+        assert exc.retryable is True
+        assert exc.raw_context["response_meta"]["http_status"] == 500
+    else:
+        raise AssertionError("expected RuntimeFailure")
+
+
+def test_creator_monitor_public_id_resolution_failure_maps_to_runtime_failure(monkeypatch):
+    async def fail_resolve_public_id(self, page, **kwargs):
+        raise XhsCreatorFetchError(
+            "未能通过小红书号找到对标账号主页：1479543583",
+            error_code=ErrorCode.CREATOR_NOT_FOUND.value,
+            retryable=False,
+            raw_context={"public_identifier": "1479543583"},
+        )
+
+    monkeypatch.setattr(runtime_module.XhsCreatorConnector, "fetch_latest", fail_resolve_public_id)
+    executor = XhsJobExecutor(client=FakeIngestionClient(), config=AgentRuntimeConfig(agent_id="agent-1"))
+    job = ClaimedJobPayload(
+        job_id="job-creator",
+        job_type=JobType.CREATOR_MONITOR.value,
+        account_id="account-1",
+        payload={"creator_monitor_id": "monitor-1", "creator_platform_id": "1479543583"},
+        checkpoint={},
+    )
+
+    try:
+        asyncio.run(executor._run_creator_monitor(job, object()))
+    except RuntimeFailure as exc:
+        assert exc.code == ErrorCode.CREATOR_NOT_FOUND
+        assert exc.retryable is False
+        assert exc.raw_context["public_identifier"] == "1479543583"
+    else:
+        raise AssertionError("expected RuntimeFailure")
 
 
 def test_center_client_http_job_lifecycle_uses_json_protocol():

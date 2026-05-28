@@ -194,15 +194,19 @@ class JobRepository:
         if self._agent_has_active_work(agent_id):
             return False
         agent = self.db.get(LocalAgent, agent_id)
-        if not agent or agent.status == "retired":
+        if agent and agent.status == "retired":
             return False
         if not job.account_id:
             return True
+        if not agent:
+            return False
         account = self.db.get(PlatformAccount, job.account_id)
         if not account:
             return False
         if account.employee_id and agent.employee_id != account.employee_id:
             return False
+        if job.local_agent_id == agent_id:
+            return True
         ready_session = self.db.scalar(
             select(AccountSession.id).where(
                 AccountSession.account_id == job.account_id,
@@ -215,7 +219,7 @@ class JobRepository:
     def claim_jobs_for_agent(self, *, agent_id: str, supported_job_types: list[JobType], max_jobs: int, ttl_seconds: int) -> list[Job]:
         self.requeue_expired_claims()
         agent = self.db.get(LocalAgent, agent_id)
-        if not agent or agent.status == "retired":
+        if agent and agent.status == "retired":
             return []
         now = utcnow()
         expires_at = now + timedelta(seconds=ttl_seconds)
@@ -310,6 +314,7 @@ class JobRepository:
         )
         for job in jobs:
             job.status = JobStatus.PENDING.value
+            job.local_agent_id = None
             job.claimed_by_agent_id = None
             job.claimed_at = None
             job.claim_expires_at = None

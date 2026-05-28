@@ -328,12 +328,16 @@ def ingest_feed_candidates(request: FeedCandidateIngestionRequest, db: Session =
     repo = ContentRepository(db)
     results = []
     evaluated_content_ids: list[str] = []
+    job = db.get(Job, request.job_id)
+    rule_set_id = (job.payload_json or {}).get("rule_set_id") if job else None
     for candidate in request.candidates:
         content, is_new, event, detail_job_enqueued, feed_prelim_pass = repo.ingest_feed_candidate(
             job_id=request.job_id,
             account_id=request.account_id,
             candidate=candidate,
         )
+        if not is_new and content.latest_snapshot_id:
+            repo.evaluate_candidate(content_id=content.id, snapshot_id=content.latest_snapshot_id, rule_set_id=rule_set_id)
         evaluated_content_ids.append(content.id)
         results.append(
             FeedCandidateIngestionResult(
@@ -362,10 +366,13 @@ def ingest_creator_monitor_items(request: CreatorMonitorIngestionRequest, db: Se
         monitor.creator_display_name = request.creator_display_name
     content_repo = ContentRepository(db)
     creator_repo = CreatorMonitorRepository(db)
+    job = db.get(Job, request.job_id)
+    rule_set_id = (job.payload_json or {}).get("rule_set_id") if job else None
     new_count = 0
     duplicate_count = 0
     detail_jobs = 0
     event_count = 0
+    evaluated_content_ids: list[str] = []
     seen_ids: list[str] = []
     for candidate in request.items:
         content, is_new, _event, detail_enqueued, _prelim = content_repo.ingest_feed_candidate(
@@ -390,6 +397,9 @@ def ingest_creator_monitor_items(request: CreatorMonitorIngestionRequest, db: Se
             event_count += 1
         else:
             duplicate_count += 1
+            if content.latest_snapshot_id:
+                content_repo.evaluate_candidate(content_id=content.id, snapshot_id=content.latest_snapshot_id, rule_set_id=rule_set_id)
+                evaluated_content_ids.append(content.id)
         if detail_enqueued:
             detail_jobs += 1
     creator_repo.add_event(
@@ -399,6 +409,10 @@ def ingest_creator_monitor_items(request: CreatorMonitorIngestionRequest, db: Se
     )
     event_count += 1
     monitor.last_cursor_json = {"last_seen_platform_content_ids": seen_ids}
+    db.commit()
+    selection = BenchmarkSelectionService(db)
+    for content_id in evaluated_content_ids:
+        selection.ai_select_by_rules(content_id=content_id, trigger_source="creator_monitor_ingestion")
     db.commit()
     return CreatorMonitorIngestionResponse(
         items_seen=len(request.items),
@@ -415,9 +429,14 @@ def ingest_detail(request: DetailIngestionRequest, db: Session = Depends(get_db)
     if not content:
         raise HTTPException(status_code=404, detail="content not found")
     job = db.get(Job, request.job_id)
+    rule_set_id = (job.payload_json or {}).get("rule_set_id") if job else None
     repo = ContentRepository(db)
     snapshot = repo.create_snapshot(content_id=request.content_id, account_id=job.account_id if job else None, snapshot=request.snapshot)
-    repo.evaluate_candidate(content_id=request.content_id, snapshot_id=snapshot.id)
+    repo.evaluate_candidate(
+        content_id=request.content_id,
+        snapshot_id=snapshot.id,
+        rule_set_id=rule_set_id,
+    )
     BenchmarkSelectionService(db).ai_select_by_rules(content_id=request.content_id, trigger_source="detail_ingestion")
     content_metadata = dict(content.metadata_json or {})
     content_context = content_metadata.get("platform_context") if isinstance(content_metadata.get("platform_context"), dict) else {}
@@ -469,6 +488,7 @@ def ingest_detail(request: DetailIngestionRequest, db: Session = Depends(get_db)
                 "platform_context": platform_context,
                 "max_comments": get_settings().default_comment_limit,
                 "include_sub_comments": False,
+                "rule_set_id": rule_set_id,
             },
             priority=90,
         )
@@ -482,7 +502,12 @@ def ingest_comments(request: CommentIngestionRequest, db: Session = Depends(get_
     inserted, updated, hits = ContentRepository(db).create_or_update_comments(content_id=request.content_id, comments=request.comments)
     content = db.get(ContentIdentity, request.content_id)
     if content and content.latest_snapshot_id:
-        ContentRepository(db).evaluate_candidate(content_id=request.content_id, snapshot_id=content.latest_snapshot_id)
+        job = db.get(Job, request.job_id)
+        ContentRepository(db).evaluate_candidate(
+            content_id=request.content_id,
+            snapshot_id=content.latest_snapshot_id,
+            rule_set_id=(job.payload_json or {}).get("rule_set_id") if job else None,
+        )
         BenchmarkSelectionService(db).ai_select_by_rules(content_id=request.content_id, trigger_source="comment_ingestion")
     db.commit()
     return CommentIngestionResponse(inserted=inserted, updated=updated, lead_keyword_hits=hits)

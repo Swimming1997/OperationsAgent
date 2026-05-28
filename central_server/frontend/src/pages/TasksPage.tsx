@@ -1,7 +1,7 @@
 import { ExternalLink, Play, RefreshCw, Save } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { fetchOptions } from '../api/options';
-import { listAccounts, listAgents, listBehaviorProfiles, listBenchmarkGroups, listKeywordRuleSets, listNetworkEgressProfiles, listRiskPolicies } from '../api/resources';
+import { listAccounts, listAgents, listBehaviorProfiles, listBenchmarkGroupBusinessTypes, listBenchmarkGroups, listBusinessAccountTypes, listBusinessTypeRuleSets, listKeywordRuleSets, listNetworkEgressProfiles, listRiskPolicies } from '../api/resources';
 import { formatAgentCapabilities } from '../utils/agentCapabilities';
 import type { LocalAgent } from '../types/api';
 import { createTaskTemplate, getTaskRun, getTaskTemplate, getTaskTemplateReadiness, listTaskTemplateRuns, listTaskTemplates, runTaskTemplate, type TaskFormData, type TaskTemplateType, updateTaskTemplate } from '../api/tasks';
@@ -19,20 +19,39 @@ type ResourceState = {
   accounts: PlatformAccount[];
   agents: LocalAgent[];
   ruleSets: KeywordRuleSet[];
+  ruleSetIdsByBusinessType: Record<string, string[]>;
   behaviorProfiles: BehaviorProfile[];
   networkProfiles: NetworkEgressProfile[];
   riskPolicies: RiskPolicy[];
   benchmarkGroups: BenchmarkGroup[];
+  benchmarkGroupIdsByBusinessType: Record<string, string[]>;
 };
 
 const emptyResources: ResourceState = {
   accounts: [],
   agents: [],
   ruleSets: [],
+  ruleSetIdsByBusinessType: {},
   behaviorProfiles: [],
   networkProfiles: [],
   riskPolicies: [],
   benchmarkGroups: [],
+  benchmarkGroupIdsByBusinessType: {},
+};
+
+const TASK_TYPE_META: Record<TaskTemplateType, { title: string; description: string }> = {
+  recommendation_feed_task: {
+    title: '推荐流采集',
+    description: '用于采集平台推荐流内容，适合发现新趋势、新选题和潜在素材。',
+  },
+  creator_monitor_task: {
+    title: '对标账号监控',
+    description: '用于按对标组持续监控指定创作者，拉取其最新发布内容。',
+  },
+  keyword_search_task: {
+    title: '关键词搜索采集',
+    description: '用于按关键词主动检索内容，适合专题调研与定向线索补充。',
+  },
 };
 
 const defaults: Record<TaskTemplateType, TaskFormData> = {
@@ -76,6 +95,8 @@ export function TasksPage({ role, userId, onOpenOperations }: Props) {
   const [readiness, setReadiness] = useState<TaskTemplateReadiness | null>(null);
   const [activeRun, setActiveRun] = useState<TaskRun | null>(null);
   const [recentRuns, setRecentRuns] = useState<TaskRun[]>([]);
+  const readonly = role === 'operator';
+  const selectedTypeMeta = TASK_TYPE_META[selectedType];
 
   const agentById = useMemo(() => new Map(resources.agents.map((item) => [item.id, item])), [resources.agents]);
   const accountOptions = useMemo(() => resources.accounts.map((item) => {
@@ -91,11 +112,26 @@ export function TasksPage({ role, userId, onOpenOperations }: Props) {
       description: [item.platform, item.employee_display_name, item.session_health_status, agentSummary].filter(Boolean).join(' / '),
     };
   }), [resources.accounts, agentById]);
-  const ruleSetOptions = useMemo(() => resources.ruleSets.map((item) => ({ value: item.id, label: item.name, description: item.rule_scope })), [resources.ruleSets]);
+  const selectedAccount = useMemo(() => resources.accounts.find((item) => item.id === form.executor_account_id), [resources.accounts, form.executor_account_id]);
+  const ruleSetOptions = useMemo(() => {
+    const businessTypeId = selectedAccount?.business_account_type_id;
+    if (!businessTypeId) return [];
+    const allowedIds = new Set(resources.ruleSetIdsByBusinessType[businessTypeId] || []);
+    return resources.ruleSets
+      .filter((item) => allowedIds.has(item.id))
+      .map((item) => ({ value: item.id, label: item.name, description: item.rule_scope }));
+  }, [resources.ruleSets, resources.ruleSetIdsByBusinessType, selectedAccount?.business_account_type_id]);
   const behaviorOptions = useMemo(() => resources.behaviorProfiles.map((item) => ({ value: item.id, label: item.name, description: item.enabled ? '启用' : '停用' })), [resources.behaviorProfiles]);
   const networkOptions = useMemo(() => resources.networkProfiles.map((item) => ({ value: item.id, label: item.name, description: item.strategy })), [resources.networkProfiles]);
   const riskOptions = useMemo(() => resources.riskPolicies.map((item) => ({ value: item.id, label: item.name, description: item.enabled ? '启用' : '停用' })), [resources.riskPolicies]);
-  const benchmarkOptions = useMemo(() => resources.benchmarkGroups.map((item) => ({ value: item.id, label: item.name, description: item.enabled ? '启用' : '停用' })), [resources.benchmarkGroups]);
+  const benchmarkOptions = useMemo(() => {
+    const businessTypeId = selectedAccount?.business_account_type_id;
+    if (!businessTypeId) return [];
+    const allowedIds = new Set(resources.benchmarkGroupIdsByBusinessType[businessTypeId] || []);
+    return resources.benchmarkGroups
+      .filter((item) => allowedIds.has(item.id))
+      .map((item) => ({ value: item.id, label: item.name, description: item.enabled ? '启用' : '停用' }));
+  }, [resources.benchmarkGroups, resources.benchmarkGroupIdsByBusinessType, selectedAccount?.business_account_type_id]);
 
   useEffect(() => {
     fetchOptions(role, userId).then(setOptions).catch((err) => setError(err.message));
@@ -105,16 +141,29 @@ export function TasksPage({ role, userId, onOpenOperations }: Props) {
 
   async function reloadResources() {
     try {
-      const [accounts, agents, ruleSets, behaviorProfiles, networkProfiles, riskPolicies, benchmarkGroups] = await Promise.all([
+      const [accounts, agents, ruleSets, businessTypes, behaviorProfiles, networkProfiles, riskPolicies, benchmarkGroups] = await Promise.all([
         listAccounts(role, userId),
         listAgents(role, userId),
         listKeywordRuleSets(role, userId),
+        listBusinessAccountTypes(role, userId),
         listBehaviorProfiles(role, userId),
         listNetworkEgressProfiles(role, userId),
         listRiskPolicies(role, userId),
         listBenchmarkGroups(role, userId),
       ]);
-      setResources({ accounts, agents, ruleSets, behaviorProfiles, networkProfiles, riskPolicies, benchmarkGroups });
+      const bindingRows = await Promise.all(businessTypes.map((item) => listBusinessTypeRuleSets(role, item.id, userId)));
+      const ruleSetIdsByBusinessType = Object.fromEntries(
+        businessTypes.map((item, index) => [item.id, bindingRows[index].map((binding) => binding.rule_set_id)]),
+      );
+      const benchmarkBindingRows = await Promise.all(benchmarkGroups.map((item) => listBenchmarkGroupBusinessTypes(role, item.id, userId)));
+      const benchmarkGroupIdsByBusinessType: Record<string, string[]> = {};
+      for (const binding of benchmarkBindingRows.flat()) {
+        benchmarkGroupIdsByBusinessType[binding.business_account_type_id] = [
+          ...(benchmarkGroupIdsByBusinessType[binding.business_account_type_id] || []),
+          binding.benchmark_group_id,
+        ];
+      }
+      setResources({ accounts, agents, ruleSets, ruleSetIdsByBusinessType, behaviorProfiles, networkProfiles, riskPolicies, benchmarkGroups, benchmarkGroupIdsByBusinessType });
     } catch (err) {
       setError(err instanceof Error ? err.message : '资源选项加载失败');
     }
@@ -154,6 +203,20 @@ export function TasksPage({ role, userId, onOpenOperations }: Props) {
   function setField<K extends keyof TaskFormData>(key: K, value: TaskFormData[K]) {
     setForm((current) => ({ ...current, [key]: value }));
   }
+
+  useEffect(() => {
+    if (!form.rule_set_id) return;
+    if (!selectedAccount) return;
+    if (ruleSetOptions.length === 0) return;
+    if (ruleSetOptions.some((item) => item.value === form.rule_set_id)) return;
+    setField('rule_set_id', '');
+  }, [form.executor_account_id, form.rule_set_id, ruleSetOptions, selectedAccount]);
+
+  useEffect(() => {
+    if (selectedType !== 'creator_monitor_task' || !form.benchmark_group_id) return;
+    if (benchmarkOptions.some((item) => item.value === form.benchmark_group_id)) return;
+    setField('benchmark_group_id', '');
+  }, [benchmarkOptions, form.benchmark_group_id, form.executor_account_id, selectedType]);
 
   async function saveTemplate() {
     setError('');
@@ -226,16 +289,13 @@ export function TasksPage({ role, userId, onOpenOperations }: Props) {
     return () => window.clearInterval(timer);
   }, [activeRun?.id, activeRun?.status, role, userId, selected?.id]);
 
-  const readonly = role === 'operator';
-  const showRuleAndPolicy = selectedType !== 'creator_monitor_task';
-
   return (
     <section className="page-grid tasks-grid">
       <aside className="filter-panel">
         <div className="panel-title">任务类型</div>
         {(['recommendation_feed_task', 'creator_monitor_task', 'keyword_search_task'] as TaskTemplateType[]).map((type) => (
           <button key={type} className={`type-tab ${selectedType === type ? 'active' : ''}`} onClick={() => startCreate(type)}>
-            {type}
+            {TASK_TYPE_META[type].title}
           </button>
         ))}
         <div className="scheduler-note">
@@ -270,9 +330,17 @@ export function TasksPage({ role, userId, onOpenOperations }: Props) {
       <aside className="detail-panel">
         <div className="panel-title">{selected ? '编辑模板' : '新建模板'}</div>
         <div className="form-stack" data-testid="dynamic-task-form">
+          <div className="detail-section">
+            <b>{selectedTypeMeta.title}</b>
+            <span className="muted-hint">{selectedTypeMeta.description}</span>
+          </div>
           <label htmlFor="task-template-type">模板类型</label>
           <select id="task-template-type" value={selectedType} onChange={(event) => startCreate(event.target.value as TaskTemplateType)} disabled={!!selected}>
-            {options?.task_template_types.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+            {options?.task_template_types.map((item) => (
+              <option key={item.value} value={item.value}>
+                {TASK_TYPE_META[item.value as TaskTemplateType]?.title || item.label}
+              </option>
+            ))}
           </select>
           <label>名称</label>
           <input value={form.name} onChange={(event) => setField('name', event.target.value)} />
@@ -295,6 +363,9 @@ export function TasksPage({ role, userId, onOpenOperations }: Props) {
           {selectedType === 'creator_monitor_task' && (
             <>
               <ResourceSelect label="对标组" testId="benchmark-group-select" value={form.benchmark_group_id} options={benchmarkOptions} onChange={(value) => setField('benchmark_group_id', value)} />
+              {form.executor_account_id && benchmarkOptions.length === 0 && (
+                <div className="inline-error">当前执行账号的业务类型尚未绑定对标账号组，请先到对标账号组管理中绑定。</div>
+              )}
               <label className="check-line"><input type="checkbox" checked={form.auto_detail_fetch !== false} onChange={(event) => setField('auto_detail_fetch', event.target.checked)} />自动补详情</label>
             </>
           )}
@@ -310,7 +381,10 @@ export function TasksPage({ role, userId, onOpenOperations }: Props) {
               <input type="number" value={form.max_items || 50} onChange={(event) => setField('max_items', Number(event.target.value))} />
             </>
           )}
-          {showRuleAndPolicy && <ResourceSelect label="规则集" testId="rule-set-select" value={form.rule_set_id} options={ruleSetOptions} onChange={(value) => setField('rule_set_id', value)} />}
+          <ResourceSelect label="入库规则" testId="rule-set-select" value={form.rule_set_id} options={ruleSetOptions} onChange={(value) => setField('rule_set_id', value)} />
+          {form.executor_account_id && ruleSetOptions.length === 0 && (
+            <div className="inline-error">当前执行账号的业务类型尚未绑定入库规则，请先到规则管理详情中绑定。</div>
+          )}
           <ResourceSelect label="行为策略" testId="behavior-profile-select" value={form.behavior_profile_id} options={behaviorOptions} onChange={(value) => setField('behavior_profile_id', value)} />
           <ResourceSelect label="网络出口策略" testId="network-profile-select" value={form.network_egress_profile_id} options={networkOptions} onChange={(value) => setField('network_egress_profile_id', value)} />
           <ResourceSelect label="风险策略" testId="risk-policy-select" value={form.risk_policy_id} options={riskOptions} onChange={(value) => setField('risk_policy_id', value)} />

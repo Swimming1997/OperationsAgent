@@ -63,8 +63,27 @@ export const platformAccounts: PlatformAccount[] = [{
 }];
 
 export const businessTypes: BusinessAccountType[] = [{ id: 'type-1', name: '论文服务号', description: 'SCI 相关业务', enabled: true, rule_set_count: 1, benchmark_group_count: 1 }];
-export const benchmarkGroups: BenchmarkGroup[] = [{ id: 'group-1', name: 'SCI 对标组', description: null, owner_employee_id: null, enabled: true, metadata: {} }];
-export const ruleSets: KeywordRuleSet[] = [{ id: 'rule-set-1', name: 'SCI 关键词', rule_scope: 'xhs', enabled: true, config: {} }];
+export const benchmarkGroups: BenchmarkGroup[] = [{
+  id: 'group-1',
+  name: 'SCI 对标组',
+  description: null,
+  owner_employee_id: 'employee-1',
+  submitter_user_id: 'operator-user',
+  submitter_employee_id: 'employee-1',
+  submitter_name: '运营一组',
+  enabled: true,
+  metadata: {},
+}];
+export const ruleSets: KeywordRuleSet[] = [{
+  id: 'rule-set-1',
+  name: 'SCI 关键词',
+  rule_scope: 'xhs',
+  enabled: true,
+  created_by_user_id: 'operator-user',
+  created_by_employee_id: 'employee-1',
+  submitter_name: '运营一组',
+  config: {},
+}];
 export const behaviorProfiles: BehaviorProfile[] = [{ id: 'behavior-1', name: '低频浏览', description: null, enabled: true, config: {} }];
 export const networkProfiles: NetworkEgressProfile[] = [{ id: 'network-1', name: '本机出口', strategy: 'direct_local', description: null, enabled: true, config: {} }];
 export const riskPolicies: RiskPolicy[] = [{ id: 'risk-1', name: '低风险预算', description: null, enabled: true, behavior_profile_id: 'behavior-1', network_egress_profile_id: 'network-1', config: {} }];

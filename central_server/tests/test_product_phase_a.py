@@ -1,6 +1,14 @@
 from fastapi.testclient import TestClient
 
-from intelligence_engine.db.models import AccountSession
+from sqlalchemy import func, select
+
+from intelligence_engine.db.models import (
+    AccountSession,
+    BenchmarkGroup,
+    BenchmarkGroupMember,
+    BusinessAccountTypeBenchmarkGroup,
+    BusinessAccountTypeRuleSet,
+)
 from intelligence_engine.db.session import get_db
 from intelligence_engine.domain.enums import Platform
 from intelligence_engine.main import create_app
@@ -16,6 +24,18 @@ def _client(db_session) -> TestClient:
     app.dependency_overrides[get_db] = override_get_db
     client = TestClient(app)
     client.headers.update({"X-Role": "admin", "X-User-Id": "admin-user"})
+    return client
+
+
+def _operator_client(db_session, user_id: str = "operator-user") -> TestClient:
+    app = create_app()
+
+    def override_get_db():
+        yield db_session
+
+    app.dependency_overrides[get_db] = override_get_db
+    client = TestClient(app)
+    client.headers.update({"X-Role": "operator", "X-User-Id": user_id})
     return client
 
 
@@ -106,6 +126,28 @@ def test_platform_account_product_api_includes_business_type_agent_and_session_h
     assert body["consecutive_failures"] == 0
 
 
+def test_business_account_type_delete_requires_no_references(db_session):
+    client = _client(db_session)
+    used = client.post("/api/business-account-types", json={"name": "已使用类型"}).json()
+    employee = client.post("/api/employees", json={"display_name": "Bob"}).json()
+    create_account = client.post(
+        "/api/product/accounts",
+        json={
+            "employee_id": employee["id"],
+            "platform": "xhs",
+            "display_name": "类型占用账号",
+            "business_account_type_id": used["id"],
+        },
+    )
+    assert create_account.status_code == 200, create_account.text
+    blocked = client.delete(f"/api/business-account-types/{used['id']}")
+    assert blocked.status_code == 409
+
+    unused = client.post("/api/business-account-types", json={"name": "可删除类型"}).json()
+    deleted = client.delete(f"/api/business-account-types/{unused['id']}")
+    assert deleted.status_code == 204
+
+
 def test_benchmark_group_member_and_business_type_binding_api(db_session):
     client = _client(db_session)
     business_type = client.post("/api/business-account-types", json={"name": "A类账号"}).json()
@@ -127,6 +169,12 @@ def test_benchmark_group_member_and_business_type_binding_api(db_session):
     bind_response = client.post(f"/api/benchmark-groups/{group['id']}/business-account-types", json={"business_account_type_id": business_type["id"]})
     assert bind_response.status_code == 200
     assert bind_response.json()["binding_id"]
+
+    delete_response = client.delete(f"/api/benchmark-groups/{group['id']}")
+    assert delete_response.status_code == 204
+    assert db_session.get(BenchmarkGroup, group["id"]) is None
+    assert db_session.scalar(select(func.count()).select_from(BenchmarkGroupMember).where(BenchmarkGroupMember.benchmark_group_id == group["id"])) == 0
+    assert db_session.scalar(select(func.count()).select_from(BusinessAccountTypeBenchmarkGroup).where(BusinessAccountTypeBenchmarkGroup.benchmark_group_id == group["id"])) == 0
 
 
 def test_task_template_schedule_and_risk_policy_skeleton_api(db_session):
@@ -177,3 +225,118 @@ def test_task_template_schedule_and_risk_policy_skeleton_api(db_session):
     )
     assert policy_response.status_code == 200
     assert policy_response.json()["config"]["daily_feed_runs"] == 12
+
+
+def test_operator_benchmark_group_scope_and_submitter_permissions(db_session):
+    admin = _client(db_session)
+    operator = _operator_client(db_session)
+
+    employee = admin.post("/api/employees", json={"user_id": "operator-user", "display_name": "运营A"}).json()
+    account_type = admin.post("/api/business-account-types", json={"name": "论文号"}).json()
+    admin.post(
+        "/api/product/accounts",
+        json={
+            "employee_id": employee["id"],
+            "platform": "xhs",
+            "display_name": "运营账号A",
+            "business_account_type_id": account_type["id"],
+        },
+    )
+
+    created = operator.post("/api/benchmark-groups", json={"name": "运营创建组", "description": "op"}).json()
+    assert created["submitter_user_id"] == "operator-user"
+    assert created["submitter_name"] == "运营A"
+
+    bindings = operator.get(f"/api/benchmark-groups/{created['id']}/business-account-types").json()
+    assert len(bindings) == 1
+    assert bindings[0]["business_account_type_id"] == account_type["id"]
+
+    admin_created = admin.post("/api/benchmark-groups", json={"name": "管理员组"}).json()
+    bind_admin_group = admin.post(
+        f"/api/benchmark-groups/{admin_created['id']}/business-account-types",
+        json={"business_account_type_id": account_type["id"]},
+    )
+    assert bind_admin_group.status_code == 200
+
+    scoped = operator.get("/api/benchmark-groups").json()
+    scoped_ids = {item["id"] for item in scoped}
+    assert created["id"] in scoped_ids
+    assert admin_created["id"] in scoped_ids
+
+    other_employee = admin.post("/api/employees", json={"user_id": "other-operator-user", "display_name": "运营B"}).json()
+    admin.post(
+        "/api/product/accounts",
+        json={
+            "employee_id": other_employee["id"],
+            "platform": "xhs",
+            "display_name": "运营账号B",
+            "business_account_type_id": account_type["id"],
+        },
+    )
+    other_operator = _operator_client(db_session, "other-operator-user")
+    blocked_delete = other_operator.delete(f"/api/benchmark-groups/{created['id']}")
+    assert blocked_delete.status_code == 403
+
+    allowed_delete = operator.delete(f"/api/benchmark-groups/{created['id']}")
+    assert allowed_delete.status_code == 204
+
+
+def test_operator_keyword_rule_set_scope_and_submitter_permissions(db_session):
+    admin = _client(db_session)
+    operator = _operator_client(db_session)
+
+    employee = admin.post("/api/employees", json={"user_id": "operator-user", "display_name": "运营A"}).json()
+    account_type = admin.post("/api/business-account-types", json={"name": "论文号"}).json()
+    admin.post(
+        "/api/product/accounts",
+        json={
+            "employee_id": employee["id"],
+            "platform": "xhs",
+            "display_name": "运营账号A",
+            "business_account_type_id": account_type["id"],
+        },
+    )
+
+    created = operator.post("/api/keyword-rule-sets", json={"name": "运营规则", "rule_scope": "xhs"}).json()
+    assert created["created_by_user_id"] == "operator-user"
+    assert created["created_by_employee_id"] == employee["id"]
+    assert created["submitter_name"] == "运营A"
+
+    binding_count = db_session.scalar(
+        select(func.count()).select_from(BusinessAccountTypeRuleSet).where(BusinessAccountTypeRuleSet.rule_set_id == created["id"])
+    )
+    assert binding_count == 1
+
+    admin_created = admin.post("/api/keyword-rule-sets", json={"name": "管理规则", "rule_scope": "xhs"}).json()
+    admin_bind = admin.post(
+        f"/api/business-account-types/{account_type['id']}/rule-sets",
+        json={"rule_set_id": admin_created["id"]},
+    )
+    assert admin_bind.status_code == 200
+
+    scoped_sets = operator.get("/api/keyword-rule-sets").json()
+    scoped_ids = {item["id"] for item in scoped_sets}
+    assert created["id"] in scoped_ids
+    assert admin_created["id"] in scoped_ids
+
+    other_employee = admin.post("/api/employees", json={"user_id": "other-operator-user", "display_name": "运营B"}).json()
+    admin.post(
+        "/api/product/accounts",
+        json={
+            "employee_id": other_employee["id"],
+            "platform": "xhs",
+            "display_name": "运营账号B",
+            "business_account_type_id": account_type["id"],
+        },
+    )
+    other_operator = _operator_client(db_session, "other-operator-user")
+    blocked_patch = other_operator.patch(f"/api/keyword-rule-sets/{created['id']}", json={"name": "不允许修改"})
+    assert blocked_patch.status_code == 403
+
+    create_rule = operator.post(
+        f"/api/keyword-rule-sets/{created['id']}/rules",
+        json={"keyword": "SCI", "match_mode": "contains", "weight": 1},
+    )
+    assert create_rule.status_code == 200
+    delete_own = operator.delete(f"/api/keyword-rule-sets/{created['id']}")
+    assert delete_own.status_code == 204

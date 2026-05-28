@@ -10,7 +10,7 @@ from typing import Any, Protocol
 import httpx
 
 from local_agent_runtime.connectors.xhs.comment_probe import XhsCommentProbe
-from local_agent_runtime.connectors.xhs.creator import XhsCreatorConnector
+from local_agent_runtime.connectors.xhs.creator import XhsCreatorConnector, XhsCreatorFetchError
 from local_agent_runtime.connectors.xhs.detail_probe import XhsDetailProbe
 from local_agent_runtime.connectors.xhs.homefeed_probe import XhsHomeFeedProbe
 from local_agent_runtime.connectors.xhs.search_suggest_probe import XhsSearchSuggestProbe
@@ -534,13 +534,31 @@ class XhsJobExecutor:
 
     async def _run_creator_monitor(self, job: ClaimedJobPayload, page) -> JobExecutionResult:
         payload = job.payload
-        fetch_result = await XhsCreatorConnector().fetch_latest(
-            page,
-            creator_profile_url=payload.get("creator_profile_url"),
-            creator_platform_id=payload.get("creator_platform_id"),
-            context=payload.get("platform_context") or {},
-            limit=int(payload.get("max_latest_items") or 20),
-        )
+        try:
+            fetch_result = await XhsCreatorConnector().fetch_latest(
+                page,
+                creator_profile_url=payload.get("creator_profile_url"),
+                creator_platform_id=payload.get("creator_platform_id"),
+                context=payload.get("platform_context") or {},
+                limit=int(payload.get("max_latest_items") or 20),
+            )
+        except ValueError as exc:
+            raise RuntimeFailure(
+                ErrorCode.NON_RETRYABLE_PLATFORM_ERROR,
+                str(exc),
+                raw_context={
+                    "source_path": "creator_profile_context",
+                    "creator_profile_url": payload.get("creator_profile_url"),
+                    "creator_platform_id": payload.get("creator_platform_id"),
+                },
+            ) from exc
+        except XhsCreatorFetchError as exc:
+            raise RuntimeFailure(
+                ErrorCode(exc.error_code),
+                str(exc),
+                retryable=exc.retryable,
+                raw_context=exc.raw_context,
+            ) from exc
         candidates = [item.to_candidate(feed_position=index) for index, item in enumerate(fetch_result.items, start=1)]
         ingestion = await self.client.ingest_creator_monitor_items(
             CreatorMonitorIngestionRequest(

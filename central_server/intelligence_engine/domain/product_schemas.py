@@ -1,4 +1,4 @@
-﻿from datetime import datetime
+from datetime import datetime
 from typing import Any
 
 from pydantic import Field, model_validator
@@ -145,6 +145,7 @@ class PlatformAccountUpdateRequest(ApiModel):
     status: str | None = None
     account_role: str | None = None
     health_status: str | None = None
+    default_agent_id: str | None = None
     metadata: dict[str, Any] | None = None
 
 
@@ -155,6 +156,7 @@ class PlatformAccountCreateRequest(ApiModel):
     external_account_id: str | None = None
     business_account_type: str | None = None
     business_account_type_id: str | None = None
+    default_agent_id: str | None = None
     account_role: str = "intelligence_collector"
     health_status: str = "healthy"
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -221,6 +223,7 @@ class PlatformAccountRead(ApiModel):
     platform_home_url: str | None = None
     last_verified_at: datetime | None = None
     login_cdp_port: int | None = None
+    default_agent_id: str | None = None
     bindings: list[AccountAgentBindingRead] = Field(default_factory=list)
     session_health_status: str | None = None
     active_login_session_status: str | None = None
@@ -252,6 +255,9 @@ class BenchmarkGroupRead(ApiModel):
     name: str
     description: str | None = None
     owner_employee_id: str | None = None
+    submitter_user_id: str | None = None
+    submitter_employee_id: str | None = None
+    submitter_name: str | None = None
     enabled: bool
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -264,6 +270,14 @@ class BenchmarkGroupMemberCreateRequest(ApiModel):
     display_name: str | None = None
     platform_context: dict[str, Any] = Field(default_factory=dict)
     enabled: bool = True
+
+
+class BenchmarkGroupMemberUpdateRequest(ApiModel):
+    platform: Platform | None = None
+    creator_platform_id: str | None = None
+    creator_profile_url: str | None = None
+    display_name: str | None = None
+    enabled: bool | None = None
 
 
 class BenchmarkGroupMemberRead(ApiModel):
@@ -374,6 +388,7 @@ class CreatorMonitorTaskTemplateCreate(ApiModel):
     executor_account_id: str
     benchmark_group_id: str
     auto_detail_fetch: bool = True
+    rule_set_id: str | None = None
     behavior_profile_id: str | None = None
     network_egress_profile_id: str | None = None
     risk_policy_id: str | None = None
@@ -385,6 +400,7 @@ class CreatorMonitorTaskTemplateUpdate(ApiModel):
     executor_account_id: str | None = None
     benchmark_group_id: str | None = None
     auto_detail_fetch: bool | None = None
+    rule_set_id: str | None = None
     behavior_profile_id: str | None = None
     network_egress_profile_id: str | None = None
     risk_policy_id: str | None = None
@@ -722,6 +738,9 @@ class KeywordRuleSetRead(ApiModel):
     name: str
     rule_scope: str
     enabled: bool
+    created_by_user_id: str | None = None
+    created_by_employee_id: str | None = None
+    submitter_name: str | None = None
     config: dict[str, Any] = Field(default_factory=dict)
 
 

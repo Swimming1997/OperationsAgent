@@ -1,4 +1,4 @@
-import { LogIn, Plus, RefreshCw, Save } from 'lucide-react';
+import { LogIn, Plus, RefreshCw, Save, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { getActiveAccountLogin, prepareBridgeChromeContext, resetAccountLogin, startAccountLogin, syncLocalBridgeLogin } from '../api/accountLogin';
 import {
@@ -10,7 +10,7 @@ import {
   startLocalBridgeChrome,
 } from '../api/localBridge';
 import { fetchOptions } from '../api/options';
-import { createAccount, createBusinessAccountType, getAccount, listAccounts, listAgents, listBusinessAccountTypes, listEmployees, registerMyLocalAgents, resolveDiscoveredLocalAgents, updateAccount, updateBusinessAccountType } from '../api/resources';
+import { createAccount, createBusinessAccountType, deleteBusinessAccountType, getAccount, listAccounts, listAgents, listBusinessAccountTypes, listEmployees, registerMyLocalAgents, resolveDiscoveredLocalAgents, updateAccount, updateBusinessAccountType } from '../api/resources';
 import { useAuth } from '../auth/AuthContext';
 import { ResourceSelect } from '../components/ResourceSelect';
 import { EmptyState, ErrorState, LoadingState } from '../components/Status';
@@ -87,6 +87,7 @@ export function AccountsPage({ role, userId }: Props) {
   const [registerSelection, setRegisterSelection] = useState<string[]>([]);
   const [registerCandidates, setRegisterCandidates] = useState<Array<{ agentId: string; discovered: LocalBridgeDiscoveredAgent }>>([]);
   const [bridgeAlivePorts, setBridgeAlivePorts] = useState<number[]>([]);
+  const [businessTypeFilter, setBusinessTypeFilter] = useState('');
   const readonly = false;
 
   const myEmployee = useMemo(
@@ -125,15 +126,27 @@ export function AccountsPage({ role, userId }: Props) {
   );
 
   const employeeOptions = useMemo(() => employees.map((item) => ({ value: item.id, label: item.display_name, description: item.status })), [employees]);
+  const businessTypeOptions = useMemo(
+    () => types.map((item) => ({ value: item.id, label: item.name, description: item.description || undefined })),
+    [types],
+  );
+  const businessTypeFilterOptions = useMemo(
+    () => [{ value: '', label: '全部业务类型', description: '显示全部' }, ...businessTypeOptions],
+    [businessTypeOptions],
+  );
   const managementEmployeeOptions = useMemo(
     () => [{ value: '', label: '全部运营账号', description: '显示全部' }, ...employeeOptions],
     [employeeOptions],
   );
   const platformOptions = options.platforms.length > 0 ? options.platforms : FALLBACK_OPTIONS.platforms;
-  const canCreate = Boolean(accountForm.display_name?.trim());
+  const canCreate = Boolean(accountForm.display_name?.trim() && accountForm.business_account_type_id);
   const visibleAccounts = useMemo(
-    () => (adminEmployeeFilter ? accounts.filter((item) => item.employee_id === adminEmployeeFilter) : accounts),
-    [accounts, adminEmployeeFilter],
+    () => accounts.filter((item) => {
+      if (adminEmployeeFilter && item.employee_id !== adminEmployeeFilter) return false;
+      if (businessTypeFilter && item.business_account_type_id !== businessTypeFilter) return false;
+      return true;
+    }),
+    [accounts, adminEmployeeFilter, businessTypeFilter],
   );
 
   const operationalStatusOptions = [
@@ -164,9 +177,7 @@ export function AccountsPage({ role, userId }: Props) {
       const accountsPromise = listAccounts(role, userId);
       const agentsPromise = listAgents(role, userId);
       const optionsPromise = fetchOptions(role, userId).catch(() => FALLBACK_OPTIONS);
-      const typesPromise = role === 'operator'
-        ? Promise.resolve([] as BusinessAccountType[])
-        : listBusinessAccountTypes(role, userId);
+      const typesPromise = listBusinessAccountTypes(role, userId);
       const employeesPromise = role === 'operator'
         ? Promise.resolve([] as Employee[])
         : listEmployees(role, userId);
@@ -341,13 +352,30 @@ export function AccountsPage({ role, userId }: Props) {
     setError('');
     try {
       if (typeForm.id) {
-        await updateBusinessAccountType(role, typeForm.id, typeForm, userId);
+        await updateBusinessAccountType(role, typeForm.id, { name: typeForm.name.trim(), description: typeForm.description ?? null }, userId);
       } else {
-        await createBusinessAccountType(role, { name: typeForm.name.trim(), description: typeForm.description ?? null, enabled: typeForm.enabled ?? true }, userId);
+        await createBusinessAccountType(role, { name: typeForm.name.trim(), description: typeForm.description ?? null, enabled: true }, userId);
+      }
+      await reload();
+      setTypeForm({ name: '', enabled: true });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '业务账号类型保存失败');
+    }
+  }
+
+  async function removeType(type: BusinessAccountType) {
+    setError('');
+    try {
+      await deleteBusinessAccountType(role, type.id, userId);
+      if (typeForm.id === type.id) {
+        setTypeForm({ name: '', enabled: true });
+      }
+      if (businessTypeFilter === type.id) {
+        setBusinessTypeFilter('');
       }
       await reload();
     } catch (err) {
-      setError(err instanceof Error ? err.message : '业务账号类型保存失败');
+      setError(err instanceof Error ? err.message : '业务账号类型删除失败');
     }
   }
 
@@ -801,6 +829,16 @@ export function AccountsPage({ role, userId }: Props) {
           {role !== 'operator' ? (
             <ResourceSelect label="绑定员工" value={accountForm.employee_id} options={employeeOptions} onChange={(value) => setAccountForm({ ...accountForm, employee_id: value })} />
           ) : null}
+          <ResourceSelect
+            label="业务账号类型"
+            value={accountForm.business_account_type_id}
+            options={businessTypeOptions}
+            onChange={(value) => setAccountForm({ ...accountForm, business_account_type_id: value })}
+            allowEmpty
+          />
+          {businessTypeOptions.length === 0 ? (
+            <p className="inline-error">请先由管理员在左侧添加业务账号类型，再创建账号。</p>
+          ) : null}
           {isCreate && !liveLoginAgents.length ? (
             <p className="login-hint">暂无在线 Agent，账号仍可先创建；请先在上方「登记本地 Agent」将设备挂到运营账号。</p>
           ) : null}
@@ -923,6 +961,35 @@ export function AccountsPage({ role, userId }: Props) {
             allowEmpty
           />
         ) : null}
+        <ResourceSelect
+          label="业务账号类型"
+          value={businessTypeFilter}
+          options={businessTypeFilterOptions}
+          onChange={(value) => setBusinessTypeFilter(value || '')}
+          allowEmpty={false}
+        />
+        {role !== 'operator' ? (
+          <div className="detail-section">
+            <b>业务账号类型枚举</b>
+            <div className="mini-list scroll-list">
+              {types.length === 0 ? <span className="muted-hint">暂无类型，请先添加</span> : types.map((item) => (
+                <div key={item.id} className={`mini-row ${typeForm.id === item.id ? 'selected' : ''}`}>
+                  <button type="button" className="mini-row-main" onClick={() => setTypeForm(item)}>
+                    <span>{item.name}</span>
+                    <small>{item.description || '无描述'}</small>
+                  </button>
+                  <button type="button" className="icon-button danger" title="删除业务账号类型" onClick={() => void removeType(item)}>
+                    <Trash2 size={14} />
+                  </button>
+                </div>
+              ))}
+            </div>
+            <button type="button" className="secondary" onClick={() => setTypeForm({ name: '', enabled: true })}><Plus size={14} />新增类型</button>
+            <label>类型名称</label><input value={typeForm.name || ''} onChange={(event) => setTypeForm({ ...typeForm, name: event.target.value })} />
+            <label>描述</label><input value={typeForm.description || ''} onChange={(event) => setTypeForm({ ...typeForm, description: event.target.value })} />
+            <button type="button" onClick={() => void saveType()}><Save size={14} />保存类型</button>
+          </div>
+        ) : null}
         <button type="button" className="secondary" onClick={() => void reload()}><RefreshCw size={14} />刷新</button>
       </aside>
       <section className="list-panel">
@@ -940,13 +1007,14 @@ export function AccountsPage({ role, userId }: Props) {
         ) : (
           <div className="data-table">
             <div className="table-row table-head account-row account-row-v2">
-              <span>备注名</span><span>ID</span><span>平台</span><span>使用状态</span><span>登录态</span><span>运营</span><span>Profile</span>
+              <span>备注名</span><span>ID</span><span>平台</span><span>业务类型</span><span>使用状态</span><span>登录态</span><span>运营</span><span>Profile</span>
             </div>
             {visibleAccounts.map((account) => (
               <button key={account.id} type="button" className={`table-row account-row account-row-v2 ${selected?.id === account.id ? 'selected' : ''}`} onClick={() => chooseAccount(account)}>
                 <span className="strong">{account.display_name}</span>
                 <span>{account.id.slice(0, 8)}...</span>
                 <span>{account.platform}</span>
+                <span>{account.business_account_type_name || '未设置'}</span>
                 <span>{labelUsageStatus(account.usage_status)}</span>
                 <span><span className={`auth-pill ${authPillClassForAccount(account)}`}>{labelAccountLoginBadge(account)}</span></span>
                 <span>{account.employee_display_name || '—'}</span>
@@ -960,16 +1028,6 @@ export function AccountsPage({ role, userId }: Props) {
         {renderAgentStatus()}
         <div className="panel-title">{rightPanel === 'create' ? '添加运营账号' : rightPanel === 'detail' ? '账号详情' : '账号详情'}</div>
         {renderRightPanel()}
-        {role !== 'operator' ? (
-          <div className="detail-section">
-            <b>业务账号类型</b>
-            <div className="mini-list">
-              {types.map((item) => <button key={item.id} type="button" className="mini-row" onClick={() => setTypeForm(item)}>{item.name}<span>规则 {item.rule_set_count} / 对标组 {item.benchmark_group_count}</span></button>)}
-            </div>
-            <label>类型名称</label><input value={typeForm.name || ''} onChange={(event) => setTypeForm({ ...typeForm, name: event.target.value })} />
-            <button type="button" onClick={() => void saveType()}><Save size={14} />保存类型</button>
-          </div>
-        ) : null}
       </aside>
     </section>
   );

@@ -1,4 +1,4 @@
-﻿from datetime import datetime, timezone
+from datetime import datetime, timezone
 from uuid import uuid4
 
 from sqlalchemy import (
@@ -10,9 +10,11 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    select,
     text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import object_session
 from sqlalchemy.types import JSON
 from sqlalchemy.dialects.postgresql import JSONB
 
@@ -190,6 +192,49 @@ class AccountAgentBinding(Base, TimestampMixin):
     employee_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("employees.id"))
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     last_claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+def _get_default_agent_id(account: PlatformAccount) -> str | None:
+    session = object_session(account)
+    if not session:
+        return getattr(account, "_default_agent_id_override", None)
+    binding = session.scalar(
+        select(AccountAgentBinding)
+        .where(AccountAgentBinding.account_id == account.id)
+        .where(AccountAgentBinding.enabled.is_(True))
+        .order_by(AccountAgentBinding.updated_at.desc(), AccountAgentBinding.created_at.desc())
+        .limit(1)
+    )
+    return binding.agent_id if binding else None
+
+
+def _set_default_agent_id(account: PlatformAccount, agent_id: str | None) -> None:
+    session = object_session(account)
+    if not session:
+        account._default_agent_id_override = agent_id
+        return
+    bindings = list(
+        session.scalars(
+            select(AccountAgentBinding)
+            .where(AccountAgentBinding.account_id == account.id)
+            .where(AccountAgentBinding.enabled.is_(True))
+        )
+    )
+    if agent_id is None:
+        for binding in bindings:
+            binding.enabled = False
+        session.flush()
+        return
+    for binding in bindings:
+        binding.enabled = binding.agent_id == agent_id
+        if binding.enabled:
+            binding.employee_id = account.employee_id
+    if not any(binding.agent_id == agent_id for binding in bindings):
+        session.add(AccountAgentBinding(account_id=account.id, agent_id=agent_id, employee_id=account.employee_id, enabled=True))
+    session.flush()
+
+
+PlatformAccount.default_agent_id = property(_get_default_agent_id, _set_default_agent_id)
 
 
 class Job(Base, TimestampMixin):
@@ -554,6 +599,8 @@ class KeywordRuleSet(Base, TimestampMixin):
     rule_scope: Mapped[str] = mapped_column(String(64), nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     config_json: Mapped[dict] = mapped_column(JsonType, default=dict, nullable=False)
+    created_by_user_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("users.id"))
+    created_by_employee_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("employees.id"))
 
 
 class KeywordRule(Base, TimestampMixin):

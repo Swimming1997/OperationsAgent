@@ -147,6 +147,18 @@ class WorkflowRepository:
                     ),
                 )
             )
+        if pool_only and not workflow_status:
+            base_conditions.append(
+                or_(
+                    ContentWorkflowState.id.is_(None),
+                    ContentWorkflowState.workflow_status.notin_(
+                        [
+                            ContentWorkflowStatus.DISCARDED.value,
+                            ContentWorkflowStatus.ARCHIVED.value,
+                        ]
+                    ),
+                )
+            )
         if platform:
             base_conditions.append(ContentIdentity.platform == platform)
         if source_surface:

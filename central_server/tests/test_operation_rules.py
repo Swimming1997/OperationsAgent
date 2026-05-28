@@ -44,6 +44,11 @@ def test_operation_rule_crud_and_filters(db_session):
     assert updated.status_code == 200, updated.text
     assert updated.json()["version"] == 2
 
+    deleted = client.delete(f"/api/operation-rules/{rule_id}")
+    assert deleted.status_code == 204
+    listed_after_delete = client.get("/api/operation-rules", params={"rule_type": OperationRuleType.TITLE.value, "platform": "xhs"})
+    assert all(item["id"] != rule_id for item in listed_after_delete.json())
+
 
 def test_operator_cannot_create_operation_rule(db_session):
     client = _client(db_session, role="operator", user_id="operator-user")
@@ -56,4 +61,21 @@ def test_operator_cannot_create_operation_rule(db_session):
             "enabled": True,
         },
     )
+    assert response.status_code == 403
+
+
+def test_operator_cannot_delete_operation_rule(db_session):
+    admin = _client(db_session)
+    created = admin.post(
+        "/api/operation-rules",
+        json={
+            "rule_type": OperationRuleType.BODY.value,
+            "title": "正文",
+            "content": "test",
+            "enabled": True,
+        },
+    )
+    rule_id = created.json()["id"]
+    operator = _client(db_session, role="operator", user_id="operator-user")
+    response = operator.delete(f"/api/operation-rules/{rule_id}")
     assert response.status_code == 403

@@ -82,3 +82,7 @@ class OperationRuleRepository:
         rule.updated_at = utcnow()
         self.db.flush()
         return rule
+
+    def delete(self, rule: OperationRule) -> None:
+        self.db.delete(rule)
+        self.db.flush()

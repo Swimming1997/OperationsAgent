@@ -7,6 +7,8 @@ from intelligence_engine.db.models import (
     ContentDiscoveryEvent,
     ContentIdentity,
     ContentSnapshot,
+    KeywordRule,
+    KeywordRuleSet,
     utcnow,
 )
 from intelligence_engine.config import get_settings
@@ -15,6 +17,8 @@ from intelligence_engine.domain.schemas import CommentSnapshotInput, DetailSnaps
 from intelligence_engine.db.models import Job
 from intelligence_engine.filtering.candidate_classifier import (
     CandidateDecisionResult,
+    DEFAULT_FILTER_V1_CONFIG,
+    IntelligenceFilterConfig,
     classify_candidate,
     classify_feed_prelim,
     classify_intelligence_v1,
@@ -46,6 +50,37 @@ def sanitize_feed_author_name(value: str | None) -> str | None:
     if cleaned.endswith("的") and len(cleaned) <= 3:
         return None
     return cleaned
+
+
+def _filter_config_from_rule_set(db: Session, rule_set_id: str | None) -> IntelligenceFilterConfig:
+    if not rule_set_id:
+        return DEFAULT_FILTER_V1_CONFIG
+    rule_set = db.get(KeywordRuleSet, rule_set_id)
+    if not rule_set or not rule_set.enabled:
+        return DEFAULT_FILTER_V1_CONFIG
+    rules = list(
+        db.scalars(
+            select(KeywordRule)
+            .where(KeywordRule.rule_set_id == rule_set_id)
+            .where(KeywordRule.enabled.is_(True))
+            .order_by(KeywordRule.created_at.asc())
+        )
+    )
+    raw_config = rule_set.config_json or {}
+    business_keywords = [rule.normalized_keyword or rule.keyword for rule in rules if (rule.normalized_keyword or rule.keyword)]
+    lead_keywords = raw_config.get("lead_intent_keywords")
+    if not isinstance(lead_keywords, list):
+        lead_keywords = DEFAULT_FILTER_V1_CONFIG.lead_intent_keywords
+    threshold = raw_config.get("visible_like_threshold", DEFAULT_FILTER_V1_CONFIG.visible_like_threshold)
+    try:
+        visible_like_threshold = int(threshold)
+    except (TypeError, ValueError):
+        visible_like_threshold = DEFAULT_FILTER_V1_CONFIG.visible_like_threshold
+    return IntelligenceFilterConfig(
+        business_keywords=business_keywords or DEFAULT_FILTER_V1_CONFIG.business_keywords,
+        lead_intent_keywords=[str(item) for item in lead_keywords if str(item).strip()],
+        visible_like_threshold=max(0, visible_like_threshold),
+    )
 
 
 class ContentRepository:
@@ -168,7 +203,7 @@ class ContentRepository:
                 feed_prelim_pass=feed_prelim_pass,
                 parent_job_type=parent_job_type,
             )
-        if is_new and should_enqueue:
+        if (is_new or not content.latest_snapshot_id) and should_enqueue:
             metadata_context = (content.metadata_json or {}).get("platform_context", {})
             platform_context = (
                 xhs_platform_context(metadata_context, candidate.platform_context)
@@ -185,6 +220,7 @@ class ContentRepository:
                     "platform_content_id": content.platform_content_id,
                     "canonical_url": content.canonical_url,
                     "platform_context": platform_context,
+                    "rule_set_id": (parent_job.payload_json or {}).get("rule_set_id") if parent_job else None,
                     "preferred_fetch_mode": "request_first_with_browser_fallback",
                     "parent_feed_job_id": job_id,
                 },
@@ -282,7 +318,7 @@ class ContentRepository:
         decision = classify_candidate(title=None, body_text=None, comments=texts)
         return inserted, updated, decision.comment_keyword_hits
 
-    def evaluate_candidate(self, *, content_id: str, snapshot_id: str) -> CandidateDecision:
+    def evaluate_candidate(self, *, content_id: str, snapshot_id: str, rule_set_id: str | None = None) -> CandidateDecision:
         content = self.db.get(ContentIdentity, content_id)
         snapshot = self.db.get(ContentSnapshot, snapshot_id)
         comments = list(
@@ -298,6 +334,7 @@ class ContentRepository:
             comments=comments,
             visible_like_count=visible_like if isinstance(visible_like, int) else None,
             detail_like_count=snapshot.like_count if snapshot else None,
+            config=_filter_config_from_rule_set(self.db, rule_set_id),
         )
         return self.create_decision(content_id=content_id, snapshot_id=snapshot_id, result=result)
 

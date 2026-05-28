@@ -182,8 +182,12 @@ class AccountLoginService:
             return active
 
         profile_key = self.ensure_account_profile_key(account)
+        default_agent_id = getattr(account, "default_agent_id", None)
         if preferred_agent_id:
             agent = self._validate_preferred_agent(account, preferred_agent_id)
+            agent_id = agent.id
+        elif default_agent_id:
+            agent = self._validate_preferred_agent(account, default_agent_id)
             agent_id = agent.id
         else:
             agent = self.resolve_login_agent(account)

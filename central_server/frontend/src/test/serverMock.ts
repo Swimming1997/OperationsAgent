@@ -147,6 +147,7 @@ export function installFetchMock(config: FetchMockConfig = {}) {
     }
     if (url.includes('/api/product/accounts')) return json(init?.method === 'PATCH' || init?.method === 'POST' ? platformAccounts[0] : platformAccounts);
     if (url.includes('/api/business-account-types/type-1/rule-sets')) return json([{ id: 'bind-1', business_account_type_id: 'type-1', rule_set_id: 'rule-set-1', rule_set_name: 'SCI 关键词', is_default: false }]);
+    if (url.includes('/api/business-account-types') && init?.method === 'DELETE') return new Response(null, { status: 204 });
     if (url.includes('/api/business-account-types')) return json(init?.method === 'PATCH' || init?.method === 'POST' ? businessTypes[0] : businessTypes);
     if (url.includes('/api/product/me/local-agents/resolve-discover') && init?.method === 'POST') {
       const body = init.body ? JSON.parse(String(init.body)) : { items: [] };
@@ -177,6 +178,7 @@ export function installFetchMock(config: FetchMockConfig = {}) {
     }
     if (url.includes('/api/benchmark-groups/group-1/members')) return json(init?.method === 'POST' ? { id: 'member-2', benchmark_group_id: 'group-1', platform: 'xhs', enabled: true } : [{ id: 'member-1', benchmark_group_id: 'group-1', creator_monitor_id: 'monitor-1', platform: 'xhs', creator_platform_id: 'creator-1', creator_profile_url: null, display_name: '对标作者', platform_context: {}, enabled: true }]);
     if (url.includes('/api/benchmark-groups/group-1/business-account-types')) return json(init?.method === 'POST' ? { binding_id: 'gbind-1' } : [{ id: 'gbind-1', benchmark_group_id: 'group-1', business_account_type_id: 'type-1', business_account_type_name: '论文服务号' }]);
+    if (url.includes('/api/benchmark-groups') && init?.method === 'DELETE') return new Response(null, { status: 204 });
     if (url.includes('/api/benchmark-groups')) return json(init?.method === 'PATCH' || init?.method === 'POST' ? benchmarkGroups[0] : benchmarkGroups);
     if (url.includes('/api/operation-rules')) {
       const operationRule = {
@@ -191,10 +193,12 @@ export function installFetchMock(config: FetchMockConfig = {}) {
         created_at: '2026-05-19T01:00:00Z',
         updated_at: '2026-05-19T01:00:00Z',
       };
+      if (init?.method === 'DELETE') return new Response(null, { status: 204 });
       if (init?.method === 'POST' || init?.method === 'PATCH') return json(operationRule);
       return json([operationRule]);
     }
     if (url.includes('/api/keyword-rule-sets/rule-set-1/rules')) return json(init?.method === 'POST' ? { id: 'rule-2', rule_set_id: 'rule-set-1', keyword: '投稿', normalized_keyword: null, match_mode: 'contains', enabled: true, weight: 1 } : [{ id: 'rule-1', rule_set_id: 'rule-set-1', keyword: 'SCI', normalized_keyword: 'sci', match_mode: 'contains', enabled: true, weight: 2 }]);
+    if (url.includes('/api/keyword-rule-sets') && init?.method === 'DELETE') return new Response(null, { status: 204 });
     if (url.includes('/api/keyword-rule-sets')) return json(init?.method === 'PATCH' || init?.method === 'POST' ? ruleSets[0] : ruleSets);
     if (url.includes('/api/keyword-rules')) return json({ id: 'rule-1', rule_set_id: 'rule-set-1', keyword: 'SCI', normalized_keyword: 'sci', match_mode: 'contains', enabled: true, weight: 2 });
     if (url.includes('/api/behavior-profiles')) return json(behaviorProfiles);

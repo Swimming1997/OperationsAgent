@@ -156,7 +156,7 @@ export async function discoverLocalBridgeAgents(): Promise<{ items: LocalBridgeD
       try {
         await bridgeRequestAt<{ status: string }>(port, '/healthz');
         alive_ports.push(port);
-        const body = await bridgeRequestAt<{ items: Array<Omit<LocalBridgeDiscoveredAgent, 'bridge_port' | 'bridge_url'>> }>(
+        const body = await bridgeRequestAt<{ items: Array<Omit<LocalBridgeDiscoveredAgent, 'bridge_port'>> }>(
           port,
           '/bridge/agents/discover',
         );

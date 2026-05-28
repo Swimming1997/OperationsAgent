@@ -458,6 +458,9 @@ export type BenchmarkGroup = {
   name: string;
   description: string | null;
   owner_employee_id: string | null;
+  submitter_user_id: string | null;
+  submitter_employee_id: string | null;
+  submitter_name: string | null;
   enabled: boolean;
   metadata: Record<string, unknown>;
 };
@@ -486,6 +489,9 @@ export type KeywordRuleSet = {
   name: string;
   rule_scope: string;
   enabled: boolean;
+  created_by_user_id: string | null;
+  created_by_employee_id: string | null;
+  submitter_name: string | null;
   config: Record<string, unknown>;
 };
 

@@ -62,6 +62,10 @@ export function updateBusinessAccountType(role: Role, id: string, payload: Parti
   return apiRequest<BusinessAccountType>(`/api/business-account-types/${id}`, { method: 'PATCH', role, userId, body: payload });
 }
 
+export function deleteBusinessAccountType(role: Role, id: string, userId?: string) {
+  return apiRequest<void>(`/api/business-account-types/${id}`, { method: 'DELETE', role, userId });
+}
+
 export function listAgents(role: Role, userId?: string) {
   return apiRequest<LocalAgent[]>('/api/local-agents', { role, userId });
 }
@@ -86,12 +90,24 @@ export function updateBenchmarkGroup(role: Role, groupId: string, payload: Parti
   return apiRequest<BenchmarkGroup>(`/api/benchmark-groups/${groupId}`, { method: 'PATCH', role, userId, body: payload });
 }
 
+export function deleteBenchmarkGroup(role: Role, groupId: string, userId?: string) {
+  return apiRequest<void>(`/api/benchmark-groups/${groupId}`, { method: 'DELETE', role, userId });
+}
+
 export function listBenchmarkMembers(role: Role, groupId: string, userId?: string) {
   return apiRequest<BenchmarkGroupMember[]>(`/api/benchmark-groups/${groupId}/members`, { role, userId });
 }
 
 export function addBenchmarkMember(role: Role, groupId: string, payload: Partial<BenchmarkGroupMember>, userId?: string) {
   return apiRequest<BenchmarkGroupMember>(`/api/benchmark-groups/${groupId}/members`, { method: 'POST', role, userId, body: payload });
+}
+
+export function deleteBenchmarkMember(role: Role, groupId: string, memberId: string, userId?: string) {
+  return apiRequest<void>(`/api/benchmark-groups/${groupId}/members/${memberId}`, { method: 'DELETE', role, userId });
+}
+
+export function updateBenchmarkMember(role: Role, groupId: string, memberId: string, payload: Partial<BenchmarkGroupMember>, userId?: string) {
+  return apiRequest<BenchmarkGroupMember>(`/api/benchmark-groups/${groupId}/members/${memberId}`, { method: 'PATCH', role, userId, body: payload });
 }
 
 export function listBenchmarkGroupBusinessTypes(role: Role, groupId: string, userId?: string) {
@@ -119,6 +135,10 @@ export function updateKeywordRuleSet(role: Role, id: string, payload: Partial<Ke
   return apiRequest<KeywordRuleSet>(`/api/keyword-rule-sets/${id}`, { method: 'PATCH', role, userId, body: payload });
 }
 
+export function deleteKeywordRuleSet(role: Role, id: string, userId?: string) {
+  return apiRequest<void>(`/api/keyword-rule-sets/${id}`, { method: 'DELETE', role, userId });
+}
+
 export function listKeywordRules(role: Role, ruleSetId: string, userId?: string) {
   return apiRequest<KeywordRule[]>(`/api/keyword-rule-sets/${ruleSetId}/rules`, { role, userId });
 }
@@ -129,6 +149,10 @@ export function createKeywordRule(role: Role, ruleSetId: string, payload: Partia
 
 export function updateKeywordRule(role: Role, ruleId: string, payload: Partial<KeywordRule>, userId?: string) {
   return apiRequest<KeywordRule>(`/api/keyword-rules/${ruleId}`, { method: 'PATCH', role, userId, body: payload });
+}
+
+export function deleteKeywordRule(role: Role, ruleId: string, userId?: string) {
+  return apiRequest<void>(`/api/keyword-rules/${ruleId}`, { method: 'DELETE', role, userId });
 }
 
 export function listBusinessTypeRuleSets(role: Role, businessTypeId: string, userId?: string) {

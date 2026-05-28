@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from sqlalchemy import func, select
+from sqlalchemy.orm import Session
 
 from intelligence_engine.db.models import Job, utcnow
 from intelligence_engine.db.session import SessionLocal
@@ -48,9 +49,11 @@ def _rate(success: int, total: int) -> float | None:
     return success / total
 
 
-def build_report(*, window_hours: int) -> dict:
+def build_report(*, window_hours: int, session: Session | None = None) -> dict:
     since = utcnow() - timedelta(hours=window_hours)
-    session = SessionLocal()
+    owns_session = session is None
+    if session is None:
+        session = SessionLocal()
     try:
         rows = list(
             session.execute(
@@ -66,7 +69,8 @@ def build_report(*, window_hours: int) -> dict:
             )
         ) or 0
     finally:
-        session.close()
+        if owns_session:
+            session.close()
 
     by_type: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     for job_type, status, count in rows:

@@ -1,11 +1,13 @@
 ﻿from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from intelligence_engine.db.models import ContentIdentity, CreatorMonitorEvent, Job
+from intelligence_engine.db.models import CandidateDecision, ContentIdentity, CreatorMonitorEvent, Job, KeywordRule, KeywordRuleSet
 from intelligence_engine.db.session import get_db
 from intelligence_engine.domain.enums import ContentType, FeedType, JobType, Platform, SessionStatus, SourceSurface
+from intelligence_engine.domain.schemas import DetailSnapshotInput, FeedCandidateInput
 from intelligence_engine.main import create_app
 from intelligence_engine.storage.repositories.account_repository import AccountRepository
+from intelligence_engine.storage.repositories.content_repository import ContentRepository
 from intelligence_engine.storage.repositories.creator_repository import CreatorMonitorRepository
 from intelligence_engine.storage.repositories.job_repository import JobRepository
 
@@ -97,3 +99,81 @@ def test_creator_monitor_items_ingestion_writes_events_and_detail_job(db_session
     )
     assert detail_job is not None
     assert detail_job.payload_json["platform_context"]["xsec_token"] == "t"
+
+
+def test_creator_monitor_duplicate_item_is_reevaluated_with_current_rule_set(db_session):
+    client = _client(db_session)
+    monitor = CreatorMonitorRepository(db_session).create_monitor(
+        platform=Platform.XHS.value,
+        creator_platform_id="creator-runtime",
+        creator_display_name=None,
+        monitor_group_key=None,
+        mapped_business_account_type=None,
+        check_interval_seconds=900,
+    )
+    rule_set = KeywordRuleSet(
+        name="租房规则",
+        rule_scope="intelligence",
+        enabled=True,
+        config_json={"visible_like_threshold": 999, "lead_intent_keywords": []},
+    )
+    db_session.add(rule_set)
+    db_session.flush()
+    db_session.add(KeywordRule(rule_set_id=rule_set.id, keyword="租房", normalized_keyword="租房", match_mode="contains", enabled=True, weight=1))
+    existing_job = JobRepository(db_session).create_job(job_type=JobType.CREATOR_MONITOR, creator_monitor_id=monitor.id, payload={"creator_monitor_id": monitor.id, "platform": "xhs"})
+    candidate_payload = {
+        "platform": "xhs",
+        "platform_content_id": "runtime-note-dup",
+        "canonical_url": "https://www.xiaohongshu.com/explore/runtime-note-dup",
+        "content_type": ContentType.IMAGE_TEXT.value,
+        "title_or_summary": "杭州滨江租房转租",
+        "source_surface": SourceSurface.CREATOR_MONITOR.value,
+        "feed_type": FeedType.XHS_HOME_FEED.value,
+        "feed_position": 1,
+        "discovered_at": "2026-05-19T01:00:00Z",
+        "raw_payload": {},
+        "platform_context": {"note_id": "runtime-note-dup"},
+    }
+    repo = ContentRepository(db_session)
+    content, _is_new, _event, _detail_enqueued, _prelim = repo.ingest_feed_candidate(
+        job_id=existing_job.id,
+        account_id=None,
+        candidate=FeedCandidateInput(**candidate_payload),
+        enqueue_detail_job=True,
+    )
+    snapshot = repo.create_snapshot(
+        content_id=content.id,
+        account_id=None,
+        snapshot=DetailSnapshotInput(title="杭州滨江租房转租", body_text="个人转租"),
+    )
+    repo.evaluate_candidate(content_id=content.id, snapshot_id=snapshot.id)
+    current_job = JobRepository(db_session).create_job(
+        job_type=JobType.CREATOR_MONITOR,
+        creator_monitor_id=monitor.id,
+        payload={"creator_monitor_id": monitor.id, "platform": "xhs", "rule_set_id": rule_set.id},
+    )
+    db_session.commit()
+
+    response = client.post(
+        "/api/ingestion/creator-monitor-items",
+        json={
+            "job_id": current_job.id,
+            "creator_monitor_id": monitor.id,
+            "items": [candidate_payload],
+            "raw_payload": {},
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["new_content_count"] == 0
+    assert body["duplicate_content_count"] == 1
+    assert body["detail_job_enqueue_count"] == 0
+    latest_decision = db_session.scalar(
+        select(CandidateDecision)
+        .where(CandidateDecision.content_id == content.id)
+        .order_by(CandidateDecision.evaluated_at.desc(), CandidateDecision.created_at.desc())
+    )
+    assert latest_decision is not None
+    assert latest_decision.business_keyword_hits_json == ["租房"]
+    assert latest_decision.candidate_bucket == "pending_enrichment"

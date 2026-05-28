@@ -1,21 +1,25 @@
-import { Plus, Save } from 'lucide-react';
+import { Plus, Save, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
-import { createOperationRule, listOperationRules, updateOperationRule } from '../api/operationRules';
-import { bindBusinessTypeRuleSet, createKeywordRule, createKeywordRuleSet, listBusinessAccountTypes, listBusinessTypeRuleSets, listKeywordRules, listKeywordRuleSets, updateKeywordRule, updateKeywordRuleSet } from '../api/resources';
+import { createOperationRule, deleteOperationRule, listOperationRules, updateOperationRule } from '../api/operationRules';
+import { bindBusinessTypeRuleSet, createKeywordRule, createKeywordRuleSet, deleteKeywordRule, deleteKeywordRuleSet, listBusinessAccountTypes, listBusinessTypeRuleSets, listKeywordRules, listKeywordRuleSets, updateKeywordRule, updateKeywordRuleSet } from '../api/resources';
 import { ResourceSelect } from '../components/ResourceSelect';
 import { EmptyState, ErrorState, LoadingState } from '../components/Status';
 import type { BusinessAccountType, BusinessAccountTypeRuleSet, KeywordRule, KeywordRuleSet, OperationRule, Role } from '../types/api';
 import { labelOperationRuleType, OPERATION_RULE_PLATFORM_OPTIONS, OPERATION_RULE_TYPE_OPTIONS } from '../utils/operationRuleLabels';
 
 type Props = { role: Role; userId: string };
-type Tab = 'sets' | 'rules' | 'bindings' | 'operation';
+type Tab = 'sets' | 'operation';
 
 const TAB_LABELS: Record<Tab, string> = {
-  sets: '规则集',
-  rules: '关键词规则',
-  bindings: '业务类型绑定',
+  sets: '业务规则',
   operation: '运营规则',
 };
+
+const RULE_SCOPE_OPTIONS = [
+  { value: 'xhs', label: '小红书 (xhs)' },
+  { value: 'douyin', label: '抖音 (douyin)' },
+  { value: 'all', label: '全平台 (all)' },
+];
 
 const EMPTY_OPERATION_FORM: Partial<OperationRule> = {
   rule_type: 'title',
@@ -30,13 +34,13 @@ export function RulesPage({ role, userId }: Props) {
   const [sets, setSets] = useState<KeywordRuleSet[]>([]);
   const [rules, setRules] = useState<KeywordRule[]>([]);
   const [types, setTypes] = useState<BusinessAccountType[]>([]);
-  const [bindings, setBindings] = useState<BusinessAccountTypeRuleSet[]>([]);
+  const [ruleSetBindings, setRuleSetBindings] = useState<BusinessAccountTypeRuleSet[]>([]);
+  const [ruleSetBindingLabels, setRuleSetBindingLabels] = useState<Record<string, string[]>>({});
   const [operationRules, setOperationRules] = useState<OperationRule[]>([]);
   const [operationFilterType, setOperationFilterType] = useState('');
   const [operationFilterPlatform, setOperationFilterPlatform] = useState('');
   const [selectedSet, setSelectedSet] = useState<KeywordRuleSet | null>(null);
   const [selectedOperationRule, setSelectedOperationRule] = useState<OperationRule | null>(null);
-  const [selectedTypeId, setSelectedTypeId] = useState('');
   const [setForm, setSetForm] = useState<Partial<KeywordRuleSet>>({ name: '', rule_scope: 'xhs', enabled: true });
   const [ruleForm, setRuleForm] = useState<Partial<KeywordRule>>({ keyword: '', match_mode: 'contains', weight: 1, enabled: true });
   const [operationForm, setOperationForm] = useState<Partial<OperationRule>>(EMPTY_OPERATION_FORM);
@@ -44,14 +48,63 @@ export function RulesPage({ role, userId }: Props) {
   const [bindRuleSetId, setBindRuleSetId] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const readonly = role === 'operator';
+  const isOperator = role === 'operator';
+  const canManageAll = role === 'admin' || role === 'supervisor';
+  const canEditSet = (set: KeywordRuleSet | null) => {
+    if (!set) return false;
+    if (canManageAll) return true;
+    return Boolean(set.created_by_user_id && set.created_by_user_id === userId);
+  };
+  const canCreateSet = canManageAll || isOperator;
   const canManageOperationRules = role === 'admin' || role === 'supervisor';
-  const setOptions = useMemo(() => sets.map((item) => ({ value: item.id, label: item.name, description: item.rule_scope })), [sets]);
-  const typeOptions = useMemo(() => types.map((item) => ({ value: item.id, label: item.name, description: item.enabled ? '启用' : '停用' })), [types]);
+  const setDetailReadonly = selectedSet ? !canEditSet(selectedSet) : false;
+  const typeOptions = useMemo(() => types.map((item) => ({ value: item.id, label: item.name, description: item.description || undefined })), [types]);
+
+  function ruleSetSummary(form: Partial<KeywordRuleSet>) {
+    const config = form.config;
+    if (!config || typeof config !== 'object') return '';
+    const summary = (config as Record<string, unknown>).summary;
+    return typeof summary === 'string' ? summary : '';
+  }
+
+  function setRuleSetSummary(nextSummary: string) {
+    setRuleSetConfigValue('summary', nextSummary);
+  }
+
+  function ruleSetConfigValue(key: string, fallback: unknown = '') {
+    const config = setForm.config;
+    if (!config || typeof config !== 'object') return fallback;
+    const value = (config as Record<string, unknown>)[key];
+    return value ?? fallback;
+  }
+
+  function setRuleSetConfigValue(key: string, value: unknown) {
+    const currentConfig = (setForm.config && typeof setForm.config === 'object' ? setForm.config : {}) as Record<string, unknown>;
+    setSetForm({
+      ...setForm,
+      config: {
+        ...currentConfig,
+        [key]: value,
+      },
+    });
+  }
+
+  function leadIntentText() {
+    const value = ruleSetConfigValue('lead_intent_keywords', []);
+    return Array.isArray(value) ? value.join('，') : '';
+  }
+
+  function setLeadIntentText(value: string) {
+    setRuleSetConfigValue('lead_intent_keywords', value.split(/[,，\n]/).map((item) => item.trim()).filter(Boolean));
+  }
 
   useEffect(() => { void reload(); }, [role, userId]);
-  useEffect(() => { if (selectedSet) void reloadRules(selectedSet.id); }, [selectedSet?.id]);
-  useEffect(() => { if (selectedTypeId) void reloadBindings(selectedTypeId); }, [selectedTypeId]);
+  useEffect(() => {
+    if (selectedSet) {
+      void reloadRules(selectedSet.id);
+      void reloadRuleSetBindings(selectedSet.id);
+    }
+  }, [selectedSet?.id, types.length]);
   useEffect(() => {
     if (tab === 'operation') void reloadOperationRules();
   }, [tab, role, userId, operationFilterType, operationFilterPlatform]);
@@ -62,9 +115,9 @@ export function RulesPage({ role, userId }: Props) {
       const [nextSets, nextTypes] = await Promise.all([listKeywordRuleSets(role, userId), listBusinessAccountTypes(role, userId)]);
       setSets(nextSets);
       setTypes(nextTypes);
+      await reloadAllRuleSetBindingLabels(nextSets, nextTypes);
       setSelectedSet((current) => current || nextSets[0] || null);
       setSetForm((current) => current.name ? current : nextSets[0] || { name: '', rule_scope: 'xhs', enabled: true });
-      setSelectedTypeId((current) => current || nextTypes[0]?.id || '');
     } catch (err) {
       setError(err instanceof Error ? err.message : '规则加载失败');
     } finally {
@@ -76,8 +129,29 @@ export function RulesPage({ role, userId }: Props) {
     setRules(await listKeywordRules(role, ruleSetId, userId));
   }
 
-  async function reloadBindings(typeId: string) {
-    setBindings(await listBusinessTypeRuleSets(role, typeId, userId));
+  async function reloadRuleSetBindings(ruleSetId: string) {
+    if (!types.length) {
+      setRuleSetBindings([]);
+      return;
+    }
+    const rows = await Promise.all(types.map((type) => listBusinessTypeRuleSets(role, type.id, userId)));
+    setRuleSetBindings(rows.flat().filter((item) => item.rule_set_id === ruleSetId));
+  }
+
+  async function reloadAllRuleSetBindingLabels(nextSets: KeywordRuleSet[], nextTypes: BusinessAccountType[]) {
+    if (!nextSets.length || !nextTypes.length) {
+      setRuleSetBindingLabels({});
+      return;
+    }
+    const rows = await Promise.all(nextTypes.map((type) => listBusinessTypeRuleSets(role, type.id, userId)));
+    const labels: Record<string, string[]> = {};
+    for (const binding of rows.flat()) {
+      const ruleSetExists = nextSets.some((item) => item.id === binding.rule_set_id);
+      if (!ruleSetExists) continue;
+      const typeName = nextTypes.find((type) => type.id === binding.business_account_type_id)?.name || binding.business_account_type_id;
+      labels[binding.rule_set_id] = [...(labels[binding.rule_set_id] || []), typeName];
+    }
+    setRuleSetBindingLabels(labels);
   }
 
   async function reloadOperationRules() {
@@ -105,7 +179,8 @@ export function RulesPage({ role, userId }: Props) {
   }
 
   async function saveSet() {
-    if (readonly || !setForm.name || !setForm.rule_scope) return;
+    if (!canCreateSet || !setForm.name || !setForm.rule_scope) return;
+    if (selectedSet && !canEditSet(selectedSet)) return;
     const saved = selectedSet
       ? await updateKeywordRuleSet(role, selectedSet.id, setForm, userId)
       : await createKeywordRuleSet(role, { name: setForm.name, rule_scope: setForm.rule_scope, enabled: setForm.enabled ?? true, config: setForm.config || {} }, userId);
@@ -115,20 +190,59 @@ export function RulesPage({ role, userId }: Props) {
   }
 
   async function saveRule() {
-    if (readonly || !selectedSet || !ruleForm.keyword) return;
+    if (!selectedSet || !ruleForm.keyword || !canEditSet(selectedSet)) return;
+    const payload = {
+      keyword: ruleForm.keyword,
+      match_mode: ruleForm.match_mode || 'contains',
+      weight: ruleForm.weight || 1,
+      enabled: ruleForm.enabled ?? true,
+      normalized_keyword: ruleForm.normalized_keyword || null,
+    };
     if (ruleForm.id) {
-      await updateKeywordRule(role, ruleForm.id, ruleForm, userId);
+      await updateKeywordRule(role, ruleForm.id, payload, userId);
     } else {
-      await createKeywordRule(role, selectedSet.id, ruleForm, userId);
+      await createKeywordRule(role, selectedSet.id, payload, userId);
     }
     setRuleForm({ keyword: '', match_mode: 'contains', weight: 1, enabled: true });
     await reloadRules(selectedSet.id);
   }
 
+  async function removeRule(rule: KeywordRule) {
+    if (!selectedSet || !canEditSet(selectedSet)) return;
+    await deleteKeywordRule(role, rule.id, userId);
+    if (ruleForm.id === rule.id) {
+      setRuleForm({ keyword: '', match_mode: 'contains', weight: 1, enabled: true });
+    }
+    await reloadRules(selectedSet.id);
+  }
+
+  async function removeSet(set: KeywordRuleSet) {
+    if (!canEditSet(set)) return;
+    if (!window.confirm(`确认删除业务规则「${set.name}」？删除后会同时移除它的关键词规则和业务类型绑定。`)) return;
+    await deleteKeywordRuleSet(role, set.id, userId);
+    if (selectedSet?.id === set.id) {
+      setSelectedSet(null);
+      setSetForm({ name: '', rule_scope: 'xhs', enabled: true });
+      setRules([]);
+      setRuleSetBindings([]);
+    }
+    await reload();
+  }
+
+  function selectSet(set: KeywordRuleSet) {
+    setSelectedSet(set);
+    setSetForm(set);
+    setRuleForm({ keyword: '', match_mode: 'contains', weight: 1, enabled: true });
+    setBindRuleSetId('');
+    setTab('sets');
+  }
+
   async function bindRuleSet() {
-    if (readonly || !selectedTypeId || !bindRuleSetId) return;
-    await bindBusinessTypeRuleSet(role, selectedTypeId, bindRuleSetId, false, userId);
-    await reloadBindings(selectedTypeId);
+    if (!selectedSet || !bindRuleSetId || !canEditSet(selectedSet)) return;
+    await bindBusinessTypeRuleSet(role, bindRuleSetId, selectedSet.id, false, userId);
+    setBindRuleSetId('');
+    await reloadRuleSetBindings(selectedSet.id);
+    await reloadAllRuleSetBindingLabels(sets, types);
   }
 
   async function saveOperationRule() {
@@ -173,6 +287,18 @@ export function RulesPage({ role, userId }: Props) {
     setBumpVersion(false);
   }
 
+  async function removeOperationRule(rule: OperationRule) {
+    if (!canManageOperationRules) return;
+    if (!window.confirm(`确认删除运营规则「${rule.title}」？`)) return;
+    await deleteOperationRule(role, rule.id, userId);
+    if (selectedOperationRule?.id === rule.id) {
+      setSelectedOperationRule(null);
+      setOperationForm({ ...EMPTY_OPERATION_FORM });
+      setBumpVersion(false);
+    }
+    await reloadOperationRules();
+  }
+
   function startNewOperationRule() {
     setSelectedOperationRule(null);
     setOperationForm({ ...EMPTY_OPERATION_FORM });
@@ -184,14 +310,14 @@ export function RulesPage({ role, userId }: Props) {
     <section className="page-grid resource-grid">
       <aside className="filter-panel">
         <div className="panel-title">规则管理</div>
-        {(['sets', 'rules', 'bindings', 'operation'] as Tab[]).map((item) => (
+        {(['sets', 'operation'] as Tab[]).map((item) => (
           <button key={item} className={`type-tab ${tab === item ? 'active' : ''}`} onClick={() => setTab(item)}>
             {TAB_LABELS[item]}
           </button>
         ))}
-        {tab !== 'operation' && (
+        {tab === 'sets' && (
           <button onClick={() => { setSelectedSet(null); setSetForm({ name: '', rule_scope: 'xhs', enabled: true }); }}>
-            <Plus size={14} />新建规则集
+            <Plus size={14} />新建业务规则
           </button>
         )}
         {tab === 'operation' && canManageOperationRules && (
@@ -205,7 +331,7 @@ export function RulesPage({ role, userId }: Props) {
           <div>
             <h1>规则管理</h1>
             <span>
-              {tab === 'operation' ? `${operationRules.length} 条运营规则` : `${sets.length} 个规则集`}
+              {tab === 'operation' ? `${operationRules.length} 条运营规则` : `${sets.length} 个业务规则`}
             </span>
           </div>
         </div>
@@ -228,21 +354,23 @@ export function RulesPage({ role, userId }: Props) {
               <EmptyState text="暂无运营规则" />
             ) : (
               <div className="data-table">
-                <div className="table-row table-head rule-set-row">
-                  <span>标题</span><span>类型</span><span>平台</span><span>版本</span>
+                <div className="table-row table-head operation-rule-row">
+                  <span>标题</span><span>类型</span><span>平台</span><span>版本</span><span>操作</span>
                 </div>
                 {operationRules.map((rule) => (
-                  <button
+                  <div
                     key={rule.id}
-                    type="button"
-                    className={`table-row rule-set-row ${selectedOperationRule?.id === rule.id ? 'selected' : ''}`}
+                    className={`table-row operation-rule-row ${selectedOperationRule?.id === rule.id ? 'selected' : ''}`}
                     onClick={() => selectOperationRule(rule)}
                   >
                     <span className="strong">{rule.title}</span>
                     <span>{labelOperationRuleType(rule.rule_type)}</span>
                     <span>{rule.platform || '全平台'}</span>
                     <span>v{rule.version}</span>
-                  </button>
+                    <button type="button" className="icon-button danger" title="删除运营规则" disabled={!canManageOperationRules} onClick={(event) => { event.stopPropagation(); void removeOperationRule(rule); }}>
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
                 ))}
               </div>
             )}
@@ -250,19 +378,21 @@ export function RulesPage({ role, userId }: Props) {
         ) : loading ? (
           <LoadingState text="规则加载中" />
         ) : sets.length === 0 ? (
-          <EmptyState text="暂无规则集" />
+          <EmptyState text="暂无业务规则" />
         ) : (
           <div className="data-table">
-            <div className="table-row table-head rule-set-row"><span>名称</span><span>scope</span><span>启用</span><span>摘要</span></div>
+            <div className="table-row table-head rule-set-row"><span>名称</span><span>scope</span><span>启用</span><span>提交人</span><span>绑定业务类型</span><span>摘要</span><span>操作</span></div>
             {sets.map((set) => (
-              <button
+              <div
                 key={set.id}
-                type="button"
                 className={`table-row rule-set-row ${selectedSet?.id === set.id ? 'selected' : ''}`}
-                onClick={() => { setSelectedSet(set); setSetForm(set); setTab('rules'); }}
+                onClick={() => selectSet(set)}
               >
-                <span className="strong">{set.name}</span><span>{set.rule_scope}</span><span>{set.enabled ? '启用' : '停用'}</span><span>{JSON.stringify(set.config)}</span>
-              </button>
+                <span className="strong">{set.name}</span><span>{set.rule_scope}</span><span>{set.enabled ? '启用' : '停用'}</span><span>{set.submitter_name || '历史数据'}</span><span>{(ruleSetBindingLabels[set.id] || []).join('、') || '未绑定'}</span><span>{ruleSetSummary(set) || '—'}</span>
+              <button type="button" className="icon-button danger" title="删除业务规则" disabled={!canEditSet(set)} onClick={(event) => { event.stopPropagation(); void removeSet(set); }}>
+                  <Trash2 size={14} />
+                </button>
+              </div>
             ))}
           </div>
         )}
@@ -270,32 +400,98 @@ export function RulesPage({ role, userId }: Props) {
       <aside className="detail-panel">
         {tab === 'sets' && (
           <div className="form-stack">
-            <div className="panel-title">规则集</div>
-            <label>名称</label><input value={setForm.name || ''} onChange={(event) => setSetForm({ ...setForm, name: event.target.value })} />
-            <label>scope</label><input value={setForm.rule_scope || ''} onChange={(event) => setSetForm({ ...setForm, rule_scope: event.target.value })} />
-            <label className="check-line"><input type="checkbox" checked={setForm.enabled !== false} onChange={(event) => setSetForm({ ...setForm, enabled: event.target.checked })} />启用</label>
-            <button onClick={saveSet} disabled={readonly}><Save size={14} />保存规则集</button>
-          </div>
-        )}
-        {tab === 'rules' && (
-          <div className="detail-section">
-            <b>关键词规则：{selectedSet?.name || '-'}</b>
-            <div className="mini-list">{rules.map((rule) => <button key={rule.id} type="button" className="mini-row" onClick={() => setRuleForm(rule)}>{rule.keyword}<span>{rule.match_mode} / {rule.weight}</span></button>)}</div>
-            <label>关键词</label><input value={ruleForm.keyword || ''} onChange={(event) => setRuleForm({ ...ruleForm, keyword: event.target.value })} />
-            <label>normalized_keyword</label><input value={ruleForm.normalized_keyword || ''} onChange={(event) => setRuleForm({ ...ruleForm, normalized_keyword: event.target.value })} />
-            <label>match_mode</label><input value={ruleForm.match_mode || 'contains'} onChange={(event) => setRuleForm({ ...ruleForm, match_mode: event.target.value })} />
-            <label>weight</label><input type="number" value={ruleForm.weight || 1} onChange={(event) => setRuleForm({ ...ruleForm, weight: Number(event.target.value) })} />
-            <label className="check-line"><input type="checkbox" checked={ruleForm.enabled !== false} onChange={(event) => setRuleForm({ ...ruleForm, enabled: event.target.checked })} />启用</label>
-            <button onClick={saveRule} disabled={readonly || !selectedSet}><Save size={14} />保存规则</button>
-          </div>
-        )}
-        {tab === 'bindings' && (
-          <div className="detail-section">
-            <b>业务账号类型绑定</b>
-            <ResourceSelect label="业务账号类型" value={selectedTypeId} options={typeOptions} onChange={setSelectedTypeId} />
-            {bindings.length === 0 ? <span>暂无绑定规则集</span> : bindings.map((item) => <span key={item.id}>{item.rule_set_name || item.rule_set_id}{item.is_default ? ' · 默认' : ''}</span>)}
-            <ResourceSelect label="添加规则集" value={bindRuleSetId} options={setOptions} onChange={setBindRuleSetId} />
-            <button onClick={bindRuleSet} disabled={readonly}><Plus size={14} />添加绑定</button>
+            <div className="panel-title">{selectedSet ? '业务规则详情' : '新建业务规则'}</div>
+            <label>名称</label><input value={setForm.name || ''} disabled={setDetailReadonly} onChange={(event) => setSetForm({ ...setForm, name: event.target.value })} />
+            <label>scope</label>
+            <select value={setForm.rule_scope || 'xhs'} disabled={setDetailReadonly} onChange={(event) => setSetForm({ ...setForm, rule_scope: event.target.value })}>
+              {RULE_SCOPE_OPTIONS.map((item) => (
+                <option key={item.value} value={item.value}>{item.label}</option>
+              ))}
+            </select>
+            <label>摘要</label>
+            <input
+              value={ruleSetSummary(setForm)}
+              disabled={setDetailReadonly}
+              onChange={(event) => setRuleSetSummary(event.target.value)}
+              placeholder="例如：用于论文服务号的核心关键词筛选"
+            />
+            <label>入池点赞阈值</label>
+            <input
+              type="number"
+              min="0"
+              value={Number(ruleSetConfigValue('visible_like_threshold', 50))}
+              disabled={setDetailReadonly}
+              onChange={(event) => setRuleSetConfigValue('visible_like_threshold', Number(event.target.value))}
+            />
+            <label>线索意图词</label>
+            <textarea
+              value={leadIntentText()}
+              disabled={setDetailReadonly}
+              onChange={(event) => setLeadIntentText(event.target.value)}
+              placeholder="例如：求推荐，求渠道，怎么联系"
+            />
+            <span className="muted-hint">关键词规则用于业务命中；线索意图词和点赞阈值会用于情报中心入池过滤。</span>
+            <label className="check-line"><input type="checkbox" checked={setForm.enabled !== false} disabled={setDetailReadonly} onChange={(event) => setSetForm({ ...setForm, enabled: event.target.checked })} />启用</label>
+            {!selectedSet ? <span className="muted-hint">创建后会自动按当前运营账号所属业务类型绑定。</span> : null}
+            {selectedSet && !canEditSet(selectedSet) ? <span className="muted-hint">仅提交人或管理账户可编辑该业务规则。</span> : null}
+            <button onClick={saveSet} disabled={!canCreateSet || (selectedSet ? !canEditSet(selectedSet) : false)}><Save size={14} />保存业务规则</button>
+
+            {selectedSet && (
+              <div className="detail-section">
+                <b>关键词规则</b>
+                <div className="mini-list">
+                  {rules.length === 0 ? <span className="muted-hint">当前业务规则还没有关键词规则</span> : rules.map((rule) => (
+                    <div key={rule.id} className={`mini-row ${ruleForm.id === rule.id ? 'selected' : ''}`}>
+                      <button type="button" className="mini-row-main" onClick={() => setRuleForm(rule)}>
+                        <span>{rule.keyword}</span>
+                        <small>{rule.match_mode} / 权重 {rule.weight}{rule.enabled ? '' : ' / 停用'}</small>
+                      </button>
+                      <button type="button" className="icon-button danger" title="删除关键词规则" disabled={!canEditSet(selectedSet)} onClick={() => void removeRule(rule)}>
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+
+                <button type="button" onClick={() => setRuleForm({ keyword: '', match_mode: 'contains', weight: 1, enabled: true })} disabled={!canEditSet(selectedSet)}>
+                  <Plus size={14} />新增关键词规则
+                </button>
+                <label>关键词</label>
+                <input value={ruleForm.keyword || ''} disabled={setDetailReadonly} onChange={(event) => setRuleForm({ ...ruleForm, keyword: event.target.value })} placeholder="例如：SCI 论文" />
+                <label>匹配方式</label>
+                <select value={ruleForm.match_mode || 'contains'} disabled={setDetailReadonly} onChange={(event) => setRuleForm({ ...ruleForm, match_mode: event.target.value })}>
+                  <option value="contains">包含</option>
+                  <option value="equals">等于</option>
+                  <option value="regex">正则</option>
+                </select>
+                <label>权重</label>
+                <input type="number" value={ruleForm.weight || 1} disabled={setDetailReadonly} onChange={(event) => setRuleForm({ ...ruleForm, weight: Number(event.target.value) })} />
+                <label className="check-line"><input type="checkbox" checked={ruleForm.enabled !== false} disabled={setDetailReadonly} onChange={(event) => setRuleForm({ ...ruleForm, enabled: event.target.checked })} />启用</label>
+                {ruleForm.normalized_keyword ? <span className="muted-hint">系统匹配值：{ruleForm.normalized_keyword}</span> : null}
+                <button onClick={saveRule} disabled={!selectedSet || !ruleForm.keyword || !canEditSet(selectedSet)}><Save size={14} />{ruleForm.id ? '更新关键词规则' : '添加关键词规则'}</button>
+              </div>
+            )}
+            {selectedSet && (
+              <div className="detail-section">
+                <b>适用业务类型</b>
+                <div className="mini-list">
+                  {ruleSetBindings.length === 0 ? <span className="muted-hint">当前业务规则还没有绑定业务类型</span> : ruleSetBindings.map((item) => (
+                    <span key={item.id} className="mini-row passive">
+                      {types.find((type) => type.id === item.business_account_type_id)?.name || item.business_account_type_id}
+                      <span>{item.is_default ? '默认' : '已绑定'}</span>
+                    </span>
+                  ))}
+                </div>
+                {isOperator ? (
+                  <span className="muted-hint">运营账户创建的业务规则会自动绑定到所属业务类型。</span>
+                ) : (
+                  <>
+                    <ResourceSelect label="绑定业务类型" value={bindRuleSetId} options={typeOptions} onChange={setBindRuleSetId} />
+                    <button onClick={bindRuleSet} disabled={!bindRuleSetId || !canEditSet(selectedSet)}><Plus size={14} />绑定到当前业务规则</button>
+                  </>
+                )}
+              </div>
+            )}
           </div>
         )}
         {tab === 'operation' && (
