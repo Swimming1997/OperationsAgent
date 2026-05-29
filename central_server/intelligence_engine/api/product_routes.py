@@ -34,6 +34,7 @@ from intelligence_engine.domain.enums import (
     AccountRole,
     AccountStatus,
     AgentStatus,
+    AuthStatus,
     ContentDataStatus,
     JobStatus,
     JobType,
@@ -65,6 +66,9 @@ from intelligence_engine.domain.product_schemas import (
     BusinessAccountTypeRuleSetBindRequest,
     BusinessAccountTypeRuleSetRead,
     ContentAssignRequest,
+    ContentBulkStatusFailure,
+    ContentBulkStatusRequest,
+    ContentBulkStatusResponse,
     CandidateDecisionDetail,
     CommentSnapshotDetail,
     ContentIdentityDetail,
@@ -142,6 +146,11 @@ from intelligence_engine.domain.product_schemas import (
     XhsSearchSuggestionRead,
     XhsSearchSuggestionTaskRequest,
 )
+from intelligence_engine.domain.user_intelligence_scenario_filter_schemas import (
+    IntelligenceScenarioFilterListResponse,
+    IntelligenceScenarioFilterRead,
+    IntelligenceScenarioFilterUpsertRequest,
+)
 from intelligence_engine.audit.intelligence_center_audit import build_data_quality_overview
 from intelligence_engine.domain.intelligence_pool import (
     aggregate_search_context,
@@ -150,10 +159,18 @@ from intelligence_engine.domain.intelligence_pool import (
     extract_platform_tags,
     extract_search_tags,
 )
+from intelligence_engine.storage.repositories.user_intelligence_scenario_filter_repository import (
+    UserIntelligenceScenarioFilterRepository,
+)
 from intelligence_engine.storage.repositories.content_repository import ContentRepository
 from intelligence_engine.storage.repositories.reference_library_repository import ReferenceLibraryRepository
 from intelligence_engine.storage.repositories.job_repository import JobRepository
 from intelligence_engine.storage.repositories.product_repository import ProductRepository
+from intelligence_engine.services.intelligence_scenario_filter_service import (
+    assert_valid_scenario,
+    filter_read_from_row,
+    normalize_upsert_request,
+)
 from intelligence_engine.services.job_queue_diagnostics import build_task_run_queue_context
 from intelligence_engine.services.task_materialization import TaskMaterializationService
 from intelligence_engine.services.benchmark_selection import BenchmarkSelectionService, SelectionActor
@@ -169,6 +186,7 @@ from intelligence_engine.api.account_access import (
     set_agent_employee,
 )
 from intelligence_engine.services.agent_presence import effective_agent_status, sync_agent_presence
+from intelligence_engine.services.media_service import MediaService
 from intelligence_engine.security.auth import Principal, get_optional_principal, require_any_role
 from intelligence_engine.services.account_login_service import AccountLoginService
 from intelligence_engine.services.employee_agent_pool import (
@@ -225,6 +243,40 @@ def _operator_business_type_ids(db: Session, principal: Principal) -> set[str]:
         .distinct()
     )
     return {item for item in rows if item}
+
+
+def _employee_fetch_account(db: Session, employee_id: str) -> PlatformAccount | None:
+    base = (
+        select(PlatformAccount)
+        .where(PlatformAccount.employee_id == employee_id)
+        .where(PlatformAccount.status == AccountStatus.ACTIVE.value)
+        .where(PlatformAccount.auth_status == AuthStatus.ACTIVE.value)
+    )
+    ordering = (
+        PlatformAccount.last_success_at.desc(),
+        PlatformAccount.last_verified_at.desc(),
+        PlatformAccount.updated_at.desc(),
+    )
+    account = db.scalar(
+        base.where(PlatformAccount.account_role == AccountRole.INTELLIGENCE_COLLECTOR.value)
+        .order_by(*ordering)
+        .limit(1)
+    )
+    if account:
+        return account
+    return db.scalar(base.order_by(*ordering).limit(1))
+
+
+def _manual_fetch_account_id(db: Session, repo: ContentRepository, *, content_id: str, principal: Principal) -> str | None:
+    if not db.get(ContentIdentity, content_id):
+        raise ValueError("content not found")
+    employee_id = get_principal_employee_id(db, principal)
+    if not employee_id:
+        return repo.latest_discovery_account_id(content_id)
+    account = _employee_fetch_account(db, employee_id)
+    if not account:
+        raise HTTPException(status_code=409, detail="operator has no active account for manual fetch")
+    return account.id
 
 
 def _ensure_operator_has_business_types(db: Session, principal: Principal) -> tuple[str, set[str]]:
@@ -851,6 +903,80 @@ def register_my_local_agents(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     db.commit()
     return _list_local_agent_reads(db, agents)
+
+
+def _require_authenticated_user_id(principal: Principal) -> str:
+    if not principal.user_id:
+        raise HTTPException(status_code=401, detail="authentication required")
+    return principal.user_id
+
+
+@router.get("/product/me/intelligence/scenario-filters", response_model=IntelligenceScenarioFilterListResponse)
+def list_my_intelligence_scenario_filters(
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(UserRoleName.OPERATOR, UserRoleName.ADMIN, UserRoleName.SUPERVISOR)),
+):
+    user_id = _require_authenticated_user_id(principal)
+    repo = UserIntelligenceScenarioFilterRepository(db)
+    items = [filter_read_from_row(row) for row in repo.list_for_user(user_id)]
+    return IntelligenceScenarioFilterListResponse(items=items)
+
+
+@router.get("/product/me/intelligence/scenario-filters/{scenario}", response_model=IntelligenceScenarioFilterRead)
+def get_my_intelligence_scenario_filter(
+    scenario: str,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(UserRoleName.OPERATOR, UserRoleName.ADMIN, UserRoleName.SUPERVISOR)),
+):
+    try:
+        assert_valid_scenario(scenario)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    user_id = _require_authenticated_user_id(principal)
+    row = UserIntelligenceScenarioFilterRepository(db).get(user_id, scenario)
+    if row is None:
+        raise HTTPException(status_code=404, detail="scenario filter not customized")
+    return filter_read_from_row(row)
+
+
+@router.put("/product/me/intelligence/scenario-filters/{scenario}", response_model=IntelligenceScenarioFilterRead)
+def upsert_my_intelligence_scenario_filter(
+    scenario: str,
+    request: IntelligenceScenarioFilterUpsertRequest,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(UserRoleName.OPERATOR, UserRoleName.ADMIN, UserRoleName.SUPERVISOR)),
+):
+    try:
+        assert_valid_scenario(scenario)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    user_id = _require_authenticated_user_id(principal)
+    filters_json, rolling_json = normalize_upsert_request(request)
+    row = UserIntelligenceScenarioFilterRepository(db).upsert(
+        user_id,
+        scenario,
+        filters_json,
+        rolling_json,
+    )
+    db.commit()
+    return filter_read_from_row(row)
+
+
+@router.delete("/product/me/intelligence/scenario-filters/{scenario}", status_code=204)
+def delete_my_intelligence_scenario_filter(
+    scenario: str,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(UserRoleName.OPERATOR, UserRoleName.ADMIN, UserRoleName.SUPERVISOR)),
+):
+    try:
+        assert_valid_scenario(scenario)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    user_id = _require_authenticated_user_id(principal)
+    deleted = UserIntelligenceScenarioFilterRepository(db).delete(user_id, scenario)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="scenario filter not customized")
+    db.commit()
 
 
 @router.get("/local-agents", response_model=list[LocalAgentRead])
@@ -2007,6 +2133,7 @@ def get_intelligence_content_product_detail(content_id: str, db: Session = Depen
     )
     pending_detail_job = next((job.id for job in active_jobs if job.job_type == JobType.DETAIL_FETCH.value and (job.payload_json or {}).get("content_id") == content_id), None)
     pending_comment_job = next((job.id for job in active_jobs if job.job_type == JobType.COMMENT_FETCH.value and (job.payload_json or {}).get("content_id") == content_id), None)
+    media = MediaService()
     db.commit()
     return IntelligenceContentProductDetail(
         identity=ContentIdentityDetail(
@@ -2028,6 +2155,7 @@ def get_intelligence_content_product_detail(content_id: str, db: Session = Depen
                 author_name=snapshot.author_name,
                 author_avatar_url=snapshot.author_avatar_url,
                 cover_url=snapshot.cover_url,
+                cover_display_url=media.build_cover_display_url_for_snapshot(content_id, snapshot, content.metadata_json or {}),
                 image_urls=snapshot.image_urls_json or [],
                 video_url=snapshot.video_url,
                 like_count=snapshot.like_count,
@@ -2135,6 +2263,42 @@ def archive_intelligence_content(content_id: str, request: ContentStatusActionRe
     return _workflow_read(state)
 
 
+@router.post("/intelligence/contents/bulk-status", response_model=ContentBulkStatusResponse)
+def bulk_set_intelligence_content_status(
+    request: ContentBulkStatusRequest,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+):
+    if len(request.content_ids) > 100:
+        raise HTTPException(status_code=400, detail="bulk content limit exceeded")
+    status_by_action = {
+        "select": ContentWorkflowStatus.SELECTED,
+        "discard": ContentWorkflowStatus.DISCARDED,
+        "archive": ContentWorkflowStatus.ARCHIVED,
+    }
+    status = status_by_action.get(request.action)
+    if not status:
+        raise HTTPException(status_code=400, detail="unsupported bulk status action")
+
+    repo = WorkflowRepository(db)
+    succeeded: list[ContentWorkflowRead] = []
+    failed: list[ContentBulkStatusFailure] = []
+    actor_id = request.user_id or principal.user_id
+
+    for content_id in request.content_ids:
+        if not db.get(ContentIdentity, content_id):
+            failed.append(ContentBulkStatusFailure(content_id=content_id, code="not_found", message="content not found"))
+            continue
+        try:
+            state = repo.set_status(content_id=content_id, status=status, user_id=actor_id, note=request.note)
+            succeeded.append(_workflow_read(state))
+        except Exception as exc:
+            failed.append(ContentBulkStatusFailure(content_id=content_id, code="update_failed", message=str(exc)))
+
+    db.commit()
+    return ContentBulkStatusResponse(succeeded=succeeded, failed=failed)
+
+
 @router.post("/intelligence/contents/{content_id}/notes", response_model=ContentOperatorNoteRead)
 def add_intelligence_content_note(content_id: str, request: ContentNoteCreateRequest, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR))):
     if not db.get(ContentIdentity, content_id):
@@ -2176,9 +2340,11 @@ def update_intelligence_manual_tags(content_id: str, request: ManualTagsUpdateRe
 
 
 @router.post("/intelligence/contents/{content_id}/enqueue-detail-fetch", response_model=EnqueueFetchResponse)
-def enqueue_intelligence_detail_fetch(content_id: str, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR))):
+def enqueue_intelligence_detail_fetch(content_id: str, db: Session = Depends(get_db), principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR))):
+    repo = ContentRepository(db)
     try:
-        job = ContentRepository(db).enqueue_detail_fetch(content_id=content_id)
+        account_id = _manual_fetch_account_id(db, repo, content_id=content_id, principal=principal)
+        job = repo.enqueue_detail_fetch(content_id=content_id, account_id=account_id)
     except ValueError:
         raise HTTPException(status_code=404, detail="content not found")
     db.commit()
@@ -2186,9 +2352,11 @@ def enqueue_intelligence_detail_fetch(content_id: str, db: Session = Depends(get
 
 
 @router.post("/intelligence/contents/{content_id}/enqueue-comment-fetch", response_model=EnqueueFetchResponse)
-def enqueue_intelligence_comment_fetch(content_id: str, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR))):
+def enqueue_intelligence_comment_fetch(content_id: str, db: Session = Depends(get_db), principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR))):
+    repo = ContentRepository(db)
     try:
-        job = ContentRepository(db).enqueue_comment_fetch(content_id=content_id)
+        account_id = _manual_fetch_account_id(db, repo, content_id=content_id, principal=principal)
+        job = repo.enqueue_comment_fetch(content_id=content_id, account_id=account_id)
     except ValueError:
         raise HTTPException(status_code=404, detail="content not found")
     db.commit()

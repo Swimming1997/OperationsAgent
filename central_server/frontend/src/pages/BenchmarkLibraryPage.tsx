@@ -1,4 +1,4 @@
-import { Archive, Check, ExternalLink, ImagePlus, Palette, PenLine, RotateCcw, Scale, Search } from 'lucide-react';
+import { Archive, Bookmark, Check, ExternalLink, Heart, ImagePlus, MessageCircle, Palette, PenLine, RotateCcw, Scale, Search } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   archiveReferenceLibraryItem,
@@ -11,6 +11,7 @@ import {
 } from '../api/intelligence';
 import { canReevaluateReference, ReferenceRuleExplainSummary, ReevaluateResultPanel } from '../components/ReferenceRuleExplain';
 import { SafeImage } from '../components/SafeImage';
+import { coverSrc } from '../utils/mediaUrl';
 import { EmptyState, ErrorState, LoadingState } from '../components/Status';
 import type { ProductDetail, ReferenceLibraryEvent, ReferenceLibraryItem, ReferenceLibraryReevaluateResult, Role } from '../types/api';
 import {
@@ -80,6 +81,11 @@ function filtersFromLayers(platform: string, selectionSource: string, libraryTyp
   };
 }
 
+function formatCommentTime(value: string | null | undefined) {
+  if (!value) return '';
+  return new Date(value).toLocaleString('zh-CN', { hour12: false });
+}
+
 export function BenchmarkLibraryPage({ role, userId, onOpenIntelligencePool }: Props) {
   const initialParams = useMemo(() => new URLSearchParams(window.location.search), []);
   const initial = useMemo(
@@ -103,6 +109,7 @@ export function BenchmarkLibraryPage({ role, userId, onOpenIntelligencePool }: P
   const [reevaluating, setReevaluating] = useState(false);
   const [reevaluateResults, setReevaluateResults] = useState<ReferenceLibraryReevaluateResult[]>([]);
   const [edit, setEdit] = useState({ library_type: 'uncategorized', rating: 'watching', note: '', selected_reason: '' });
+  const [editOpen, setEditOpen] = useState(false);
 
   const canReevaluate = canReevaluateReference(role);
   const canEdit = role === 'admin' || role === 'supervisor' || role === 'operator';
@@ -119,15 +126,21 @@ export function BenchmarkLibraryPage({ role, userId, onOpenIntelligencePool }: P
     replaceRouteSearch('/reference-library', params);
   }, []);
 
-  const loadList = useCallback(async (filters = activeFilters, preferredItemId?: string | null) => {
+  const loadList = useCallback(async (filters = activeFilters, preferredItemId?: string | null, preferredContentId?: string | null) => {
     setLoadingList(true);
     setError('');
     try {
       const response = await fetchReferenceLibraryItems(role, filters, userId);
       setItems(response.items);
-      const nextId = preferredItemId && response.items.some((item) => item.id === preferredItemId)
-        ? preferredItemId
-        : response.items[0]?.id || null;
+      let nextId: string | null = null;
+      if (preferredItemId && response.items.some((item) => item.id === preferredItemId)) {
+        nextId = preferredItemId;
+      } else if (preferredContentId) {
+        nextId = response.items.find((item) => item.content_id === preferredContentId)?.id || null;
+      }
+      if (!nextId) {
+        nextId = response.items[0]?.id || null;
+      }
       setSelectedId(nextId);
       syncUrl(filters, nextId);
     } catch (err) {
@@ -137,8 +150,10 @@ export function BenchmarkLibraryPage({ role, userId, onOpenIntelligencePool }: P
     }
   }, [activeFilters, role, syncUrl, userId]);
 
+  const initialContentId = useMemo(() => initialParams.get('content_id'), [initialParams]);
+
   useEffect(() => {
-    void loadList(activeFilters, selectedId);
+    void loadList(activeFilters, selectedId, initialContentId);
   }, [platformTab, sourceTab, libraryTab, rating, sortBy]);
 
   useEffect(() => {
@@ -149,6 +164,7 @@ export function BenchmarkLibraryPage({ role, userId, onOpenIntelligencePool }: P
       note: selected.note || '',
       selected_reason: selected.selected_reason || '',
     });
+    setEditOpen(false);
   }, [selected]);
 
   useEffect(() => {
@@ -303,7 +319,7 @@ export function BenchmarkLibraryPage({ role, userId, onOpenIntelligencePool }: P
                   syncUrl(activeFilters, item.id);
                 }}
               >
-                <span><SafeImage src={item.cover_url} className="thumb-image" placeholderClassName="cover-empty" /></span>
+                <span><SafeImage src={coverSrc(item)} className="thumb-image" placeholderClassName="cover-empty" /></span>
                 <span className="strong">{item.title || '未命名内容'}</span>
                 <span>{labelPlatform(item.platform || '-')}</span>
                 <span>{labelReferenceLibraryType(item.library_type)}</span>
@@ -317,26 +333,65 @@ export function BenchmarkLibraryPage({ role, userId, onOpenIntelligencePool }: P
       </section>
 
       <aside className="detail-panel">
-        <div className="panel-title">作品详情</div>
+        <div className="detail-top-bar">
+          <div className="panel-title">作品详情</div>
+          {selected && canEdit ? (
+            <button type="button" className="secondary" onClick={() => setEditOpen((value) => !value)}>
+              <PenLine size={14} />{editOpen ? '收起编辑' : '编辑'}
+            </button>
+          ) : null}
+        </div>
         {!selected ? <EmptyState text="选择一条对标作品" /> : loadingDetail ? <LoadingState text="详情加载中" /> : (
           <div className="detail-body">
-            <div className="detail-title">{selected.title || detail?.latest_snapshot?.title || '未命名内容'}</div>
-            <div className="meta-line">
-              {labelPlatform(selected.platform || detail?.identity.platform)} · {labelReferenceLibraryType(selected.library_type)} · {labelReferenceLibraryRating(selected.rating)}
-            </div>
-            <SafeImage src={selected.cover_url || detail?.latest_snapshot?.cover_url} className="detail-cover" placeholderClassName="detail-cover-placeholder" />
-            {detail?.latest_snapshot?.body_text && <p className="body-text">{detail.latest_snapshot.body_text}</p>}
-            <dl className="metric-grid">
-              <div><dt>点赞</dt><dd>{formatMetric(selected.like_count ?? detail?.latest_snapshot?.like_count)}</dd></div>
-              <div><dt>评论</dt><dd>{formatMetric(selected.comment_count ?? detail?.latest_snapshot?.comment_count)}</dd></div>
-              <div><dt>收藏</dt><dd>{formatMetric(selected.collect_count ?? detail?.latest_snapshot?.collect_count)}</dd></div>
-            </dl>
+            <article className="xhs-note-detail">
+              <div className="xhs-author-row">
+                <div className="xhs-avatar" aria-hidden="true">
+                  {(selected.author_name || detail?.latest_snapshot?.author_name || '?').slice(0, 1)}
+                </div>
+                <div className="xhs-author-meta">
+                  <b>{selected.author_name || detail?.latest_snapshot?.author_name || '未知作者'}</b>
+                  <span>
+                    {labelPlatform(selected.platform || detail?.identity.platform)} · {labelReferenceLibraryType(selected.library_type)} · {labelReferenceLibraryRating(selected.rating)}
+                  </span>
+                </div>
+              </div>
+              <SafeImage src={coverSrc(detail?.latest_snapshot) ?? coverSrc(selected)} className="detail-cover xhs-note-cover" placeholderClassName="detail-cover-placeholder xhs-note-cover-placeholder" />
+              <div className="xhs-note-copy">
+                <div className="detail-title">{selected.title || detail?.latest_snapshot?.title || '未命名内容'}</div>
+                {detail?.latest_snapshot?.body_text && <p className="body-text">{detail.latest_snapshot.body_text}</p>}
+              </div>
+              <dl className="xhs-engagement-bar">
+                <div><dt><Heart size={15} />点赞</dt><dd>{formatMetric(selected.like_count ?? detail?.latest_snapshot?.like_count)}</dd></div>
+                <div><dt><MessageCircle size={15} />评论</dt><dd>{formatMetric(selected.comment_count ?? detail?.latest_snapshot?.comment_count)}</dd></div>
+                <div><dt><Bookmark size={15} />收藏</dt><dd>{formatMetric(selected.collect_count ?? detail?.latest_snapshot?.collect_count)}</dd></div>
+              </dl>
+
+              <div className="detail-section comment-preview-section xhs-comment-section benchmark-comment-section">
+                <b>评论内容</b>
+                {detail?.comments && detail.comments.length > 0 ? (
+                  <div className="comment-preview-list">
+                    {detail.comments.map((comment) => (
+                      <div key={comment.id} className="comment-preview-item xhs-comment-item">
+                        <div className="comment-preview-meta">
+                          <span>{comment.author_name || '匿名用户'}</span>
+                          <span>{formatCommentTime(comment.created_time || comment.fetched_at)}</span>
+                          {typeof comment.like_count === 'number' ? <span>{comment.like_count} 赞</span> : null}
+                        </div>
+                        <p>{comment.body_text}</p>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <span className="muted-hint">暂无评论快照，可回到情报池补采评论。</span>
+                )}
+              </div>
+            </article>
 
             <ReferenceRuleExplainSummary snapshot={explainSnapshot} />
             <ReevaluateResultPanel results={reevaluateResults} onClear={() => setReevaluateResults([])} />
 
-            {canEdit && (
-              <div className="detail-section">
+            {canEdit && editOpen && (
+              <div className="detail-section benchmark-edit-panel">
                 <b>编辑</b>
                 <select value={edit.library_type} disabled={!canEdit} onChange={(event) => setEdit((current) => ({ ...current, library_type: event.target.value }))}>
                   {LIBRARY_TYPE_OPTIONS.filter((item) => item.value).map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}

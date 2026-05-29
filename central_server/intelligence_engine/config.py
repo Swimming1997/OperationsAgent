@@ -26,6 +26,20 @@ class Settings(BaseSettings):
     auth_secret_key: str = "dev-change-me-in-production"
     auth_token_ttl_hours: int = 24
     allow_header_auth: bool = False
+    media_root: str = "./data/media"
+    media_signing_secret: str | None = None
+    media_url_ttl_seconds: int = 86400
+    media_allowed_hosts: str = "xhscdn.com,xiaohongshu.com,sns-webpic-qc.xhscdn.com,sns-img-qc.xhscdn.com"
+    media_fetch_timeout_seconds: float = 15.0
+    media_referer: str = "https://www.xiaohongshu.com/"
+
+    @property
+    def media_signing_key(self) -> str:
+        return self.media_signing_secret or self.auth_secret_key
+
+    @property
+    def media_allowed_host_set(self) -> frozenset[str]:
+        return frozenset(host.strip().lower() for host in self.media_allowed_hosts.split(",") if host.strip())
 
 
 @lru_cache

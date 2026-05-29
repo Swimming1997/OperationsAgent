@@ -38,3 +38,13 @@ def ensure_runtime_schema() -> None:
             for name, ddl in account_alters.items():
                 if name not in account_columns:
                     conn.execute(text(ddl))
+    if "content_snapshots" in table_names:
+        snapshot_columns = {column["name"] for column in inspector.get_columns("content_snapshots")}
+        snapshot_alters = {
+            "stored_cover_path": "ALTER TABLE content_snapshots ADD COLUMN stored_cover_path TEXT",
+            "cover_media_status": "ALTER TABLE content_snapshots ADD COLUMN cover_media_status VARCHAR(32)",
+        }
+        with engine.begin() as conn:
+            for name, ddl in snapshot_alters.items():
+                if name not in snapshot_columns:
+                    conn.execute(text(ddl))

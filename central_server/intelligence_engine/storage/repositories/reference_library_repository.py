@@ -262,7 +262,10 @@ class ReferenceLibraryRepository:
         return event
 
     def _item_dict(self, item: ReferenceLibraryItem, content: ContentIdentity, snapshot: ContentSnapshot | None) -> dict:
+        from intelligence_engine.services.media_service import MediaService
+
         metadata = content.metadata_json or {}
+        media = MediaService()
         return {
             "id": item.id,
             "content_id": item.content_id,
@@ -286,6 +289,7 @@ class ReferenceLibraryRepository:
             "title": snapshot.title if snapshot else metadata.get("feed_title_or_summary"),
             "author_name": snapshot.author_name if snapshot else metadata.get("author_name"),
             "cover_url": snapshot.cover_url if snapshot else metadata.get("cover_url"),
+            "cover_display_url": media.build_cover_display_url_for_snapshot(content.id, snapshot, metadata),
             "like_count": snapshot.like_count if snapshot else metadata.get("visible_like_count"),
             "comment_count": snapshot.comment_count if snapshot else None,
             "collect_count": snapshot.collect_count if snapshot else None,

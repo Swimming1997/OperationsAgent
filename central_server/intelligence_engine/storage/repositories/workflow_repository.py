@@ -3,6 +3,7 @@
 from sqlalchemy import Text, and_, func, or_, select
 from sqlalchemy.orm import Session
 
+from intelligence_engine.services.media_service import MediaService
 from intelligence_engine.db.models import (
     User,
     CandidateDecision,
@@ -134,7 +135,7 @@ class WorkflowRepository:
         pool_only: bool = True,
     ) -> tuple[list[dict], int]:
         base_conditions = []
-        if pool_only and not candidate_bucket:
+        if pool_only and not candidate_bucket and not workflow_status:
             base_conditions.append(
                 or_(
                     CandidateDecision.id.is_(None),
@@ -320,6 +321,7 @@ class WorkflowRepository:
         content_ids = [row[0].id for row in rows]
         discovery_summaries = self._discovery_summaries_bulk(content_ids)
         discovery_meta_by_content = self._discovery_meta_rows_bulk(content_ids)
+        media = MediaService()
         items = []
         for content, snapshot, decision, state, assignee, latest_discovered_at, discovery_count, discovered_account_count, ref_item in rows:
             if not state:
@@ -357,6 +359,7 @@ class WorkflowRepository:
                     "title": snapshot.title if snapshot else metadata.get("feed_title_or_summary"),
                     "author_name": snapshot.author_name if snapshot else metadata.get("author_name"),
                     "cover_url": snapshot.cover_url if snapshot else metadata.get("cover_url"),
+                    "cover_display_url": media.build_cover_display_url_for_snapshot(content.id, snapshot, metadata),
                     "like_count": snapshot.like_count if snapshot else metadata.get("visible_like_count"),
                     "comment_count": snapshot.comment_count if snapshot else None,
                     "collect_count": snapshot.collect_count if snapshot else None,

@@ -28,4 +28,12 @@ describe('BenchmarkLibraryPage', () => {
     expect(rewrite).toBeDisabled();
     expect(rewrite).toHaveAttribute('title', 'P1 仿写中心上线后开放');
   });
+
+  it('shows collected comments in selected benchmark detail', async () => {
+    installFetchMock();
+    render(<BenchmarkLibraryPage role="supervisor" userId="supervisor-user" />);
+    expect(await screen.findByText('评论内容')).toBeInTheDocument();
+    expect(await screen.findByText('求推荐，怎么联系？')).toBeInTheDocument();
+    expect(screen.getByText('评论者A')).toBeInTheDocument();
+  });
 });

@@ -25,6 +25,7 @@ export type IntelligenceItem = {
   title: string | null;
   author_name: string | null;
   cover_url: string | null;
+  cover_display_url: string | null;
   like_count: number | null;
   comment_count: number | null;
   collect_count: number | null;
@@ -99,6 +100,7 @@ export type ReferenceLibraryItem = {
   title: string | null;
   author_name: string | null;
   cover_url: string | null;
+  cover_display_url: string | null;
   like_count: number | null;
   comment_count: number | null;
   collect_count: number | null;
@@ -189,6 +191,7 @@ export type ProductDetail = {
     body_text: string | null;
     author_name: string | null;
     cover_url: string | null;
+    cover_display_url: string | null;
     like_count: number | null;
     comment_count: number | null;
     collect_count: number | null;

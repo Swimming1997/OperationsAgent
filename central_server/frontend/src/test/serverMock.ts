@@ -16,6 +16,7 @@ type FetchMockConfig = {
 
 export function installFetchMock(config: FetchMockConfig = {}) {
   const requests: Array<{ url: string; init?: RequestInit }> = [];
+  const scenarioFilterStore = new Map<string, Record<string, unknown>>();
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     requests.push({ url, init });
@@ -204,6 +205,35 @@ export function installFetchMock(config: FetchMockConfig = {}) {
     if (url.includes('/api/behavior-profiles')) return json(behaviorProfiles);
     if (url.includes('/api/network-egress-profiles')) return json(networkProfiles);
     if (url.includes('/api/risk-policies')) return json(riskPolicies);
+    if (url.includes('/api/media/cover/')) {
+      const gif = Uint8Array.from(atob('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7'), (char) => char.charCodeAt(0));
+      return Promise.resolve(new Response(gif, { status: 200, headers: { 'Content-Type': 'image/gif' } }));
+    }
+    if (url.includes('/api/product/me/intelligence/scenario-filters')) {
+      const scenarioMatch = url.match(/scenario-filters\/([^/?]+)/);
+      if (scenarioMatch && init?.method === 'PUT') {
+        const scenario = scenarioMatch[1];
+        const body = JSON.parse(String(init.body || '{}'));
+        scenarioFilterStore.set(scenario, {
+          scenario,
+          filters: body.filters || {},
+          rolling: body.rolling || {},
+          updated_at: '2026-05-30T00:00:00.000Z',
+          is_user_customized: true,
+        });
+        return json(scenarioFilterStore.get(scenario));
+      }
+      if (scenarioMatch && init?.method === 'DELETE') {
+        scenarioFilterStore.delete(scenarioMatch[1]);
+        return new Response(null, { status: 204 });
+      }
+      if (scenarioMatch) {
+        const saved = scenarioFilterStore.get(scenarioMatch[1]);
+        if (!saved) return new Response(JSON.stringify({ detail: 'not found' }), { status: 404 });
+        return json(saved);
+      }
+      return json({ items: Array.from(scenarioFilterStore.values()) });
+    }
     if (url.includes('/api/intelligence/contents/product')) return json(intelligenceList);
     if (url.includes('/api/intelligence/data-quality/overview')) {
       return json({
@@ -235,6 +265,21 @@ export function installFetchMock(config: FetchMockConfig = {}) {
           reason: '人工锁定，规则重评已跳过',
         }],
       });
+    }
+    if (url.includes('/api/intelligence/contents/') && url.includes('/reference-library-items') && init?.method === 'POST') {
+      return json(referenceLibraryItems[0]);
+    }
+    if (url.includes('/api/intelligence/contents/bulk-status') && init?.method === 'POST') {
+      return json({ succeeded: [productDetail.workflow_state], failed: [] });
+    }
+    if (url.includes('/api/intelligence/contents/content-1/manual-tags') && init?.method === 'PATCH') {
+      return json({ content_id: 'content-1', manual_tags: ['稍后看', '可仿写'] });
+    }
+    if (url.includes('/api/intelligence/contents/content-1/enqueue-detail-fetch') && init?.method === 'POST') {
+      return json({ job_id: 'job-detail-1', job_type: 'detail_fetch', status: 'pending' });
+    }
+    if (url.includes('/api/intelligence/contents/content-1/enqueue-comment-fetch') && init?.method === 'POST') {
+      return json({ job_id: 'job-comment-1', job_type: 'comment_fetch', status: 'pending' });
     }
     if (url.includes('/api/reference-library/items/bulk')) return json({ succeeded: referenceLibraryItems, failed: [] });
     if (url.includes('/api/reference-library/items/ref-1/events')) return json([

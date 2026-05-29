@@ -47,6 +47,11 @@ function readRecord(params: URLSearchParams, keys: readonly string[]): Record<st
   return result;
 }
 
+export function parseIntelligenceScenario(search: string): string | null {
+  const params = new URLSearchParams(search.startsWith('?') ? search.slice(1) : search);
+  return params.get('scenario');
+}
+
 export function parseIntelligenceFilters(search: string, defaults: IntelligenceFilters = {}): IntelligenceFilters {
   const params = new URLSearchParams(search.startsWith('?') ? search.slice(1) : search);
   return { ...defaults, ...readRecord(params, INTELLIGENCE_KEYS) };

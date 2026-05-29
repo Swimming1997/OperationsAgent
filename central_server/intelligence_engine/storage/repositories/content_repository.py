@@ -388,12 +388,13 @@ class ContentRepository:
         content = self.db.get(ContentIdentity, content_id)
         if not content:
             raise ValueError("content not found")
+        effective_account_id = account_id or self.latest_discovery_account_id(content_id)
         metadata_context = (content.metadata_json or {}).get("platform_context", {})
         if not isinstance(metadata_context, dict):
             metadata_context = {}
         job = JobRepository(self.db).create_job(
             job_type=JobType.DETAIL_FETCH,
-            account_id=account_id,
+            account_id=effective_account_id,
             payload={
                 "content_id": content.id,
                 "platform": content.platform,
@@ -411,11 +412,12 @@ class ContentRepository:
         content = self.db.get(ContentIdentity, content_id)
         if not content:
             raise ValueError("content not found")
+        effective_account_id = account_id or self.latest_discovery_account_id(content_id)
         metadata = content.metadata_json or {}
         platform_context = metadata.get("platform_context") if isinstance(metadata.get("platform_context"), dict) else {}
         job = JobRepository(self.db).create_job(
             job_type=JobType.COMMENT_FETCH,
-            account_id=account_id,
+            account_id=effective_account_id,
             payload={
                 "content_id": content.id,
                 "platform": content.platform,
@@ -429,3 +431,12 @@ class ContentRepository:
             priority=70,
         )
         return job
+
+    def latest_discovery_account_id(self, content_id: str) -> str | None:
+        return self.db.scalar(
+            select(ContentDiscoveryEvent.account_id)
+            .where(ContentDiscoveryEvent.content_id == content_id)
+            .where(ContentDiscoveryEvent.account_id.is_not(None))
+            .order_by(ContentDiscoveryEvent.discovered_at.desc())
+            .limit(1)
+        )

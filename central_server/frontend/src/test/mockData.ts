@@ -112,6 +112,7 @@ export const intelligenceList: IntelligenceListResponse = {
     title: 'SCI论文投稿避坑',
     author_name: '作者A',
     cover_url: 'https://invalid.local/cover.jpg',
+    cover_display_url: '/api/media/cover/content-1?e=9999999999&s=mock',
     like_count: 128,
     comment_count: 12,
     collect_count: 5,
@@ -153,7 +154,7 @@ export const intelligenceList: IntelligenceListResponse = {
 
 export const productDetail: ProductDetail = {
   identity: { id: 'content-1', platform: 'xhs', platform_content_id: 'note-1', canonical_url: 'https://example.com', content_type: 'image_text', first_seen_at: '2026-05-19T00:00:00Z', last_seen_at: '2026-05-19T01:00:00Z', metadata: {} },
-  latest_snapshot: { id: 'snapshot-1', title: 'SCI论文投稿避坑', body_text: '这是一条详情正文', author_name: '作者A', cover_url: 'https://invalid.local/detail.jpg', like_count: 128, comment_count: 12, collect_count: 5, fetched_at: '2026-05-19T01:00:00Z' },
+  latest_snapshot: { id: 'snapshot-1', title: 'SCI论文投稿避坑', body_text: '这是一条详情正文', author_name: '作者A', cover_url: 'https://invalid.local/detail.jpg', cover_display_url: '/api/media/cover/content-1?e=9999999999&s=mock', like_count: 128, comment_count: 12, collect_count: 5, fetched_at: '2026-05-19T01:00:00Z' },
   comments: [{ id: 'comment-1', platform_comment_id: 'c1', parent_platform_comment_id: null, author_platform_id: 'u1', author_name: '评论者A', body_text: '求推荐，怎么联系？', like_count: 3, created_time: '2026-05-19T01:00:00Z', fetched_at: '2026-05-19T01:00:00Z' }],
   latest_candidate_decision: { id: 'decision-1', candidate_bucket: 'content_candidate', business_keyword_hits: ['SCI', '论文'], lead_keyword_hits: [], comment_keyword_hits: [], decision_reason: {}, evaluated_at: '2026-05-19T01:00:00Z' },
   workflow_state: { content_id: 'content-1', workflow_status: 'assigned', assigned_to_user_id: 'operator-user', assigned_by_user_id: 'supervisor-user', assigned_at: '2026-05-19T01:00:00Z', reviewed_at: null, selected_at: null, discarded_at: null, latest_operator_note: '需要跟进' },
@@ -192,6 +193,7 @@ export const referenceLibraryItems: ReferenceLibraryItem[] = [{
   title: 'SCI论文投稿避坑',
   author_name: '作者A',
   cover_url: 'https://invalid.local/ref.jpg',
+  cover_display_url: '/api/media/cover/content-1?e=9999999999&s=mock',
   like_count: 128,
   comment_count: 12,
   collect_count: 5,

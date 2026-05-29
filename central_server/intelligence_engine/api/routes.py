@@ -8,6 +8,7 @@ from intelligence_engine.config import get_settings
 from intelligence_engine.domain.enums import ContentWorkflowStatus
 from intelligence_engine.services.enrichment_policy import should_enqueue_comment_fetch
 from intelligence_engine.services.benchmark_selection import BenchmarkSelectionService
+from intelligence_engine.services.media_service import MediaService
 from intelligence_engine.storage.repositories.content_repository import ContentRepository
 from intelligence_engine.storage.repositories.job_repository import JobRepository
 from intelligence_engine.storage.repositories.reference_library_repository import ReferenceLibraryRepository
@@ -432,6 +433,7 @@ def ingest_detail(request: DetailIngestionRequest, db: Session = Depends(get_db)
     rule_set_id = (job.payload_json or {}).get("rule_set_id") if job else None
     repo = ContentRepository(db)
     snapshot = repo.create_snapshot(content_id=request.content_id, account_id=job.account_id if job else None, snapshot=request.snapshot)
+    MediaService().resolve_after_detail_ingest(snapshot)
     repo.evaluate_candidate(
         content_id=request.content_id,
         snapshot_id=snapshot.id,

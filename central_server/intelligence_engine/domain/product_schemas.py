@@ -634,6 +634,24 @@ class ContentWorkflowRead(ApiModel):
     latest_operator_note: str | None = None
 
 
+class ContentBulkStatusRequest(ApiModel):
+    content_ids: list[str] = Field(default_factory=list)
+    action: str
+    user_id: str | None = None
+    note: str | None = None
+
+
+class ContentBulkStatusFailure(ApiModel):
+    content_id: str
+    code: str
+    message: str
+
+
+class ContentBulkStatusResponse(ApiModel):
+    succeeded: list[ContentWorkflowRead] = Field(default_factory=list)
+    failed: list[ContentBulkStatusFailure] = Field(default_factory=list)
+
+
 class ContentOperatorNoteRead(ApiModel):
     id: str
     content_id: str
@@ -651,6 +669,7 @@ class IntelligenceContentProductItem(ApiModel):
     title: str | None = None
     author_name: str | None = None
     cover_url: str | None = None
+    cover_display_url: str | None = None
     like_count: int | None = None
     comment_count: int | None = None
     collect_count: int | None = None
@@ -800,6 +819,7 @@ class ContentSnapshotDetail(ApiModel):
     author_name: str | None = None
     author_avatar_url: str | None = None
     cover_url: str | None = None
+    cover_display_url: str | None = None
     image_urls: list[str] = Field(default_factory=list)
     video_url: str | None = None
     like_count: int | None = None
@@ -952,6 +972,7 @@ class ReferenceLibraryItemRead(ApiModel):
     title: str | None = None
     author_name: str | None = None
     cover_url: str | None = None
+    cover_display_url: str | None = None
     like_count: int | None = None
     comment_count: int | None = None
     collect_count: int | None = None

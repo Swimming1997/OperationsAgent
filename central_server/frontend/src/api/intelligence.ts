@@ -39,6 +39,8 @@ export type IntelligenceFilters = {
   reference_rating?: string;
   sort_by?: string;
   sort_order?: string;
+  page?: string;
+  page_size?: string;
 };
 
 export type ReferenceLibraryFilters = {
@@ -97,6 +99,22 @@ export function setContentStatus(role: Role, contentId: string, action: 'select'
     userId,
     body: { user_id: userId || `${role}-user`, note },
   });
+}
+
+export function bulkSetContentStatus(
+  role: Role,
+  payload: { content_ids: string[]; action: 'select' | 'discard' | 'archive'; note?: string },
+  userId?: string,
+) {
+  return apiRequest<{ succeeded: ContentWorkflow[]; failed: Array<{ content_id: string; code: string; message: string }> }>(
+    '/api/intelligence/contents/bulk-status',
+    {
+      method: 'POST',
+      role,
+      userId,
+      body: { ...payload, user_id: userId || `${role}-user` },
+    },
+  );
 }
 
 export function addContentNote(role: Role, contentId: string, note: string, userId?: string) {

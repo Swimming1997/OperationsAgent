@@ -58,7 +58,12 @@ const REFERENCE_LIBRARY_RATING_LABELS: Record<string, string> = {
 
 const SELECTION_SOURCE_LABELS: Record<string, string> = {
   manual: '我的选中',
-  ai: '规则自动',
+  ai: '系统自动',
+};
+
+export type ContentStatusBadge = {
+  label: string;
+  tone: 'neutral' | 'info' | 'lead' | 'success' | 'muted' | 'warn';
 };
 
 const REEVALUATE_STATUS_LABELS: Record<string, string> = {
@@ -136,6 +141,7 @@ export function labelDataStatus(value: string | null | undefined): string {
   return DATA_STATUS_LABELS[value] || value;
 }
 
+/** @deprecated 对外展示请用 formatDiscoveryPosition */
 export function formatSearchContext(item: {
   search_keyword?: string | null;
   search_sort?: string | null;
@@ -144,14 +150,92 @@ export function formatSearchContext(item: {
   best_search_rank?: number | null;
   best_feed_position?: number | null;
 }): string {
-  const parts: string[] = [];
-  if (item.search_keyword) parts.push(item.search_keyword);
-  if (item.search_sort) parts.push(`排序:${item.search_sort}`);
-  if (item.note_type_filter) parts.push(`类型:${item.note_type_filter}`);
-  if (item.publish_time_filter) parts.push(`时间:${item.publish_time_filter}`);
-  if (item.best_search_rank != null) parts.push(`搜索#${item.best_search_rank}`);
-  if (item.best_feed_position != null) parts.push(`推荐#${item.best_feed_position}`);
-  return parts.length ? parts.join(' · ') : '-';
+  return formatDiscoveryPosition(item);
+}
+
+export function formatDiscoveryPosition(item: {
+  search_keyword?: string | null;
+  search_sort?: string | null;
+  note_type_filter?: string | null;
+  publish_time_filter?: string | null;
+  best_search_rank?: number | null;
+  best_feed_position?: number | null;
+  discovery_sources_summary?: {
+    source_surfaces?: Record<string, unknown>;
+    search_keywords?: string[];
+  };
+}): string {
+  const surfaces = Object.keys(item.discovery_sources_summary?.source_surfaces || {});
+  const keyword =
+    item.search_keyword ||
+    item.discovery_sources_summary?.search_keywords?.[0] ||
+    null;
+  const filterParts: string[] = [];
+  if (item.search_sort) filterParts.push(`排序:${item.search_sort}`);
+  if (item.note_type_filter) filterParts.push(`类型:${item.note_type_filter}`);
+  if (item.publish_time_filter) filterParts.push(`时间:${item.publish_time_filter}`);
+
+  if (surfaces.includes('search') || item.best_search_rank != null) {
+    const rank = item.best_search_rank ?? item.best_feed_position;
+    const rankText = rank != null ? `第${rank}名` : '';
+    const main = keyword ? `搜索${rankText} · ${keyword}` : `搜索${rankText}`;
+    const joined = [main.trim(), ...filterParts].filter(Boolean).join(' · ');
+    return joined || '-';
+  }
+  if (surfaces.includes('creator_monitor')) {
+    const pos = item.best_feed_position;
+    const main = pos != null ? `对标监控第${pos}条` : '对标监控';
+    return [main, ...filterParts].join(' · ') || main;
+  }
+  if (
+    surfaces.some((s) =>
+      ['xhs_home_feed', 'douyin_video_home_feed', 'douyin_image_home_feed'].includes(s),
+    )
+  ) {
+    const pos = item.best_feed_position;
+    const main = pos != null ? `推荐流第${pos}条` : '推荐流';
+    return [main, ...filterParts].join(' · ') || main;
+  }
+  if (item.best_feed_position != null) {
+    return `列表第${item.best_feed_position}条`;
+  }
+  if (keyword) {
+    return [keyword, ...filterParts].join(' · ');
+  }
+  return filterParts.length ? filterParts.join(' · ') : '-';
+}
+
+export function deriveContentStatusBadge(item: {
+  data_status?: string | null;
+  candidate_bucket?: string | null;
+  workflow_status?: string | null;
+  in_reference_library?: boolean;
+  reference_library_type?: string | null;
+  manual_tags?: string[];
+}): ContentStatusBadge {
+  if (item.workflow_status === 'discarded' || item.workflow_status === 'archived') {
+    return { label: '已丢弃', tone: 'muted' };
+  }
+  if (item.in_reference_library) {
+    const typeLabel = labelReferenceLibraryType(item.reference_library_type);
+    return { label: `已入库·${typeLabel}`, tone: 'success' };
+  }
+  if (
+    item.workflow_status === 'selected' ||
+    (item.manual_tags || []).includes('稍后看')
+  ) {
+    return { label: '稍后看', tone: 'info' };
+  }
+  if (item.candidate_bucket === 'lead_candidate') {
+    return { label: '线索', tone: 'lead' };
+  }
+  if (item.data_status === 'card_only') {
+    return { label: '信息不全', tone: 'warn' };
+  }
+  if (item.candidate_bucket === 'discard') {
+    return { label: '已过滤', tone: 'muted' };
+  }
+  return { label: '待看', tone: 'neutral' };
 }
 
 export function formatTags(tags: string[] | undefined): string {

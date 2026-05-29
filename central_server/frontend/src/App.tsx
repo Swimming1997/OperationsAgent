@@ -27,6 +27,10 @@ function taskRunIdFromSearch() {
   return new URLSearchParams(window.location.search).get('task_run') || undefined;
 }
 
+function jobIdFromSearch() {
+  return new URLSearchParams(window.location.search).get('job_id') || undefined;
+}
+
 function intelligenceContentIdFromSearch() {
   return new URLSearchParams(window.location.search).get('content_id') || undefined;
 }
@@ -35,12 +39,14 @@ function AuthenticatedApp() {
   const auth = useAuth();
   const [route, setRoute] = useState(routeFromPath);
   const [opsTaskRunId, setOpsTaskRunId] = useState<string | undefined>(taskRunIdFromSearch);
+  const [opsJobId, setOpsJobId] = useState<string | undefined>(jobIdFromSearch);
   const [intelligenceContentId, setIntelligenceContentId] = useState<string | undefined>(intelligenceContentIdFromSearch);
 
   useEffect(() => {
     const onPop = () => {
       setRoute(routeFromPath());
       setOpsTaskRunId(taskRunIdFromSearch());
+      setOpsJobId(jobIdFromSearch());
       setIntelligenceContentId(intelligenceContentIdFromSearch());
     };
     window.addEventListener('popstate', onPop);
@@ -61,6 +67,7 @@ function AuthenticatedApp() {
     window.history.pushState({}, '', path);
     if (nextRoute === 'operations') {
       setOpsTaskRunId(params?.get('task_run') || undefined);
+      setOpsJobId(params?.get('job_id') || undefined);
     }
   }
 
@@ -84,6 +91,7 @@ function AuthenticatedApp() {
           role={role}
           userId={userId}
           initialTaskRunId={opsTaskRunId}
+          initialJobId={opsJobId}
           onOpenTasks={() => changeRoute('tasks')}
         />
       )}
@@ -93,7 +101,22 @@ function AuthenticatedApp() {
       {route === 'agents' && <AgentsPage role={role} userId={userId} />}
       {route === 'organization' && <OrganizationPage role={role} userId={userId} />}
       {route === 'intelligence' && (
-        <IntelligencePage role={role} userId={userId} initialContentId={intelligenceContentId} />
+        <IntelligencePage
+          role={role}
+          userId={userId}
+          initialContentId={intelligenceContentId}
+          onOpenReferenceLibrary={(contentId, itemId) => {
+            const params = new URLSearchParams();
+            if (itemId) params.set('item_id', itemId);
+            else params.set('content_id', contentId);
+            changeRoute('reference-library', params);
+          }}
+          onOpenOperationsJob={(jobId) => {
+            const params = new URLSearchParams();
+            params.set('job_id', jobId);
+            changeRoute('operations', params);
+          }}
+        />
       )}
       {route === 'reference-library' && (
         <BenchmarkLibraryPage

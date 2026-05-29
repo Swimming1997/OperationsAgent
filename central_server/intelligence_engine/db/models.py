@@ -357,6 +357,8 @@ class ContentSnapshot(Base):
     author_name: Mapped[str | None] = mapped_column(String(255))
     author_avatar_url: Mapped[str | None] = mapped_column(Text)
     cover_url: Mapped[str | None] = mapped_column(Text)
+    stored_cover_path: Mapped[str | None] = mapped_column(Text)
+    cover_media_status: Mapped[str | None] = mapped_column(String(32))
     image_urls_json: Mapped[list] = mapped_column(JsonType, default=list, nullable=False)
     video_url: Mapped[str | None] = mapped_column(Text)
     like_count: Mapped[int | None] = mapped_column(Integer)
@@ -760,3 +762,17 @@ Index("idx_content_workflow_status", ContentWorkflowState.workflow_status)
 Index("idx_content_workflow_assignee", ContentWorkflowState.assigned_to_user_id)
 Index("idx_content_assignments_content_id", ContentAssignment.content_id)
 Index("idx_content_notes_content_id", ContentOperatorNote.content_id)
+
+
+class UserIntelligenceScenarioFilter(Base, TimestampMixin):
+    __tablename__ = "user_intelligence_scenario_filters"
+    __table_args__ = (
+        UniqueConstraint("user_id", "scenario", name="uq_user_intelligence_scenario_filters_user_scenario"),
+        Index("idx_user_intelligence_scenario_filters_user_id", "user_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False)
+    scenario: Mapped[str] = mapped_column(String(32), nullable=False)
+    filters_json: Mapped[dict] = mapped_column(JsonType, default=dict, nullable=False)
+    rolling_json: Mapped[dict] = mapped_column(JsonType, default=dict, nullable=False)

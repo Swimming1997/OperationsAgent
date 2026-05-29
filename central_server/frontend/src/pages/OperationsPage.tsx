@@ -19,8 +19,10 @@ import {
   type OpsTaskRunDetail,
   type OpsTaskRunItem,
 } from '../api/operations';
+import { canReevaluateReference } from '../components/ReferenceRuleExplain';
 import { EmptyState, ErrorState, LoadingState } from '../components/Status';
 import type { Role } from '../types/api';
+import { CollectionQualityPanel } from './operations/CollectionQualityPanel';
 import {
   JOB_STATUS_FILTER_OPTIONS,
   JOB_TYPE_FILTER_OPTIONS,
@@ -42,6 +44,7 @@ type Props = {
   role: Role;
   userId: string;
   initialTaskRunId?: string;
+  initialJobId?: string;
   onOpenTasks?: () => void;
 };
 
@@ -52,7 +55,7 @@ type ConfirmAction = {
   onConfirm: () => Promise<BulkOperationResult>;
 };
 
-export function OperationsPage({ role, userId, initialTaskRunId, onOpenTasks }: Props) {
+export function OperationsPage({ role, userId, initialTaskRunId, initialJobId, onOpenTasks }: Props) {
   const readonly = role === 'operator';
   const canWrite = !readonly;
   const [summary, setSummary] = useState<JobQueueSummary | null>(null);
@@ -60,7 +63,7 @@ export function OperationsPage({ role, userId, initialTaskRunId, onOpenTasks }: 
   const [jobs, setJobs] = useState<OpsJobItem[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(initialTaskRunId || null);
   const [selectedRun, setSelectedRun] = useState<OpsTaskRunDetail | null>(null);
-  const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
+  const [selectedJobId, setSelectedJobId] = useState<string | null>(initialJobId || null);
   const [selectedJob, setSelectedJob] = useState<OpsJobDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -108,6 +111,10 @@ export function OperationsPage({ role, userId, initialTaskRunId, onOpenTasks }: 
   useEffect(() => {
     void reload();
   }, [reload]);
+
+  useEffect(() => {
+    if (initialJobId) setSelectedJobId(initialJobId);
+  }, [initialJobId]);
 
   useEffect(() => {
     if (!selectedRunId) {
@@ -209,6 +216,8 @@ export function OperationsPage({ role, userId, initialTaskRunId, onOpenTasks }: 
           ) : null}
         </section>
       ) : null}
+
+      {canReevaluateReference(role) ? <CollectionQualityPanel role={role} userId={userId} /> : null}
 
       <div className="operations-panels">
         <aside className="list-panel" data-testid="run-batch-list">

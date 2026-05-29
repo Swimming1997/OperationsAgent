@@ -161,7 +161,7 @@ class JobOperationsService:
             stmt = stmt.where(Job.created_at >= created_after)
         if created_before:
             stmt = stmt.where(Job.created_at <= created_before)
-        jobs = list(self.db.scalars(stmt.order_by(Job.priority.asc(), Job.created_at.asc())))
+        jobs = list(self.db.scalars(stmt.order_by(Job.created_at.desc())))
         items = [self._job_item(job) for job in jobs]
         if legacy_only is True:
             items = [item for item in items if item.is_legacy]
