@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { AuthProvider, useAuth } from './auth/AuthContext';
+import { TaskRunRefreshProvider } from './context/TaskRunRefreshContext';
 import { Shell } from './components/Shell';
 import { LoadingState } from './components/Status';
 import { AccountsPage } from './pages/AccountsPage';
@@ -11,12 +12,13 @@ import { IntelligencePage } from './pages/IntelligencePage';
 import { LoginPage } from './pages/LoginPage';
 import { OrganizationPage } from './pages/OrganizationPage';
 import { RulesPage } from './pages/RulesPage';
+import { MyRunsPage } from './pages/MyRunsPage';
 import { OperationsPage } from './pages/OperationsPage';
 import { TasksPage } from './pages/TasksPage';
 import { canAccessRoute } from './utils/roleLabels';
 import './styles.css';
 
-const routes = ['intelligence', 'reference-library', 'tasks', 'operations', 'accounts', 'benchmarks', 'rules', 'agents', 'organization'];
+const routes = ['intelligence', 'reference-library', 'tasks', 'my-runs', 'operations', 'accounts', 'benchmarks', 'rules', 'agents', 'organization'];
 
 function routeFromPath() {
   const segment = window.location.pathname.replace(/^\//, '').split('/')[0];
@@ -65,15 +67,16 @@ function AuthenticatedApp() {
     setRoute(nextRoute);
     const path = params && params.toString() ? `/${nextRoute}?${params}` : `/${nextRoute}`;
     window.history.pushState({}, '', path);
-    if (nextRoute === 'operations') {
+    if (nextRoute === 'operations' || nextRoute === 'my-runs') {
       setOpsTaskRunId(params?.get('task_run') || undefined);
       setOpsJobId(params?.get('job_id') || undefined);
     }
   }
 
-  const { role, userId } = auth;
+  const { role, userId, employeeId } = auth;
 
   return (
+    <TaskRunRefreshProvider role={role} userId={userId} employeeId={employeeId}>
     <Shell activeRoute={route} onRouteChange={changeRoute}>
       {route === 'tasks' && (
         <TasksPage
@@ -82,9 +85,12 @@ function AuthenticatedApp() {
           onOpenOperations={(taskRunId) => {
             const params = new URLSearchParams();
             if (taskRunId) params.set('task_run', taskRunId);
-            changeRoute('operations', params);
+            changeRoute(role === 'operator' ? 'my-runs' : 'operations', params);
           }}
         />
+      )}
+      {route === 'my-runs' && (
+        <MyRunsPage role={role} userId={userId} initialTaskRunId={opsTaskRunId} />
       )}
       {route === 'operations' && (
         <OperationsPage
@@ -132,6 +138,7 @@ function AuthenticatedApp() {
         />
       )}
     </Shell>
+    </TaskRunRefreshProvider>
   );
 }
 

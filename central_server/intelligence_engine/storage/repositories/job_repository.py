@@ -142,7 +142,7 @@ class JobRepository:
         if only_legacy:
             from intelligence_engine.domain.job_priority import is_legacy_test_job_payload
 
-            jobs = [job for job in jobs if job.task_run_id is None or is_legacy_test_job_payload(job.payload_json)]
+            jobs = [job for job in jobs if is_legacy_test_job_payload(job.payload_json)]
         if dry_run:
             return [job.id for job in jobs]
         cancelled: list[str] = []

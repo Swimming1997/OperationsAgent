@@ -23,6 +23,7 @@ import {
 import { ResourceSelect } from '../components/ResourceSelect';
 import { EmptyState, ErrorState, LoadingState } from '../components/Status';
 import type { ApiError, BehaviorProfile, BusinessAccountType, BusinessAccountTypeBenchmarkGroup, BusinessAccountTypeRuleSet, NetworkEgressProfile, PlatformAccount, ProductOptions, RiskPolicy, Role, TaskRun, TaskSchedule, TaskTemplateDetail, TaskTemplateListItem, TaskTemplateReadiness } from '../types/api';
+import { useTaskRunRefresh, useTaskRunRefreshEffect } from '../context/TaskRunRefreshContext';
 import { accountOptionsForRun, canCreateTaskTemplate, canDeleteTemplate, canEditTemplate, canScheduleTemplate } from '../utils/taskTemplatePermissions';
 
 type Props = {
@@ -145,6 +146,7 @@ function buildFormFromDetail(detail: TaskTemplateDetail): TaskFormData {
 }
 
 export function TasksPage({ role, userId, onOpenOperations }: Props) {
+  const taskRunRefresh = useTaskRunRefresh();
   const resourceLoadGeneration = useRef(0);
   const [options, setOptions] = useState<ProductOptions | null>(null);
   const [resources, setResources] = useState<ResourceState>(emptyResources);
@@ -462,6 +464,7 @@ export function TasksPage({ role, userId, onOpenOperations }: Props) {
     setRunLoading(true);
     try {
       const result = await runTaskTemplate(role, selected.id, runExecutorAccountId, userId);
+      taskRunRefresh?.trackTaskRun(result.task_run_id);
       setToast(`已创建 ${result.jobs_created} 个 Job，等待 Agent 执行`);
       const detail = await getTaskRun(role, result.task_run_id, userId);
       setActiveRun(detail);
@@ -509,6 +512,19 @@ export function TasksPage({ role, userId, onOpenOperations }: Props) {
     }, 2000);
     return () => window.clearInterval(timer);
   }, [activeRun?.id, activeRun?.status, role, userId, selected?.id]);
+
+  useTaskRunRefreshEffect(async () => {
+    if (!activeRun) return;
+    try {
+      const next = await getTaskRun(role, activeRun.id, userId);
+      setActiveRun(next);
+      if (['success', 'partial_success'].includes(next.status)) {
+        setToast('采集任务已完成');
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '运行状态刷新失败');
+    }
+  }, [activeRun?.id, role, userId]);
 
   const canRunNow = Boolean(selected && runExecutorAccountId && runReadiness?.ready);
 
@@ -743,7 +759,7 @@ export function TasksPage({ role, userId, onOpenOperations }: Props) {
             </div>
           )}
 
-          {activeRun && <TaskRunPanel run={activeRun} onOpenOperations={onOpenOperations} />}
+          {activeRun && <TaskRunPanel run={activeRun} role={role} onOpenOperations={onOpenOperations} />}
         </div>
         )}
       </aside>
@@ -785,7 +801,7 @@ function ReadinessCard({ readiness, title }: { readiness: TaskTemplateReadiness;
   );
 }
 
-function TaskRunPanel({ run, onOpenOperations }: { run: TaskRun; onOpenOperations?: (taskRunId?: string) => void }) {
+function TaskRunPanel({ run, role, onOpenOperations }: { run: TaskRun; role: Role; onOpenOperations?: (taskRunId?: string) => void }) {
   const summary = runSummaryText(run);
   const queue = run.queue_context;
   const queueHint = queue && ['queued', 'materialized', 'running'].includes(run.status) ? queue.message : '';
@@ -801,7 +817,11 @@ function TaskRunPanel({ run, onOpenOperations }: { run: TaskRun; onOpenOperation
       {queue?.agent_running_job_type && <div>Agent 当前任务：{queue.agent_running_job_type}</div>}
       {typeof queue?.pending_jobs_ahead === 'number' && queue.pending_jobs_ahead > 0 && <div>前方排队：{queue.pending_jobs_ahead} 个 Job</div>}
       {typeof queue?.job_priority === 'number' && <div>本 Job 优先级：{queue.job_priority}</div>}
-      {queue && queue.pending_jobs_ahead > 5 ? <div className="queue-hint">等待较久可前往运行中心查看队列</div> : null}
+      {queue && queue.pending_jobs_ahead > 5 ? (
+        <div className="queue-hint">
+          {role === 'operator' ? '等待较久可前往「我的运行」查看进度' : '等待较久可前往运行中心查看队列'}
+        </div>
+      ) : null}
       {onOpenOperations && (
         <button type="button" className="inline-link" onClick={() => onOpenOperations(run.id)} data-testid="open-operations">
           <ExternalLink size={13} />查看运行详情

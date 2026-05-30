@@ -4,13 +4,24 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from intelligence_engine.config import get_settings
-from intelligence_engine.db.models import Job, JobEvent, LocalAgent, TaskRun, TaskTemplate
+from intelligence_engine.db.models import Employee, Job, JobEvent, LocalAgent, PlatformAccount, TaskRun, TaskTemplate, User
 from intelligence_engine.domain.enums import JobStatus, JobType
 from intelligence_engine.domain.job_priority import is_legacy_test_job_payload
+from intelligence_engine.domain.operations_status_groups import (
+    JOB_FINISHED_STATUSES,
+    JOB_WAITING_STATUSES,
+    TASK_RUN_ACTIVE_STATUSES,
+    TASK_RUN_NEEDS_ACTION_STATUSES,
+    TASK_RUN_DONE_STATUSES,
+    build_stuck_task_run_ids,
+    build_task_run_bucket_counts,
+    is_job_stale_claimed,
+    is_job_stale_running,
+)
 from intelligence_engine.domain.operations_schemas import (
     BulkOperationResult,
     JobDetailOps,
@@ -24,12 +35,6 @@ from intelligence_engine.domain.operations_schemas import (
 from intelligence_engine.services.job_queue_diagnostics import build_task_run_queue_context, collect_job_queue_report
 from intelligence_engine.services.task_materialization import TaskMaterializationService
 from intelligence_engine.storage.repositories.job_repository import JobRepository
-
-
-def _coerce_utc(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
 
 
 class JobOperationsService:
@@ -73,6 +78,10 @@ class JobOperationsService:
             agent = self.db.get(LocalAgent, agent_id)
             by_agent.append({"agent_id": agent_id, "device_name": agent.device_name if agent else None, "status_counts": statuses})
         job_status_counts = dict(report["status_counts"])
+        settings = get_settings()
+        stuck_run_ids = build_stuck_task_run_ids(self.db, settings)
+        all_runs = list(self.db.scalars(select(TaskRun)))
+        bucket_counts = build_task_run_bucket_counts(all_runs, stuck_run_ids)
         return JobQueueSummary(
             generated_at=datetime.fromisoformat(report["generated_at"]),
             status_counts=job_status_counts,
@@ -83,8 +92,26 @@ class JobOperationsService:
             stale_running_count=len(report["stale_running_jobs"]),
             stale_claimed_count=len(report["stale_claimed_jobs"]),
             legacy_pending_count=report["legacy_pending_estimate"],
+            task_run_bucket_counts=bucket_counts,
+            stuck_task_run_count=len(stuck_run_ids),
             by_agent=by_agent,
         )
+
+    def _apply_task_run_employee_scope(
+        self,
+        stmt,
+        *,
+        owner_employee_id: str | None,
+        executor_account_id: str | None,
+    ):
+        if owner_employee_id:
+            stmt = (
+                stmt.join(PlatformAccount, TaskRun.executor_account_id == PlatformAccount.id)
+                .where(PlatformAccount.employee_id == owner_employee_id)
+            )
+        if executor_account_id:
+            stmt = stmt.where(TaskRun.executor_account_id == executor_account_id)
+        return stmt
 
     def list_task_runs(
         self,
@@ -92,20 +119,48 @@ class JobOperationsService:
         template_id: str | None = None,
         trigger_type: str | None = None,
         status: str | None = None,
+        status_group: str | None = None,
+        stuck_only: bool | None = None,
         has_active_jobs: bool | None = None,
+        owner_employee_id: str | None = None,
+        executor_account_id: str | None = None,
         created_after: datetime | None = None,
         created_before: datetime | None = None,
         page: int = 1,
         page_size: int = 20,
     ) -> TaskRunListOpsResponse:
         TaskMaterializationService(self.db).refresh_active_task_runs()
+        settings = get_settings()
+        stuck_run_ids = build_stuck_task_run_ids(self.db, settings)
         stmt = select(TaskRun)
+        stmt = self._apply_task_run_employee_scope(
+            stmt,
+            owner_employee_id=owner_employee_id,
+            executor_account_id=executor_account_id,
+        )
         if template_id:
             stmt = stmt.where(TaskRun.task_template_id == template_id)
         if trigger_type:
             stmt = stmt.where(TaskRun.trigger_type == trigger_type)
-        if status:
+        if status_group:
+            if status_group == "active":
+                stmt = stmt.where(TaskRun.status.in_(TASK_RUN_ACTIVE_STATUSES))
+                if stuck_run_ids:
+                    stmt = stmt.where(TaskRun.id.not_in(stuck_run_ids))
+            elif status_group == "needs_action":
+                conditions = [TaskRun.status.in_(TASK_RUN_NEEDS_ACTION_STATUSES)]
+                if stuck_run_ids:
+                    conditions.append(TaskRun.id.in_(stuck_run_ids))
+                stmt = stmt.where(or_(*conditions))
+            elif status_group == "done":
+                stmt = stmt.where(TaskRun.status.in_(TASK_RUN_DONE_STATUSES))
+        elif status:
             stmt = stmt.where(TaskRun.status == status)
+        if stuck_only is True:
+            if stuck_run_ids:
+                stmt = stmt.where(TaskRun.id.in_(stuck_run_ids))
+            else:
+                stmt = stmt.where(TaskRun.id.in_([]))
         if created_after:
             stmt = stmt.where(TaskRun.created_at >= created_after)
         if created_before:
@@ -116,7 +171,7 @@ class JobOperationsService:
                 stmt.order_by(TaskRun.created_at.desc()).offset((page - 1) * page_size).limit(page_size)
             )
         )
-        items = [self._task_run_item(run) for run in runs]
+        items = [self._task_run_item(run, stuck_run_ids=stuck_run_ids) for run in runs]
         if has_active_jobs is not None:
             items = [item for item in items if item.has_active_jobs == has_active_jobs]
         return TaskRunListOpsResponse(items=items, total=total, page=page, page_size=page_size)
@@ -126,7 +181,7 @@ class JobOperationsService:
         if not run:
             raise KeyError(task_run_id)
         TaskMaterializationService(self.db).refresh_task_run(run)
-        item = self._task_run_item(run)
+        item = self._task_run_item(run, stuck_run_ids=build_stuck_task_run_ids(self.db, get_settings()))
         jobs = list(self.db.scalars(select(Job).where(Job.task_run_id == run.id).order_by(Job.created_at.asc())))
         queue = build_task_run_queue_context(self.db, run)
         return TaskRunDetailOps(**item.model_dump(), jobs=[self._job_item(job) for job in jobs], queue_context=queue)
@@ -136,20 +191,34 @@ class JobOperationsService:
         *,
         job_type: str | None = None,
         status: str | None = None,
+        status_group: str | None = None,
         agent_id: str | None = None,
         task_run_id: str | None = None,
         priority_max: int | None = None,
         legacy_only: bool | None = None,
         stale_running_only: bool | None = None,
+        owner_employee_id: str | None = None,
         created_after: datetime | None = None,
         created_before: datetime | None = None,
         page: int = 1,
         page_size: int = 50,
     ) -> JobListResponse:
         stmt = select(Job)
+        if owner_employee_id:
+            stmt = (
+                stmt.join(TaskRun, Job.task_run_id == TaskRun.id)
+                .join(PlatformAccount, TaskRun.executor_account_id == PlatformAccount.id)
+                .where(Job.task_run_id.is_not(None), PlatformAccount.employee_id == owner_employee_id)
+            )
         if job_type:
             stmt = stmt.where(Job.job_type == job_type)
-        if status:
+        if status_group == "waiting":
+            stmt = stmt.where(Job.status.in_(JOB_WAITING_STATUSES))
+        elif status_group == "running":
+            stmt = stmt.where(Job.status == JobStatus.RUNNING.value)
+        elif status_group == "finished":
+            stmt = stmt.where(Job.status.in_(JOB_FINISHED_STATUSES))
+        elif status:
             stmt = stmt.where(Job.status == status)
         if agent_id:
             stmt = stmt.where((Job.claimed_by_agent_id == agent_id) | (Job.local_agent_id == agent_id))
@@ -166,7 +235,7 @@ class JobOperationsService:
         if legacy_only is True:
             items = [item for item in items if item.is_legacy]
         if stale_running_only is True:
-            items = [item for item in items if item.is_stale_running]
+            items = [item for item in items if item.is_stale_running or item.is_stale_claimed]
         total = len(items)
         start = (page - 1) * page_size
         page_items = items[start : start + page_size]
@@ -245,9 +314,13 @@ class JobOperationsService:
             TaskMaterializationService(self.db).refresh_task_run(run)
         return BulkOperationResult(affected_count=len(job_ids), job_ids=job_ids, message=f"已重试排队 {len(job_ids)} 个 failed job")
 
-    def _task_run_item(self, run: TaskRun) -> TaskRunListItem:
+    def _task_run_item(self, run: TaskRun, *, stuck_run_ids: set[str] | None = None) -> TaskRunListItem:
         template = self.db.get(TaskTemplate, run.task_template_id)
+        requested_by = self.db.get(User, run.requested_by_user_id) if run.requested_by_user_id else None
+        executor_account = self.db.get(PlatformAccount, run.executor_account_id) if run.executor_account_id else None
+        owner_employee = self.db.get(Employee, executor_account.employee_id) if executor_account and executor_account.employee_id else None
         has_active = run.jobs_pending > 0 or run.jobs_running > 0
+        has_stuck = run.id in stuck_run_ids if stuck_run_ids is not None else False
         return TaskRunListItem(
             id=run.id,
             task_template_id=run.task_template_id,
@@ -255,6 +328,11 @@ class JobOperationsService:
             trigger_type=run.trigger_type,
             status=run.status,
             requested_by_user_id=run.requested_by_user_id,
+            requested_by_display_name=requested_by.display_name if requested_by else None,
+            owner_employee_id=owner_employee.id if owner_employee else None,
+            owner_employee_name=owner_employee.display_name if owner_employee else None,
+            executor_account_id=executor_account.id if executor_account else None,
+            executor_account_name=executor_account.display_name if executor_account else None,
             task_schedule_id=run.task_schedule_id,
             jobs_total=run.jobs_total,
             jobs_pending=run.jobs_pending,
@@ -267,16 +345,13 @@ class JobOperationsService:
             updated_at=run.updated_at,
             finished_at=run.finished_at,
             has_active_jobs=has_active,
+            has_stuck_jobs=has_stuck,
         )
 
     def _job_item(self, job: Job) -> JobListItem:
         settings = get_settings()
-        stale = (
-            job.status == JobStatus.RUNNING.value
-            and job.started_at is not None
-            and (_coerce_utc(datetime.now(timezone.utc)) - _coerce_utc(job.started_at)).total_seconds()
-            > settings.job_running_timeout_seconds
-        )
+        stale_running = is_job_stale_running(job, timeout_seconds=settings.job_running_timeout_seconds)
+        stale_claimed = is_job_stale_claimed(job)
         template_name = None
         if job.task_run_id:
             run = self.db.get(TaskRun, job.task_run_id)
@@ -304,8 +379,9 @@ class JobOperationsService:
             created_at=job.created_at,
             started_at=job.started_at,
             finished_at=job.finished_at,
-            is_legacy=job.task_run_id is None or is_legacy_test_job_payload(job.payload_json),
-            is_stale_running=stale,
+            is_legacy=is_legacy_test_job_payload(job.payload_json),
+            is_stale_running=stale_running,
+            is_stale_claimed=stale_claimed,
             payload_json=job.payload_json or {},
             result_summary_json=job.result_summary_json or {},
         )

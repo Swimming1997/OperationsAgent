@@ -39,7 +39,7 @@ def collect_job_queue_report(
         type_status_counts[job.job_type][job.status] += 1
         bucket = job.task_run_id or "(no_task_run)"
         task_run_status_counts[bucket][job.status] += 1
-        if job.status == JobStatus.PENDING.value and (job.task_run_id is None or is_legacy_test_job_payload(job.payload_json)):
+        if job.status == JobStatus.PENDING.value and is_legacy_test_job_payload(job.payload_json):
             legacy_pending += 1
         if job.status == JobStatus.RUNNING.value and job.started_at and (now - _coerce_utc(job.started_at)) > timedelta(seconds=stale_running_seconds):
             stale_running.append(_job_brief(job, extra={"stale_for_seconds": int((now - _coerce_utc(job.started_at)).total_seconds())}))
@@ -182,7 +182,7 @@ def _job_brief(job: Job, *, extra: dict[str, Any] | None = None) -> dict[str, An
         "claimed_by_agent_id": job.claimed_by_agent_id,
         "created_at": job.created_at.isoformat() if job.created_at else None,
         "started_at": job.started_at.isoformat() if job.started_at else None,
-        "legacy_candidate": job.task_run_id is None or is_legacy_test_job_payload(payload),
+        "legacy_candidate": is_legacy_test_job_payload(payload),
     }
     if extra:
         item.update(extra)

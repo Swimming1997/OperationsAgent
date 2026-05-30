@@ -25,9 +25,11 @@ export function canManageOrganization(roles: string[]): boolean {
 
 export function canAccessRoute(route: string, roles: string[]): boolean {
   const set = new Set(roles);
+  if (route === 'my-runs') return set.has('operator');
+  if (route === 'operations') return set.has('admin') || set.has('supervisor');
   if (set.has('admin') || set.has('supervisor')) return true;
   if (route === 'organization') return false;
-  if (route === 'agents' || route === 'operations') return false;
+  if (route === 'agents') return false;
   if (route === 'benchmarks' || route === 'rules') return set.has('operator');
   if (route === 'tasks') return set.has('operator');
   if (route === 'accounts') return set.has('operator');

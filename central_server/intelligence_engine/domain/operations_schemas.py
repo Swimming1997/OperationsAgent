@@ -16,6 +16,8 @@ class JobQueueSummary(ApiModel):
     stale_running_count: int
     stale_claimed_count: int
     legacy_pending_count: int
+    task_run_bucket_counts: dict[str, int] = {}
+    stuck_task_run_count: int = 0
     by_agent: list[dict[str, Any]] = []
 
 
@@ -38,6 +40,7 @@ class JobListItem(ApiModel):
     finished_at: datetime | None = None
     is_legacy: bool = False
     is_stale_running: bool = False
+    is_stale_claimed: bool = False
     payload_json: dict[str, Any] = {}
     result_summary_json: dict[str, Any] = {}
 
@@ -56,6 +59,11 @@ class TaskRunListItem(ApiModel):
     trigger_type: str
     status: str
     requested_by_user_id: str | None = None
+    requested_by_display_name: str | None = None
+    owner_employee_id: str | None = None
+    owner_employee_name: str | None = None
+    executor_account_id: str | None = None
+    executor_account_name: str | None = None
     task_schedule_id: str | None = None
     jobs_total: int
     jobs_pending: int
@@ -68,6 +76,7 @@ class TaskRunListItem(ApiModel):
     updated_at: datetime
     finished_at: datetime | None = None
     has_active_jobs: bool = False
+    has_stuck_jobs: bool = False
 
 
 class TaskRunListOpsResponse(ApiModel):

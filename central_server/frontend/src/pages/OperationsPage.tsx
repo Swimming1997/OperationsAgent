@@ -1,44 +1,40 @@
-import { AlertTriangle, HelpCircle, RefreshCw } from 'lucide-react';
+import { AlertTriangle } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  cancelOpsJob,
   cancelTaskRunPending,
-  cleanupLegacyPending,
-  failStaleRunningJobs,
   fetchQueueSummary,
-  getOpsJob,
   getOpsTaskRun,
   listOpsJobs,
   listOpsTaskRuns,
-  retryOpsJob,
   retryTaskRun,
   type BulkOperationResult,
   type JobQueueSummary,
-  type OpsJobDetail,
   type OpsJobItem,
   type OpsTaskRunDetail,
   type OpsTaskRunItem,
 } from '../api/operations';
+import { listEmployees, type OrgEmployee } from '../api/organization';
 import { canReevaluateReference } from '../components/ReferenceRuleExplain';
+import { ListPaginationBar } from '../components/ListPaginationBar';
 import { EmptyState, ErrorState, LoadingState } from '../components/Status';
 import type { Role } from '../types/api';
+import { useTaskRunRefreshEffect } from '../context/TaskRunRefreshContext';
 import { CollectionQualityPanel } from './operations/CollectionQualityPanel';
+import { getRunOverviewText, RunDetailPanel } from './operations/RunDetailPanel';
 import {
-  JOB_STATUS_FILTER_OPTIONS,
+  JOB_BUCKET_FILTER_OPTIONS,
   JOB_TYPE_FILTER_OPTIONS,
-  OVERVIEW_SPECIAL,
-  RUN_STATUS_FILTER_OPTIONS,
   formatDateTime,
-  formatRunJobStats,
   jobTimeoutLabel,
-  labelEventType,
-  labelJobOverviewStatus,
   labelJobType,
-  labelPriority,
   labelStatus,
-  labelTaskRunOverviewStatus,
   labelTrigger,
 } from '../utils/operationsLabels';
+import {
+  RUN_BUCKET_FILTER_OPTIONS,
+  isRunNeedsAttention,
+  sortTaskRunsForBucket,
+} from '../utils/operationsRunBuckets';
 
 type Props = {
   role: Role;
@@ -55,16 +51,23 @@ type ConfirmAction = {
   onConfirm: () => Promise<BulkOperationResult>;
 };
 
-export function OperationsPage({ role, userId, initialTaskRunId, initialJobId, onOpenTasks }: Props) {
+const TRIGGER_FILTER_OPTIONS = [
+  { value: '', label: '全部触发方式' },
+  { value: 'manual', label: '手动触发' },
+  { value: 'scheduled', label: '定时触发' },
+];
+
+export function OperationsPage({ role, userId, initialTaskRunId }: Props) {
   const readonly = role === 'operator';
   const canWrite = !readonly;
   const [summary, setSummary] = useState<JobQueueSummary | null>(null);
   const [taskRuns, setTaskRuns] = useState<OpsTaskRunItem[]>([]);
+  const [taskRunsTotal, setTaskRunsTotal] = useState(0);
   const [jobs, setJobs] = useState<OpsJobItem[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(initialTaskRunId || null);
   const [selectedRun, setSelectedRun] = useState<OpsTaskRunDetail | null>(null);
-  const [selectedJobId, setSelectedJobId] = useState<string | null>(initialJobId || null);
-  const [selectedJob, setSelectedJob] = useState<OpsJobDetail | null>(null);
+  const [selectedResidualJobId, setSelectedResidualJobId] = useState<string | null>(null);
+  const [employees, setEmployees] = useState<OrgEmployee[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [toast, setToast] = useState('');
@@ -72,7 +75,12 @@ export function OperationsPage({ role, userId, initialTaskRunId, initialJobId, o
   const [runStatus, setRunStatus] = useState('');
   const [jobStatus, setJobStatus] = useState('');
   const [jobType, setJobType] = useState('');
-  const [taskRunFilter, setTaskRunFilter] = useState(initialTaskRunId || '');
+  const [ownerEmployeeId, setOwnerEmployeeId] = useState('');
+  const [triggerType, setTriggerType] = useState('');
+  const [runSearch, setRunSearch] = useState('');
+  const [runPage, setRunPage] = useState(1);
+  const runPageSize = 30;
+  const runTotalPages = Math.max(1, Math.ceil(taskRunsTotal / runPageSize));
   const [legacyOnly, setLegacyOnly] = useState(false);
   const [staleOnly, setStaleOnly] = useState(false);
 
@@ -82,16 +90,24 @@ export function OperationsPage({ role, userId, initialTaskRunId, initialJobId, o
     try {
       const [nextSummary, nextRuns, nextJobs] = await Promise.all([
         fetchQueueSummary(role, userId),
-        listOpsTaskRuns(role, { page: 1, page_size: 30, status: runStatus || undefined }, userId),
+        listOpsTaskRuns(
+          role,
+          {
+            page: runPage,
+            page_size: runPageSize,
+            status_group: runStatus || undefined,
+            stuck_only: staleOnly || undefined,
+            trigger_type: triggerType || undefined,
+          },
+          userId,
+        ),
         listOpsJobs(
           role,
           {
             page: 1,
-            page_size: 80,
-            status: jobStatus || undefined,
+            page_size: 200,
+            status_group: jobStatus || undefined,
             job_type: jobType || undefined,
-            task_run_id: taskRunFilter || undefined,
-            legacy_only: legacyOnly || undefined,
             stale_running_only: staleOnly || undefined,
           },
           userId,
@@ -99,6 +115,7 @@ export function OperationsPage({ role, userId, initialTaskRunId, initialJobId, o
       ]);
       setSummary(nextSummary);
       setTaskRuns(nextRuns.items);
+      setTaskRunsTotal(nextRuns.total);
       setJobs(nextJobs.items);
     } catch (err) {
       const status = (err as { status?: number }).status;
@@ -106,49 +123,145 @@ export function OperationsPage({ role, userId, initialTaskRunId, initialJobId, o
     } finally {
       setLoading(false);
     }
-  }, [role, userId, runStatus, jobStatus, jobType, taskRunFilter, legacyOnly, staleOnly]);
+  }, [role, userId, runStatus, triggerType, jobStatus, jobType, staleOnly, runPage]);
 
   useEffect(() => {
     void reload();
   }, [reload]);
 
   useEffect(() => {
-    if (initialJobId) setSelectedJobId(initialJobId);
-  }, [initialJobId]);
+    setRunPage(1);
+  }, [runStatus, triggerType, ownerEmployeeId, jobType, runSearch, legacyOnly, staleOnly]);
+
+  useEffect(() => {
+    listEmployees(role, userId)
+      .then(setEmployees)
+      .catch(() => setEmployees([]));
+  }, [role, userId]);
+
+  const refreshSelectedRun = useCallback(async () => {
+    if (!selectedRunId) return;
+    try {
+      setSelectedRun(await getOpsTaskRun(role, selectedRunId, userId));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '运行详情刷新失败');
+    }
+  }, [role, selectedRunId, userId]);
 
   useEffect(() => {
     if (!selectedRunId) {
       setSelectedRun(null);
       return;
     }
-    getOpsTaskRun(role, selectedRunId, userId).then(setSelectedRun).catch((err) => setError(err.message));
-  }, [selectedRunId, role, userId]);
+    void refreshSelectedRun();
+  }, [selectedRunId, refreshSelectedRun]);
+
+  useTaskRunRefreshEffect(() => {
+    void reload();
+    void refreshSelectedRun();
+    setToast('采集任务已完成，列表已更新');
+  }, [reload, refreshSelectedRun]);
+
+  const selectedRunIsActive = Boolean(
+    selectedRun
+      && (
+        selectedRun.has_active_jobs
+        || ['queued', 'running', 'materialized'].includes(selectedRun.status)
+      ),
+  );
 
   useEffect(() => {
-    if (!selectedJobId) {
-      setSelectedJob(null);
+    if (!selectedRunIsActive) return;
+    const timer = window.setInterval(() => {
+      void reload();
+      void refreshSelectedRun();
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [selectedRunIsActive, selectedRunId, reload, refreshSelectedRun]);
+
+  const jobsByRunId = useMemo(() => {
+    const map = new Map<string, OpsJobItem[]>();
+    jobs.forEach((job) => {
+      if (!job.task_run_id) return;
+      const items = map.get(job.task_run_id) || [];
+      items.push(job);
+      map.set(job.task_run_id, items);
+    });
+    return map;
+  }, [jobs]);
+
+  const filteredTaskRuns = useMemo(() => {
+    const query = runSearch.trim().toLowerCase();
+    const matched = taskRuns.filter((run) => {
+      const runJobs = jobsByRunId.get(run.id) || [];
+      const ownerLabel = getRunOwnerLabel(run).toLowerCase();
+      const typeLabel = getRunTypeLabel(runJobs).toLowerCase();
+      if (ownerEmployeeId && run.owner_employee_id !== ownerEmployeeId) return false;
+      if (jobType && !runJobs.some((job) => job.job_type === jobType)) return false;
+      if (query) {
+        const haystack = [
+          run.task_template_name || '',
+          ownerLabel,
+          typeLabel,
+          run.id,
+          run.requested_by_user_id || '',
+        ].join(' ').toLowerCase();
+        if (!haystack.includes(query)) return false;
+      }
+      return true;
+    });
+    return sortTaskRunsForBucket(matched, runStatus);
+  }, [taskRuns, jobsByRunId, runStatus, ownerEmployeeId, jobType, runSearch]);
+
+  const residualJobs = useMemo(() => {
+    const query = runSearch.trim().toLowerCase();
+    return jobs.filter((job) => {
+      if (job.task_run_id) return false;
+      if (jobType && job.job_type !== jobType) return false;
+      if (query) {
+        const haystack = [
+          job.task_template_name || '',
+          job.id,
+          job.account_id || '',
+          job.claimed_by_agent_name || '',
+          labelJobType(job.job_type),
+        ].join(' ').toLowerCase();
+        if (!haystack.includes(query)) return false;
+      }
+      return true;
+    });
+  }, [jobs, jobType, runSearch]);
+
+  const selectedResidualJob = useMemo(
+    () => residualJobs.find((job) => job.id === selectedResidualJobId) || null,
+    [residualJobs, selectedResidualJobId],
+  );
+
+  useEffect(() => {
+    if (legacyOnly) return;
+    if (filteredTaskRuns.length === 0) {
+      setSelectedRunId(null);
       return;
     }
-    getOpsJob(role, selectedJobId, userId).then(setSelectedJob).catch((err) => setError(err.message));
-  }, [selectedJobId, role, userId]);
+    if (!selectedRunId || !filteredTaskRuns.some((run) => run.id === selectedRunId)) {
+      setSelectedRunId(filteredTaskRuns[0].id);
+    }
+  }, [filteredTaskRuns, legacyOnly, selectedRunId]);
 
-  const taskRunOverviewCards = useMemo(() => {
-    if (!summary) return [];
-    const counts = summary.task_run_status_counts || {};
-    return Object.entries(counts)
-      .filter(([, count]) => count > 0)
-      .sort((a, b) => b[1] - a[1])
-      .map(([status, count]) => ({ status, count, label: labelTaskRunOverviewStatus(status) }));
-  }, [summary]);
-
-  const jobOverviewCards = useMemo(() => {
-    if (!summary) return [];
-    const counts = summary.job_status_counts || summary.status_counts;
-    return Object.entries(counts)
-      .filter(([, count]) => count > 0)
-      .sort((a, b) => b[1] - a[1])
-      .map(([status, count]) => ({ status, count, label: labelJobOverviewStatus(status) }));
-  }, [summary]);
+  useEffect(() => {
+    if (!legacyOnly) {
+      setSelectedResidualJobId(null);
+      return;
+    }
+    setSelectedRunId(null);
+    if (residualJobs.length === 0) {
+      setSelectedResidualJobId(null);
+      return;
+    }
+    if (!selectedResidualJobId || !residualJobs.some((job) => job.id === selectedResidualJobId)) {
+      setSelectedResidualJobId(residualJobs[0].id);
+    }
+  }, [legacyOnly, residualJobs, selectedResidualJobId]);
 
   async function executeConfirm() {
     if (!confirm) return;
@@ -158,7 +271,6 @@ export function OperationsPage({ role, userId, initialTaskRunId, initialJobId, o
       setConfirm(null);
       await reload();
       if (selectedRunId) setSelectedRun(await getOpsTaskRun(role, selectedRunId, userId));
-      if (selectedJobId) setSelectedJob(await getOpsJob(role, selectedJobId, userId));
     } catch (err) {
       setError(err instanceof Error ? err.message : '操作失败');
       setConfirm(null);
@@ -173,164 +285,206 @@ export function OperationsPage({ role, userId, initialTaskRunId, initialJobId, o
     <section className="page-grid operations-grid">
       <header className="section-head operations-head">
         <HeadMain />
-        <OperationsHelp />
         {error ? <span className="inline-error">{error}</span> : null}
         {toast ? <span className="feedback" data-testid="ops-toast">{toast}</span> : null}
-        <HeadActions onRefresh={() => void reload()} onOpenTasks={onOpenTasks} />
+        {canReevaluateReference(role) ? <CollectionQualityPanel role={role} userId={userId} /> : null}
       </header>
 
       {loading && !summary ? <LoadingState text="运行中心加载中" /> : null}
 
       {summary ? (
         <section className="ops-overview" data-testid="ops-overview">
-          <h2 className="ops-section-title">运行批次概览</h2>
-          <p className="ops-overview-hint">以下数字为「运行批次」数量（每次任务运行一次），与下方左侧列表口径一致。</p>
-          <div className="summary-cards" data-testid="task-run-summary">
-            {taskRunOverviewCards.length === 0 ? (
-              <OverviewCard label="暂无运行批次记录" count={0} />
-            ) : (
-              taskRunOverviewCards.map((item) => (
-                <OverviewCard key={`run-${item.status}`} label={item.label} count={item.count} />
-              ))
-            )}
-          </div>
-          <h2 className="ops-section-title">执行项概览</h2>
-          <p className="ops-overview-hint">以下数字为底层「执行项」数量（采集、补采等），与下方执行项列表口径一致；可能与运行批次数量不同。</p>
-          <div className="summary-cards" data-testid="queue-summary">
-            <OverviewCard label={OVERVIEW_SPECIAL.stale_running.label} count={summary.stale_running_count} tooltip={OVERVIEW_SPECIAL.stale_running.tooltip} />
-            <OverviewCard label={OVERVIEW_SPECIAL.legacy_pending.label} count={summary.legacy_pending_count} tooltip={OVERVIEW_SPECIAL.legacy_pending.tooltip} />
-            <OverviewCard label={OVERVIEW_SPECIAL.stale_claimed.label} count={summary.stale_claimed_count} tooltip={OVERVIEW_SPECIAL.stale_claimed.tooltip} />
-            {jobOverviewCards.map((item) => (
-              <OverviewCard key={`job-${item.status}`} label={item.label} count={item.count} />
-            ))}
+          <div className="summary-cards ops-summary-cards" data-testid="task-run-summary">
+            <OverviewCard label="任务运行记录" count={taskRunsTotal} />
+            <OverviewCard
+              label="进行中"
+              count={summary.task_run_bucket_counts?.active ?? 0}
+              onClick={() => setRunStatus('active')}
+            />
+            <OverviewCard
+              label="待处理"
+              count={summary.task_run_bucket_counts?.needs_action ?? 0}
+              hint={summary.stuck_task_run_count > 0 ? `其中 ${summary.stuck_task_run_count} 个卡住` : undefined}
+              tooltip="包含执行失败、部分完成或存在卡住采集步骤的任务。"
+              onClick={() => setRunStatus('needs_action')}
+            />
+            <OverviewCard
+              label="已完成"
+              count={summary.task_run_bucket_counts?.done ?? 0}
+              onClick={() => setRunStatus('done')}
+            />
             {summary.orphan_active_job_count > 0 ? (
               <OverviewCard
-                label="无运行批次的活跃执行项"
+                label="异常残留任务"
                 count={summary.orphan_active_job_count}
                 tooltip="这些执行项未关联运行批次（多为测试遗留），左侧运行批次列表不会出现。"
               />
             ) : null}
           </div>
-          {canWrite ? (
-            <AdminActions summary={summary} role={role} userId={userId} setToast={setToast} setConfirm={setConfirm} />
-          ) : null}
         </section>
       ) : null}
 
-      {canReevaluateReference(role) ? <CollectionQualityPanel role={role} userId={userId} /> : null}
-
       <div className="operations-panels">
-        <aside className="list-panel" data-testid="run-batch-list">
-          <h2 className="ops-section-title">运行批次</h2>
-          <label>运行批次状态</label>
-          <select value={runStatus} onChange={(event) => setRunStatus(event.target.value)} aria-label="运行批次状态筛选">
-            {RUN_STATUS_FILTER_OPTIONS.map((item) => (
-              <option key={item.value || 'all'} value={item.value}>{item.label}</option>
-            ))}
-          </select>
-          {taskRuns.length === 0 ? <EmptyState text="暂无运行批次" /> : taskRuns.map((run) => (
-            <button
-              type="button"
-              key={run.id}
-              className={`run-batch-card ${selectedRunId === run.id ? 'selected' : ''}`}
-              onClick={() => {
-                setSelectedRunId(run.id);
-                setTaskRunFilter(run.id);
-              }}
-            >
-              <b>{run.task_template_name || '未命名任务'}</b>
-              <span className="tag">{labelStatus(run.status)}</span>
-              <span className="run-batch-stats">
-                {formatRunJobStats(run.jobs_pending, run.jobs_running, run.jobs_success, run.jobs_failed)}
-              </span>
-              <span className="muted">{labelTrigger(run.trigger_type)}</span>
-            </button>
-          ))}
-        </aside>
-
-        <section className="list-panel" data-testid="execution-item-list">
-          <h2 className="ops-section-title">执行项列表</h2>
+        <aside className="filter-panel ops-filter-panel" data-testid="ops-filter-panel">
+          <h2 className="ops-section-title">筛选任务</h2>
           <div className="filter-grid">
-            <label>执行项状态</label>
-            <select value={jobStatus} onChange={(event) => setJobStatus(event.target.value)} aria-label="执行项状态筛选">
-              {JOB_STATUS_FILTER_OPTIONS.map((item) => (
+            <label>状态</label>
+            <select value={runStatus} onChange={(event) => setRunStatus(event.target.value)} aria-label="任务状态筛选">
+              {RUN_BUCKET_FILTER_OPTIONS.map((item) => (
                 <option key={item.value || 'all'} value={item.value}>{item.label}</option>
               ))}
             </select>
-            <label>执行项类型</label>
-            <select value={jobType} onChange={(event) => setJobType(event.target.value)} aria-label="执行项类型筛选">
-              <option value="">全部类型</option>
+            <label>负责人</label>
+            <select value={ownerEmployeeId} onChange={(event) => setOwnerEmployeeId(event.target.value)} aria-label="负责人筛选">
+              <option value="">全部负责人</option>
+              {employees.map((employee) => (
+                <option key={employee.id} value={employee.id}>{employee.display_name}</option>
+              ))}
+            </select>
+            <label>任务类型</label>
+            <select value={jobType} onChange={(event) => setJobType(event.target.value)} aria-label="任务类型筛选">
+              <option value="">全部任务类型</option>
               {JOB_TYPE_FILTER_OPTIONS.map((item) => (
                 <option key={item.value} value={item.value}>{item.label}</option>
               ))}
             </select>
-            <label>所属运行批次</label>
-            <input value={taskRunFilter} onChange={(event) => setTaskRunFilter(event.target.value)} placeholder="可选，输入批次编号筛选" />
-            <label className="check-line">
-              <input type="checkbox" checked={legacyOnly} onChange={(event) => setLegacyOnly(event.target.checked)} />
-              仅显示历史遗留待执行项
-            </label>
-            <label className="check-line">
-              <input type="checkbox" checked={staleOnly} onChange={(event) => setStaleOnly(event.target.checked)} />
-              仅显示超时未结束项
-            </label>
-          </div>
-          {jobs.length === 0 ? <EmptyState text="暂无执行项" /> : (
-            <div className="data-table compact ops-job-table">
-              <JobTableHead />
-              {jobs.map((job) => (
-                <button
-                  type="button"
-                  key={job.id}
-                  className={`table-row mini ops-job-row ${selectedJobId === job.id ? 'selected' : ''}`}
-                  onClick={() => setSelectedJobId(job.id)}
-                >
-                  <span>{labelJobType(job.job_type)}</span>
-                  <span>{labelStatus(job.status)}</span>
-                  <span>{labelPriority(job.priority)}</span>
-                  <span>{jobTimeoutLabel(job)}</span>
-                  <span>{job.claimed_by_agent_name || '—'}</span>
-                  <span>{formatDateTime(job.created_at)}</span>
-                </button>
+            <label>触发方式</label>
+            <select value={triggerType} onChange={(event) => setTriggerType(event.target.value)} aria-label="触发方式筛选">
+              {TRIGGER_FILTER_OPTIONS.map((item) => (
+                <option key={item.value || 'all'} value={item.value}>{item.label}</option>
               ))}
+            </select>
+            <label>搜索</label>
+            <input value={runSearch} onChange={(event) => setRunSearch(event.target.value)} placeholder="任务名、负责人、编号" />
+          </div>
+          <details className="tech-details">
+            <summary>高级排障筛选</summary>
+            <div className="filter-grid ops-advanced-filters">
+              <label>采集步骤状态</label>
+              <select value={jobStatus} onChange={(event) => setJobStatus(event.target.value)} aria-label="采集步骤状态筛选">
+                {JOB_BUCKET_FILTER_OPTIONS.map((item) => (
+                  <option key={item.value || 'all'} value={item.value}>{item.label}</option>
+                ))}
+              </select>
+              <label className="check-line">
+                <input type="checkbox" checked={legacyOnly} onChange={(event) => setLegacyOnly(event.target.checked)} />
+                仅独立补采
+              </label>
+              <label className="check-line">
+                <input type="checkbox" checked={staleOnly} onChange={(event) => setStaleOnly(event.target.checked)} />
+                仅执行超时
+              </label>
+            </div>
+          </details>
+        </aside>
+
+        <section className="list-panel ops-run-list-panel" data-testid="run-batch-list">
+          <div className="ops-list-head">
+            <h2 className="ops-section-title">{legacyOnly ? '独立补采' : '任务运行记录'}</h2>
+            <span className="muted">
+              {legacyOnly
+                ? `${residualJobs.length} 条`
+                : `共 ${taskRunsTotal} 条 · 第 ${runPage}/${runTotalPages} 页`}
+            </span>
+          </div>
+          {legacyOnly ? (
+            residualJobs.length === 0 ? <EmptyState text="暂无符合条件的独立补采" /> : (
+              <div className="ops-run-list">
+                <div className="ops-run-list-header" aria-hidden>
+                  <span>补采项</span>
+                  <span>概览</span>
+                  <span>标签</span>
+                  <span>状态</span>
+                </div>
+                {residualJobs.map((job) => (
+                  <button
+                    type="button"
+                    key={job.id}
+                    className={`ops-run-row ${selectedResidualJobId === job.id ? 'selected' : ''}`}
+                    onClick={() => setSelectedResidualJobId(job.id)}
+                  >
+                    <b>{labelJobType(job.job_type)}</b>
+                    <span className="ops-run-overview">{getResidualJobOverviewText(job)}</span>
+                    <span className="ops-run-tags">
+                      <span className="tag muted-tag">独立补采</span>
+                      <span className="tag muted-tag">{job.claimed_by_agent_name || '未分配 Agent'}</span>
+                    </span>
+                    <span className={`tag ${job.is_stale_running || job.is_stale_claimed ? 'warning-tag' : ''}`}>
+                      {job.is_stale_running || job.is_stale_claimed ? '执行超时' : labelStatus(job.status)}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )
+          ) : filteredTaskRuns.length === 0 ? <EmptyState text="暂无符合条件的任务运行记录" /> : (
+            <div className="ops-run-list">
+              <div className="ops-run-list-header" aria-hidden>
+                <span>任务</span>
+                <span>概览</span>
+                <span>标签</span>
+                <span>状态</span>
+              </div>
+              {filteredTaskRuns.map((run) => {
+                const runJobs = jobsByRunId.get(run.id) || [];
+                const attention = isRunNeedsAttention(run, runJobs);
+                return (
+                  <button
+                    type="button"
+                    key={run.id}
+                    className={`ops-run-row ${selectedRunId === run.id ? 'selected' : ''}`}
+                    onClick={() => {
+                      setSelectedRunId(run.id);
+                    }}
+                  >
+                    <b>{run.task_template_name || '未命名任务'}</b>
+                    <span className="ops-run-overview">
+                      {getRunOverviewText(run, runJobs)}
+                    </span>
+                    <span className="ops-run-tags">
+                      <span className="tag muted-tag">{getRunOwnerLabel(run)}</span>
+                      <span className="tag muted-tag">{getRunTypeLabel(runJobs)}</span>
+                      <span className="tag muted-tag">{labelTrigger(run.trigger_type)}</span>
+                    </span>
+                    <span className={`tag ${attention ? 'warning-tag' : ''}`}>{attention ? '卡住需处理' : labelStatus(run.status)}</span>
+                  </button>
+                );
+              })}
             </div>
           )}
+          {!legacyOnly && taskRunsTotal > 0 ? (
+            <ListPaginationBar
+              testId="ops-pagination"
+              page={runPage}
+              totalPages={runTotalPages}
+              disabled={loading}
+              onPrev={() => setRunPage((page) => Math.max(1, page - 1))}
+              onNext={() => setRunPage((page) => Math.min(runTotalPages, page + 1))}
+            />
+          ) : null}
         </section>
 
         <aside className="detail-panel" data-testid="ops-detail-panel">
-          <RunDetailPanel
-            run={selectedRun}
-            canWrite={canWrite}
-            onCancelPending={(id) => setConfirm({
-              title: '取消本批次尚未执行的项',
-              message: '将取消该运行批次下所有仍处于「等待执行」状态的执行项。已开始或已完成的项不受影响。',
-              confirmLabel: '确定取消待执行项',
-              onConfirm: () => cancelTaskRunPending(role, id, 'operations_cancel_task_run_pending', userId),
-            })}
-            onRetry={(id) => setConfirm({
-              title: '重试本批次失败项',
-              message: '将把该运行批次下所有「执行失败」的执行项重新加入队列，不会删除历史记录。',
-              confirmLabel: '确定重新排队',
-              onConfirm: () => retryTaskRun(role, id, 'operations_retry_task_run', userId),
-            })}
-          />
-          <JobDetailPanel
-            job={selectedJob}
-            runName={selectedRun?.task_template_name}
-            canWrite={canWrite}
-            onCancel={(id) => setConfirm({
-              title: '取消待执行项',
-              message: '将取消该执行项，使其不再进入队列。已开始执行的项请使用「处理超时执行项」。',
-              confirmLabel: '确定取消该项',
-              onConfirm: () => cancelOpsJob(role, id, 'operations_cancel_job', userId),
-            })}
-            onRetry={(id) => setConfirm({
-              title: '重试失败项',
-              message: '将把该执行项重新加入队列等待 Agent 执行。',
-              confirmLabel: '确定重新排队',
-              onConfirm: () => retryOpsJob(role, id, 'operations_retry_job', userId),
-            })}
-          />
+          {legacyOnly ? (
+            <StandaloneJobDetailPanel job={selectedResidualJob} />
+          ) : (
+            <RunDetailPanel
+              run={selectedRun}
+              jobs={selectedRun?.jobs || []}
+              canWrite={canWrite}
+              onCancelPending={(id) => setConfirm({
+                title: '取消本批次尚未执行的项',
+                message: '将取消该任务运行记录下所有仍处于「等待执行」状态的采集步骤。已开始或已完成的步骤不受影响。',
+                confirmLabel: '确定取消',
+                onConfirm: () => cancelTaskRunPending(role, id, 'operations_cancel_task_run_pending', userId),
+              })}
+              onRetry={(id) => setConfirm({
+                title: '重试失败采集步骤',
+                message: '将把该任务运行记录下所有「执行失败」的采集步骤重新加入队列，不会删除历史记录。',
+                confirmLabel: '确定重新排队',
+                onConfirm: () => retryTaskRun(role, id, 'operations_retry_task_run', userId),
+              })}
+            />
+          )}
         </aside>
       </div>
 
@@ -354,54 +508,42 @@ function HeadMain() {
     <div>
       <h1>运行中心</h1>
       <p className="ops-intro">
-        查看任务运行状态、执行队列和异常执行项。普通使用优先查看「运行批次」，仅在任务卡住或失败时处理执行项。
+        查看每次任务运行的状态、负责人和异常原因。先从中间列表定位任务，再在右侧处理失败或卡住的问题。
       </p>
     </div>
   );
 }
 
-function OperationsHelp() {
-  return (
-    <details className="ops-help" data-testid="ops-help">
-      <summary><HelpCircle size={14} /> 如何使用运行中心？</summary>
-      <ol>
-        <li>先看运行批次，了解每次任务整体是否完成；</li>
-        <li>如果任务一直排队，查看是否有其他执行项占用 Agent；</li>
-        <li>如果发现超时未结束执行项，可处理为失败；</li>
-        <li>如果发现历史遗留待执行项，可取消；</li>
-        <li>正常运营中，一般不需要频繁手动清理。</li>
-      </ol>
-    </details>
-  );
-}
-
-function HeadActions({ onRefresh, onOpenTasks }: { onRefresh: () => void; onOpenTasks?: () => void }) {
-  return (
-    <div className="head-actions">
-      <button type="button" className="secondary" onClick={onRefresh}><RefreshCw size={14} />刷新</button>
-      {onOpenTasks ? <button type="button" className="secondary" onClick={onOpenTasks}>返回任务模板</button> : null}
-    </div>
-  );
-}
-
-function OverviewCard({ label, count, tooltip }: { label: string; count: number; tooltip?: string }) {
-  return (
-    <div className="summary-card" title={tooltip}>
+function OverviewCard({
+  label,
+  count,
+  hint,
+  tooltip,
+  onClick,
+}: {
+  label: string;
+  count: number;
+  hint?: string;
+  tooltip?: string;
+  onClick?: () => void;
+}) {
+  const body = (
+    <>
       <b>{label}</b>
       <span>{count}</span>
-    </div>
+      {hint ? <span className="summary-card-hint">{hint}</span> : null}
+    </>
   );
-}
-
-function JobTableHead() {
+  if (onClick) {
+    return (
+      <button type="button" className="summary-card" title={tooltip} onClick={onClick}>
+        {body}
+      </button>
+    );
+  }
   return (
-    <div className="table-row mini table-head ops-job-row" aria-hidden>
-      <span>执行项类型</span>
-      <span>当前状态</span>
-      <span>优先级</span>
-      <span>是否超时</span>
-      <span>所属 Agent</span>
-      <span>创建时间</span>
+    <div className="summary-card" title={tooltip}>
+      {body}
     </div>
   );
 }
@@ -423,144 +565,31 @@ function ConfirmActions({
   );
 }
 
-function AdminActions({
-  summary,
-  role,
-  userId,
-  setToast,
-  setConfirm,
-}: {
-  summary: JobQueueSummary;
-  role: Role;
-  userId: string;
-  setToast: (value: string) => void;
-  setConfirm: (action: ConfirmAction | null) => void;
-}) {
-  const staleCount = summary.stale_running_count;
-  const legacyCount = summary.legacy_pending_count;
+function StandaloneJobDetailPanel({ job }: { job: OpsJobItem | null }) {
+  if (!job) return <EmptyState text="请在中间选择一条独立补采" />;
   return (
-    <div className="summary-actions" data-testid="admin-actions">
-      <button
-        type="button"
-        onClick={() => setConfirm({
-          title: '处理超时执行项',
-          message: `将把 ${staleCount} 个超过超时阈值、仍未结束的执行项标记为失败，是否继续？`,
-          confirmLabel: '确定处理',
-          onConfirm: () => failStaleRunningJobs(role, 'operations_fail_stale_running', userId),
-        })}
-      >
-        处理超时执行项
-      </button>
-      <button
-        type="button"
-        onClick={async () => {
-          const result = await cleanupLegacyPending(role, { reason: 'preview', dry_run: true }, userId);
-          setToast(`预览完成：当前约有 ${result.affected_count} 个历史遗留待执行项（未做任何修改）。`);
-        }}
-      >
-        查看历史遗留待执行项
-      </button>
-      <button
-        type="button"
-        className="danger"
-        onClick={() => setConfirm({
-          title: '取消历史遗留待执行项',
-          message: `将取消 ${legacyCount} 个历史遗留待执行项。该操作不会删除内容数据和配置，是否继续？`,
-          confirmLabel: '确定取消遗留项',
-          onConfirm: () => cleanupLegacyPending(role, { reason: 'operations_cleanup_legacy', dry_run: false }, userId),
-        })}
-      >
-        取消历史遗留待执行项
-      </button>
-    </div>
-  );
-}
-
-function RunDetailPanel({
-  run,
-  canWrite,
-  onCancelPending,
-  onRetry,
-}: {
-  run: OpsTaskRunDetail | null;
-  canWrite: boolean;
-  onCancelPending: (id: string) => void;
-  onRetry: (id: string) => void;
-}) {
-  if (!run) return <EmptyState text="请在左侧选择一次运行批次" />;
-  const resultMessage = extractRunMessage(run.result_summary);
-  return (
-    <div className="detail-body" data-testid="run-detail-panel">
-      <h3 className="panel-title">运行批次详情</h3>
+    <div className="detail-body" data-testid="residual-job-detail-panel">
+      <h3 className="panel-title">独立补采详情</h3>
+      <section className={`ops-diagnosis ${job.is_stale_running || job.is_stale_claimed || job.status === 'failed' ? 'needs-action' : ''}`}>
+        <b>说明</b>
+        <p>这是从情报中心内容卡片手动发起的详情或评论补采，不属于某一次任务模板运行。</p>
+        <b>建议操作</b>
+        <p>{job.status === 'pending' ? '等待 Agent 执行即可；如果长时间不动，再检查账号和 Agent 状态。' : '可用于确认这次手动补采是否完成或失败。'}</p>
+      </section>
       <dl className="detail-dl">
-        <div><dt>任务名称</dt><dd>{run.task_template_name || '未命名任务'}</dd></div>
-        <div><dt>运行状态</dt><dd>{labelStatus(run.status)}</dd></div>
-        <div><dt>触发方式</dt><dd>{labelTrigger(run.trigger_type)}</dd></div>
-        <div><dt>执行项统计</dt><dd>{formatRunJobStats(run.jobs_pending, run.jobs_running, run.jobs_success, run.jobs_failed)}</dd></div>
-        <div><dt>创建时间</dt><dd>{formatDateTime(run.created_at)}</dd></div>
-        <div><dt>完成时间</dt><dd>{formatDateTime(run.finished_at)}</dd></div>
-        {resultMessage ? <div className="full-row"><dt>运行结果</dt><dd>{resultMessage}</dd></div> : null}
-        {run.queue_context?.message ? <div className="full-row queue-hint"><dt>队列提示</dt><dd>{String(run.queue_context.message)}</dd></div> : null}
-      </dl>
-      {canWrite ? (
-        <div className="action-strip">
-          <button type="button" onClick={() => onCancelPending(run.id)}>取消本批次待执行项</button>
-          <button type="button" onClick={() => onRetry(run.id)}>重试本批次失败项</button>
-        </div>
-      ) : null}
-      <TechnicalDetails data={run} testId="run-tech-details" />
-    </div>
-  );
-}
-
-function JobDetailPanel({
-  job,
-  runName,
-  canWrite,
-  onCancel,
-  onRetry,
-}: {
-  job: OpsJobDetail | null;
-  runName?: string | null;
-  canWrite: boolean;
-  onCancel: (id: string) => void;
-  onRetry: (id: string) => void;
-}) {
-  if (!job) return null;
-  return (
-    <div className="detail-body job-detail" data-testid="job-detail-panel">
-      <h3 className="panel-title">执行项详情</h3>
-      <dl className="detail-dl">
-        <div><dt>执行项类型</dt><dd>{labelJobType(job.job_type)}</dd></div>
+        <div><dt>补采类型</dt><dd>{labelJobType(job.job_type)}</dd></div>
         <div><dt>当前状态</dt><dd>{labelStatus(job.status)}</dd></div>
-        <div><dt>所属运行批次</dt><dd>{runName || job.task_template_name || '—'}</dd></div>
-        <div><dt>优先级</dt><dd>{labelPriority(job.priority)}</dd></div>
         <div><dt>所属 Agent</dt><dd>{job.claimed_by_agent_name || '—'}</dd></div>
         <div><dt>是否超时</dt><dd>{jobTimeoutLabel(job)}</dd></div>
         <div><dt>创建时间</dt><dd>{formatDateTime(job.created_at)}</dd></div>
         <div><dt>开始时间</dt><dd>{formatDateTime(job.started_at)}</dd></div>
-        <div><dt>完成时间</dt><dd>{formatDateTime(job.finished_at)}</dd></div>
         {job.last_error_message ? (
           <div className="full-row"><dt>错误原因</dt><dd className="inline-error">{job.last_error_message}</dd></div>
         ) : null}
       </dl>
-      {job.events.length > 0 ? (
-        <div className="event-summary">
-          <b>操作记录</b>
-          {job.events.map((event, index) => (
-            <span key={`${event.event_type}-${index}`}>{labelEventType(event.event_type)} · {formatDateTime(event.created_at)}</span>
-          ))}
-        </div>
-      ) : null}
-      {canWrite && job.status === 'pending' ? (
-        <button type="button" onClick={() => onCancel(job.id)}>取消该待执行项</button>
-      ) : null}
-      {canWrite && job.status === 'failed' ? (
-        <button type="button" onClick={() => onRetry(job.id)}>重试该失败项</button>
-      ) : null}
       <TechnicalDetails
-        data={{ payload: job.payload_json, result: job.result_summary_json, events: job.events, id: job.id }}
-        testId="job-tech-details"
+        data={{ payload: job.payload_json, result: job.result_summary_json, id: job.id }}
+        testId="residual-job-tech-details"
       />
     </div>
   );
@@ -575,10 +604,22 @@ function TechnicalDetails({ data, testId }: { data: unknown; testId?: string }) 
   );
 }
 
-function extractRunMessage(resultSummary: Record<string, unknown>): string {
-  for (const key of ['feed_collect', 'creator_monitor', 'keyword_search']) {
-    const block = resultSummary[key] as { message?: string } | undefined;
-    if (block?.message) return block.message;
-  }
-  return '';
+function getRunOwnerLabel(run: OpsTaskRunItem): string {
+  if (run.owner_employee_name) return run.owner_employee_name;
+  if (run.requested_by_display_name) return `发起人：${run.requested_by_display_name}`;
+  return '未记录负责人';
 }
+
+function getRunTypeLabel(jobs: OpsJobItem[]): string {
+  const firstJob = jobs[0];
+  return firstJob ? labelJobType(firstJob.job_type) : '任务运行';
+}
+
+function getResidualJobOverviewText(job: OpsJobItem): string {
+  if (job.is_stale_running || job.is_stale_claimed) return '执行超时，可能需要检查 Agent 或账号状态';
+  if (job.last_error_message) return job.last_error_message;
+  if (job.status === 'pending') return '从情报中心手动发起，正在等待执行';
+  return `创建于 ${formatDateTime(job.created_at)}`;
+}
+
+

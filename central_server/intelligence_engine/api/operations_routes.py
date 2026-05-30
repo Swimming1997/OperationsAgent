@@ -5,6 +5,12 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
+from intelligence_engine.api.operations_scope import (
+    ensure_job_operator_access,
+    ensure_task_run_operator_access,
+    is_operator_only,
+    operator_scope_employee_id,
+)
 from intelligence_engine.db.session import get_db
 from intelligence_engine.domain.enums import UserRoleName
 from intelligence_engine.domain.operations_schemas import (
@@ -35,12 +41,19 @@ def _write_roles(principal: Principal):
     return require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR)(principal)
 
 
+def _scoped_employee_id(db: Session, principal: Principal) -> str | None:
+    _read_roles(principal)
+    return operator_scope_employee_id(db, principal)
+
+
 @router.get("/queue-summary", response_model=JobQueueSummary)
 def get_queue_summary(
     db: Session = Depends(get_db),
     principal: Principal = Depends(get_optional_principal),
 ):
     _read_roles(principal)
+    if is_operator_only(principal):
+        raise HTTPException(status_code=403, detail="operators cannot access global queue summary")
     summary = _service(db).queue_summary()
     db.commit()
     return summary
@@ -51,7 +64,10 @@ def list_task_runs_ops(
     template_id: str | None = None,
     trigger_type: str | None = None,
     status: str | None = None,
+    status_group: str | None = None,
+    stuck_only: bool | None = None,
     has_active_jobs: bool | None = None,
+    executor_account_id: str | None = None,
     created_after: datetime | None = None,
     created_before: datetime | None = None,
     page: int = Query(1, ge=1),
@@ -59,12 +75,16 @@ def list_task_runs_ops(
     db: Session = Depends(get_db),
     principal: Principal = Depends(get_optional_principal),
 ):
-    _read_roles(principal)
+    scope_employee_id = _scoped_employee_id(db, principal)
     body = _service(db).list_task_runs(
         template_id=template_id,
         trigger_type=trigger_type,
         status=status,
+        status_group=status_group,
+        stuck_only=stuck_only,
         has_active_jobs=has_active_jobs,
+        owner_employee_id=scope_employee_id,
+        executor_account_id=executor_account_id,
         created_after=created_after,
         created_before=created_before,
         page=page,
@@ -81,6 +101,7 @@ def get_task_run_ops(
     principal: Principal = Depends(get_optional_principal),
 ):
     _read_roles(principal)
+    ensure_task_run_operator_access(db, principal, task_run_id)
     try:
         body = _service(db).get_task_run_detail(task_run_id)
     except KeyError:
@@ -93,6 +114,7 @@ def get_task_run_ops(
 def list_jobs_ops(
     job_type: str | None = None,
     status: str | None = None,
+    status_group: str | None = None,
     agent_id: str | None = None,
     task_run_id: str | None = None,
     priority_max: int | None = None,
@@ -105,15 +127,19 @@ def list_jobs_ops(
     db: Session = Depends(get_db),
     principal: Principal = Depends(get_optional_principal),
 ):
-    _read_roles(principal)
+    scope_employee_id = _scoped_employee_id(db, principal)
+    if scope_employee_id and task_run_id:
+        ensure_task_run_operator_access(db, principal, task_run_id)
     body = _service(db).list_jobs(
         job_type=job_type,
         status=status,
+        status_group=status_group,
         agent_id=agent_id,
         task_run_id=task_run_id,
         priority_max=priority_max,
         legacy_only=legacy_only,
         stale_running_only=stale_running_only,
+        owner_employee_id=scope_employee_id,
         created_after=created_after,
         created_before=created_before,
         page=page,
@@ -130,6 +156,7 @@ def get_job_ops(
     principal: Principal = Depends(get_optional_principal),
 ):
     _read_roles(principal)
+    ensure_job_operator_access(db, principal, job_id)
     try:
         body = _service(db).get_job_detail(job_id)
     except KeyError:
@@ -145,7 +172,11 @@ def cancel_job_ops(
     db: Session = Depends(get_db),
     principal: Principal = Depends(get_optional_principal),
 ):
-    _write_roles(principal)
+    _read_roles(principal)
+    if is_operator_only(principal):
+        ensure_job_operator_access(db, principal, job_id)
+    else:
+        _write_roles(principal)
     try:
         result = _service(db).cancel_job(job_id, reason=request.reason, actor_user_id=principal.user_id)
     except KeyError:
@@ -163,7 +194,11 @@ def retry_job_ops(
     db: Session = Depends(get_db),
     principal: Principal = Depends(get_optional_principal),
 ):
-    _write_roles(principal)
+    _read_roles(principal)
+    if is_operator_only(principal):
+        ensure_job_operator_access(db, principal, job_id)
+    else:
+        _write_roles(principal)
     try:
         result = _service(db).retry_job(job_id, reason=request.reason, actor_user_id=principal.user_id)
     except KeyError:
@@ -181,7 +216,11 @@ def cancel_task_run_pending_ops(
     db: Session = Depends(get_db),
     principal: Principal = Depends(get_optional_principal),
 ):
-    _write_roles(principal)
+    _read_roles(principal)
+    if is_operator_only(principal):
+        ensure_task_run_operator_access(db, principal, task_run_id)
+    else:
+        _write_roles(principal)
     result = _service(db).cancel_task_run_pending(task_run_id, reason=request.reason, actor_user_id=principal.user_id)
     db.commit()
     return result
@@ -194,7 +233,11 @@ def retry_task_run_ops(
     db: Session = Depends(get_db),
     principal: Principal = Depends(get_optional_principal),
 ):
-    _write_roles(principal)
+    _read_roles(principal)
+    if is_operator_only(principal):
+        ensure_task_run_operator_access(db, principal, task_run_id)
+    else:
+        _write_roles(principal)
     result = _service(db).retry_task_run(task_run_id, reason=request.reason, actor_user_id=principal.user_id)
     db.commit()
     return result

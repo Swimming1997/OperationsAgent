@@ -53,6 +53,7 @@ import {
   type IntelligenceScenario,
   type ScenarioFilterState,
 } from './intelligence/scenarioPresets';
+import { useTaskRunRefreshEffect } from '../context/TaskRunRefreshContext';
 import { useIntelligenceKeyboard } from './intelligence/useIntelligenceKeyboard';
 
 type Props = {
@@ -269,6 +270,10 @@ export function IntelligencePage({ role, userId, initialContentId, onOpenReferen
     if (!filtersLoaded) return;
     void loadList();
   }, [filtersLoaded, page, scenario, advancedFilterState, quickFilters, appliedContentQuery]);
+
+  useTaskRunRefreshEffect(() => {
+    void loadList(selectedId ?? undefined);
+  }, [loadList, selectedId]);
 
   useEffect(() => {
     if (!selectedId) {

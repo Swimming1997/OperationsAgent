@@ -14,6 +14,8 @@ export type JobQueueSummary = {
   stale_running_count: number;
   stale_claimed_count: number;
   legacy_pending_count: number;
+  task_run_bucket_counts: Record<string, number>;
+  stuck_task_run_count: number;
   by_agent: Array<{ agent_id: string; device_name: string | null; status_counts: Record<string, number> }>;
 };
 
@@ -24,6 +26,11 @@ export type OpsTaskRunItem = {
   trigger_type: string;
   status: string;
   requested_by_user_id: string | null;
+  requested_by_display_name: string | null;
+  owner_employee_id: string | null;
+  owner_employee_name: string | null;
+  executor_account_id: string | null;
+  executor_account_name: string | null;
   task_schedule_id: string | null;
   jobs_total: number;
   jobs_pending: number;
@@ -36,6 +43,7 @@ export type OpsTaskRunItem = {
   updated_at: string;
   finished_at: string | null;
   has_active_jobs: boolean;
+  has_stuck_jobs: boolean;
 };
 
 export type OpsJobItem = {
@@ -57,6 +65,7 @@ export type OpsJobItem = {
   finished_at: string | null;
   is_legacy: boolean;
   is_stale_running: boolean;
+  is_stale_claimed: boolean;
   payload_json: Record<string, unknown>;
   result_summary_json: Record<string, unknown>;
 };

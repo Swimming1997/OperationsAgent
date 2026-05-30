@@ -76,25 +76,15 @@ export const EVENT_TYPE_LABELS: Record<string, string> = {
 
 export const JOB_TYPE_FILTER_OPTIONS = Object.entries(JOB_TYPE_LABELS).map(([value, label]) => ({ value, label }));
 
-export const RUN_STATUS_FILTER_OPTIONS = [
-  { value: '', label: '全部运行批次' },
-  { value: 'queued', label: '运行批次·排队中' },
-  { value: 'running', label: '运行批次·执行中' },
-  { value: 'success', label: '运行批次·已完成' },
-  { value: 'failed', label: '运行批次·执行失败' },
-  { value: 'partial_success', label: '运行批次·部分完成' },
-  { value: 'materialized', label: '运行批次·已就绪' },
+export const JOB_BUCKET_FILTER_OPTIONS = [
+  { value: '', label: '全部执行项' },
+  { value: 'waiting', label: '等待执行' },
+  { value: 'running', label: '执行中' },
+  { value: 'finished', label: '已结束' },
 ];
 
-export const JOB_STATUS_FILTER_OPTIONS = [
-  { value: '', label: '全部执行项' },
-  { value: 'pending', label: '执行项·等待执行' },
-  { value: 'claimed', label: '执行项·已领取' },
-  { value: 'running', label: '执行项·执行中' },
-  { value: 'success', label: '执行项·已完成' },
-  { value: 'failed', label: '执行项·执行失败' },
-  { value: 'cancelled', label: '执行项·已取消' },
-];
+/** @deprecated 使用 JOB_BUCKET_FILTER_OPTIONS */
+export const JOB_STATUS_FILTER_OPTIONS = JOB_BUCKET_FILTER_OPTIONS;
 
 export function labelJobType(jobType: string): string {
   return JOB_TYPE_LABELS[jobType] || jobType;
@@ -147,8 +137,8 @@ export function formatDateTime(value: string | null | undefined): string {
   return new Date(value).toLocaleString('zh-CN', { hour12: false });
 }
 
-export function jobTimeoutLabel(job: { is_stale_running: boolean; is_legacy: boolean }): string {
-  if (job.is_stale_running) return '已超时';
+export function jobTimeoutLabel(job: { is_stale_running: boolean; is_stale_claimed?: boolean; is_legacy: boolean }): string {
+  if (job.is_stale_running || job.is_stale_claimed) return '已超时';
   if (job.is_legacy) return '历史遗留';
   return '正常';
 }

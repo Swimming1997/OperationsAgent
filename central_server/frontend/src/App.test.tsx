@@ -18,6 +18,6 @@ describe('App shell', () => {
     });
     expect(screen.getByRole('button', { name: /情报中心/ })).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: /任务模板/ }));
-    expect(await screen.findByText('模板配置与手动执行')).toBeInTheDocument();
+    expect(await screen.findByText(/共 \d+ 个模板|模板配置与手动执行/)).toBeInTheDocument();
   });
 });

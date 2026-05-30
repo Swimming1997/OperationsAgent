@@ -21,6 +21,7 @@ type AuthContextValue = {
   user: AuthUser | null;
   role: Role;
   userId: string;
+  employeeId: string | null;
   roles: string[];
   devAuth: boolean;
   setDevAuth: (enabled: boolean) => void;
@@ -99,6 +100,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const role = devAuth ? devRole : user ? primaryRole(user.roles) : 'operator';
   const userId = devAuth ? devUserId : user?.id || '';
+  const employeeId = devAuth ? null : user?.employee_id ?? null;
   const roles = devAuth ? [devRole] : user?.roles || [];
 
   const value = useMemo<AuthContextValue>(
@@ -107,6 +109,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       user,
       role,
       userId,
+      employeeId,
       roles,
       devAuth,
       setDevAuth,
@@ -115,7 +118,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       logout,
       refresh,
     }),
-    [phase, user, role, userId, roles, devAuth, setDevAuth, setDevIdentity, completeLogin, logout, refresh],
+    [phase, user, role, userId, employeeId, roles, devAuth, setDevAuth, setDevIdentity, completeLogin, logout, refresh],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

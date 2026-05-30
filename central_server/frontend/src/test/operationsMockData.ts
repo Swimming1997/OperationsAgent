@@ -28,6 +28,12 @@ export const operationsSummary: JobQueueSummary = {
   stale_running_count: 2,
   stale_claimed_count: 1,
   legacy_pending_count: 5,
+  task_run_bucket_counts: {
+    active: 0,
+    needs_action: 0,
+    done: 1,
+  },
+  stuck_task_run_count: 1,
   by_agent: [],
 };
 
@@ -38,6 +44,11 @@ export const operationsTaskRuns: OpsTaskRunItem[] = [{
   trigger_type: 'manual',
   status: 'success',
   requested_by_user_id: 'supervisor-user',
+  requested_by_display_name: '演示主管',
+  owner_employee_id: 'employee-operator',
+  owner_employee_name: '运营小王',
+  executor_account_id: 'account-1',
+  executor_account_name: '小红书采集号',
   task_schedule_id: null,
   jobs_total: 1,
   jobs_pending: 0,
@@ -50,6 +61,7 @@ export const operationsTaskRuns: OpsTaskRunItem[] = [{
   updated_at: '2026-05-19T01:01:00Z',
   finished_at: '2026-05-19T01:01:00Z',
   has_active_jobs: false,
+  has_stuck_jobs: false,
 }];
 
 export const operationsJobs: OpsJobItem[] = [{
@@ -71,13 +83,36 @@ export const operationsJobs: OpsJobItem[] = [{
   finished_at: null,
   is_legacy: false,
   is_stale_running: true,
+  is_stale_claimed: false,
   payload_json: { content_id: 'content-1' },
+  result_summary_json: {},
+}, {
+  id: 'job-standalone-1',
+  task_run_id: null,
+  task_template_name: null,
+  job_type: 'detail_fetch',
+  status: 'pending',
+  priority: 50,
+  account_id: 'account-legacy',
+  local_agent_id: null,
+  claimed_by_agent_id: null,
+  claimed_by_agent_name: null,
+  retry_count: 0,
+  last_error_code: null,
+  last_error_message: null,
+  created_at: '2026-05-18T02:00:00Z',
+  started_at: null,
+  finished_at: null,
+  is_legacy: false,
+  is_stale_running: false,
+  is_stale_claimed: false,
+  payload_json: { content_id: 'content-standalone', manual_enqueue: true },
   result_summary_json: {},
 }];
 
 export const operationsTaskRunDetail: OpsTaskRunDetail = {
   ...operationsTaskRuns[0],
-  jobs: operationsJobs,
+  jobs: operationsJobs.filter((job) => job.task_run_id === operationsTaskRuns[0].id),
   queue_context: { message: '当前 Agent 正在执行其他任务，本次运行等待调度', pending_jobs_ahead: 3 },
 };
 
