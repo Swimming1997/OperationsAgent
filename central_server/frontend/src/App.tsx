@@ -116,6 +116,7 @@ function AuthenticatedApp() {
             params.set('job_id', jobId);
             changeRoute('operations', params);
           }}
+          onOpenRules={() => changeRoute('rules')}
         />
       )}
       {route === 'reference-library' && (
@@ -124,9 +125,10 @@ function AuthenticatedApp() {
           userId={userId}
           onOpenIntelligencePool={(contentId) => {
             const params = new URLSearchParams();
-            params.set('content_id', contentId);
+            if (contentId) params.set('content_id', contentId);
             changeRoute('intelligence', params);
           }}
+          onOpenRules={() => changeRoute('rules')}
         />
       )}
     </Shell>

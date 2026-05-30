@@ -5,7 +5,8 @@ from pydantic import Field, field_validator
 
 from intelligence_engine.domain.schemas import ApiModel
 
-VALID_INTELLIGENCE_SCENARIOS = frozenset({"pending", "leads", "hot", "watchlater", "in_library", "all"})
+SYSTEM_INTELLIGENCE_SCENARIOS = frozenset({"pending", "leads", "hot", "watchlater", "all"})
+CUSTOM_SCENARIO_PREFIX = "custom-"
 
 ADVANCED_INTELLIGENCE_FILTER_KEYS = frozenset(
     {
@@ -49,6 +50,7 @@ VALID_ROLLING_KEYS = frozenset({"discovered_after_days"})
 
 class IntelligenceScenarioRollingConfig(ApiModel):
     discovered_after_days: int | None = None
+    label: str | None = None
 
     @field_validator("discovered_after_days")
     @classmethod
@@ -56,6 +58,18 @@ class IntelligenceScenarioRollingConfig(ApiModel):
         if value is not None and value <= 0:
             raise ValueError("discovered_after_days must be positive")
         return value
+
+    @field_validator("label")
+    @classmethod
+    def validate_label(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        text = value.strip()
+        if not text:
+            return None
+        if len(text) > 32:
+            raise ValueError("label must be at most 32 characters")
+        return text
 
 
 class IntelligenceScenarioFilterUpsertRequest(ApiModel):

@@ -4,6 +4,7 @@ from intelligence_engine.domain.enums import Platform
 from intelligence_engine.services.task_materialization import TaskMaterializationService
 from intelligence_engine.storage.repositories.account_repository import AccountRepository
 from intelligence_engine.storage.repositories.product_repository import ProductRepository
+from tests.task_template_helpers import create_feed_template, materialize_for_account
 
 
 def _collector_account(db_session):
@@ -29,14 +30,6 @@ def test_operated_account_cannot_materialize_feed_collect(db_session):
     account = _collector_account(db_session)
     account.account_role = "operated_account"
     db_session.flush()
-    template = ProductRepository(db_session).create_task_template(
-        name="推荐流",
-        template_type="recommendation_feed_task",
-        platform=Platform.XHS.value,
-        account_id=account.id,
-        business_account_type_id=None,
-        config={"executor_account_id": account.id, "feed_type": "xhs_home_feed", "target_count": 5, "refresh_rounds": 1, "per_round_scroll_target": 5},
-        enabled=True,
-    )
+    template = create_feed_template(db_session, account, name="推荐流", target_count=5)
     with pytest.raises(ValueError, match="cannot run"):
-        TaskMaterializationService(db_session).materialize_template(template)
+        materialize_for_account(db_session, template, account.id)

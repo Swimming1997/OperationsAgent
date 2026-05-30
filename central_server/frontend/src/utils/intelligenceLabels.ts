@@ -58,7 +58,20 @@ const REFERENCE_LIBRARY_RATING_LABELS: Record<string, string> = {
 
 const SELECTION_SOURCE_LABELS: Record<string, string> = {
   manual: '我的选中',
-  ai: '系统自动',
+  ai: '规则自动',
+};
+
+const REFERENCE_LIBRARY_EVENT_LABELS: Record<string, string> = {
+  created: '入库',
+  updated: '更新',
+  manual_selected: '手动选中',
+  ai_re_evaluated: '规则重评',
+  archived: '移出对标库',
+  revoked: '撤回入库',
+  moved: '调整分类',
+  rated: '调整评级',
+  tagged: '更新标签',
+  noted: '更新备注',
 };
 
 export type ContentStatusBadge = {
@@ -116,6 +129,25 @@ export function labelReevaluateStatus(value: string | null | undefined): string 
   if (!value) return '-';
   return REEVALUATE_STATUS_LABELS[value] || value;
 }
+
+export function labelReferenceLibraryEventType(value: string | null | undefined): string {
+  if (!value) return '-';
+  return REFERENCE_LIBRARY_EVENT_LABELS[value] || value;
+}
+
+/** 情报入库弹窗等与作品库一致的库类型选项 */
+export const REFERENCE_LIBRARY_TYPE_FORM_OPTIONS = [
+  { value: 'lead', label: '获客库' },
+  { value: 'non_lead', label: '非获客库' },
+  { value: 'uncategorized', label: '待分类' },
+] as const;
+
+export const REFERENCE_LIBRARY_RATING_FORM_OPTIONS = [
+  { value: 'watching', label: '待观察' },
+  { value: 'poor', label: '差' },
+  { value: 'medium', label: '中' },
+  { value: 'good', label: '好' },
+] as const;
 
 export function isReferenceManualLocked(metadata: Record<string, unknown> | null | undefined): boolean {
   return Boolean(metadata?.selection_locked_by_manual);

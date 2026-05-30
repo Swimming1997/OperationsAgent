@@ -125,6 +125,58 @@ def test_scenario_filters_are_isolated_by_user(db_session):
     assert admin_get.json()["filters"]["min_like_count"] == "500"
 
 
+def test_create_custom_scenario_filter(db_session):
+    client = _client(db_session)
+    token, _user_id = _bootstrap_admin(client)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    put = client.put(
+        "/api/product/me/intelligence/scenario-filters/custom-abcd1234",
+        headers=headers,
+        json={
+            "filters": {"min_like_count": "50", "candidate_bucket": "lead_candidate"},
+            "rolling": {"label": "近7天高赞线索"},
+        },
+    )
+    assert put.status_code == 200, put.text
+    body = put.json()
+    assert body["scenario"] == "custom-abcd1234"
+    assert body["rolling"]["label"] == "近7天高赞线索"
+
+    listed = client.get("/api/product/me/intelligence/scenario-filters", headers=headers)
+    assert listed.status_code == 200
+    assert any(item["scenario"] == "custom-abcd1234" for item in listed.json()["items"])
+
+    deleted = client.delete("/api/product/me/intelligence/scenario-filters/custom-abcd1234", headers=headers)
+    assert deleted.status_code == 204
+
+
+def test_reject_custom_scenario_without_label(db_session):
+    client = _client(db_session)
+    token, _user_id = _bootstrap_admin(client)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    response = client.put(
+        "/api/product/me/intelligence/scenario-filters/custom-abcd1234",
+        headers=headers,
+        json={"filters": {"min_like_count": "50"}, "rolling": {}},
+    )
+    assert response.status_code == 400
+
+
+def test_reject_removed_in_library_scenario(db_session):
+    client = _client(db_session)
+    token, _user_id = _bootstrap_admin(client)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    response = client.put(
+        "/api/product/me/intelligence/scenario-filters/in_library",
+        headers=headers,
+        json={"filters": {"in_reference_library": "true"}, "rolling": {}},
+    )
+    assert response.status_code == 400
+
+
 def test_reject_quick_filter_keys(db_session):
     client = _client(db_session)
     token, _user_id = _bootstrap_admin(client)

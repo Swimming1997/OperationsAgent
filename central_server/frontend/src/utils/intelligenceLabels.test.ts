@@ -30,8 +30,8 @@ describe('intelligenceLabels', () => {
     expect(labelWorkflowStatus('assigned')).toBe('已分配');
   });
 
-  it('labels ai selection source as 系统自动', () => {
-    expect(labelSelectionSource('ai')).toBe('系统自动');
+  it('labels ai selection source as 规则自动', () => {
+    expect(labelSelectionSource('ai')).toBe('规则自动');
   });
 
   it('formats discovery position for home feed', () => {

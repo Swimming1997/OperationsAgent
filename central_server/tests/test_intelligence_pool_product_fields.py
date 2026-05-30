@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 
@@ -100,6 +100,18 @@ def _seed_content(db_session, *, account_id: str | None = None):
     return content
 
 
+def test_product_list_content_query_matches_title(db_session):
+    content = _seed_content(db_session)
+    client = _client(db_session)
+    hit = client.get("/api/intelligence/contents/product", params={"content_query": "SCI投稿"})
+    assert hit.status_code == 200, hit.text
+    assert any(row["content_id"] == content.id for row in hit.json()["items"])
+
+    legacy = client.get("/api/intelligence/contents/product", params={"business_keyword": "SCI投稿"})
+    assert legacy.status_code == 200, legacy.text
+    assert any(row["content_id"] == content.id for row in legacy.json()["items"])
+
+
 def test_product_list_returns_enriched_fields(db_session):
     content = _seed_content(db_session)
     response = _client(db_session).get("/api/intelligence/contents/product")
@@ -135,6 +147,91 @@ def test_bulk_status_marks_contents_discarded(db_session):
     assert payload["succeeded"][0]["workflow_status"] == "discarded"
 
 
+def test_content_query_finds_discard_bucket_title(db_session):
+    job = JobRepository(db_session).create_job(job_type=JobType.SEARCH_COLLECT, payload={"keywords": ["滨江"]})
+    candidate = FeedCandidateInput(
+        platform=Platform.XHS,
+        platform_content_id="pool-binjiang-1",
+        canonical_url="https://www.xiaohongshu.com/explore/pool-binjiang-1",
+        content_type=ContentType.IMAGE_TEXT,
+        title_or_summary="滨江好房推荐",
+        author_name="作者",
+        visible_like_count=10,
+        source_surface=SourceSurface.SEARCH,
+        feed_position=1,
+        discovered_at=utcnow(),
+        raw_payload={"search_keyword": "滨江"},
+    )
+    repo = ContentRepository(db_session)
+    content, *_ = repo.ingest_feed_candidate(job_id=job.id, account_id=None, candidate=candidate, enqueue_detail_job=False)
+    snapshot = repo.create_snapshot(
+        content_id=content.id,
+        account_id=None,
+        snapshot=DetailSnapshotInput(title="滨江好房推荐", body_text="正文", raw_payload={}),
+    )
+    content.latest_snapshot_id = snapshot.id
+    repo.evaluate_candidate(content_id=content.id, snapshot_id=snapshot.id)
+    decision = WorkflowRepository(db_session).latest_decision_for_content(content.id)
+    assert decision is not None
+    decision.candidate_bucket = CandidateBucket.DISCARD.value
+    db_session.flush()
+
+    client = _client(db_session)
+    default_list = client.get("/api/intelligence/contents/product")
+    assert any(row["content_id"] == content.id for row in default_list.json()["items"])
+
+    search = client.get("/api/intelligence/contents/product", params={"content_query": "滨江"})
+    assert search.status_code == 200
+    assert any(row["content_id"] == content.id for row in search.json()["items"])
+    hit = next(row for row in search.json()["items"] if row["content_id"] == content.id)
+    assert hit["candidate_bucket"] == "discard"
+    assert "滨江" in (hit["title"] or "")
+
+
+def test_content_query_applies_other_filters(db_session):
+    job = JobRepository(db_session).create_job(job_type=JobType.SEARCH_COLLECT, payload={"keywords": ["滨江"]})
+    old_discovered = utcnow() - timedelta(days=30)
+    candidate = FeedCandidateInput(
+        platform=Platform.XHS,
+        platform_content_id="pool-binjiang-old-1",
+        canonical_url="https://www.xiaohongshu.com/explore/pool-binjiang-old-1",
+        content_type=ContentType.IMAGE_TEXT,
+        title_or_summary="滨江老条目",
+        author_name="作者",
+        visible_like_count=10,
+        source_surface=SourceSurface.SEARCH,
+        feed_position=1,
+        discovered_at=old_discovered,
+        raw_payload={"search_keyword": "滨江"},
+    )
+    repo = ContentRepository(db_session)
+    content, *_ = repo.ingest_feed_candidate(job_id=job.id, account_id=None, candidate=candidate, enqueue_detail_job=False)
+    snapshot = repo.create_snapshot(
+        content_id=content.id,
+        account_id=None,
+        snapshot=DetailSnapshotInput(title="滨江老条目", body_text="正文", raw_payload={}),
+    )
+    content.latest_snapshot_id = snapshot.id
+    repo.evaluate_candidate(content_id=content.id, snapshot_id=snapshot.id)
+    decision = WorkflowRepository(db_session).latest_decision_for_content(content.id)
+    assert decision is not None
+    decision.candidate_bucket = CandidateBucket.DISCARD.value
+    db_session.flush()
+
+    future_after = (utcnow() + timedelta(days=1)).isoformat()
+    response = _client(db_session).get(
+        "/api/intelligence/contents/product",
+        params={
+            "content_query": "滨江",
+            "discovered_after": future_after,
+            "in_reference_library": False,
+            "platform": Platform.XHS.value,
+        },
+    )
+    assert response.status_code == 200
+    assert not any(row["content_id"] == content.id for row in response.json()["items"])
+
+
 def test_discarded_filter_keeps_discard_bucket_contents(db_session):
     content = _seed_content(db_session)
     WorkflowRepository(db_session).set_status(
@@ -156,6 +253,36 @@ def test_discarded_filter_keeps_discard_bucket_contents(db_session):
     response = _client(db_session).get(
         "/api/intelligence/contents/product",
         params={"workflow_status": "discarded"},
+    )
+
+    assert response.status_code == 200
+    assert any(item["content_id"] == content.id for item in response.json()["items"])
+
+
+def test_intelligence_filters_accept_status_and_bucket_unions(db_session):
+    content = _seed_content(db_session)
+    WorkflowRepository(db_session).set_status(
+        content_id=content.id,
+        status=ContentWorkflowStatus.DISCARDED,
+        user_id="admin-user",
+    )
+    db_session.add(
+        CandidateDecision(
+            content_id=content.id,
+            snapshot_id=content.latest_snapshot_id,
+            candidate_bucket=CandidateBucket.DISCARD.value,
+            decision_reason_json={"reason": "detail fetch rule reevaluated"},
+            evaluated_at=utcnow(),
+        )
+    )
+    db_session.flush()
+
+    response = _client(db_session).get(
+        "/api/intelligence/contents/product",
+        params={
+            "workflow_status": "pending_review,discarded",
+            "candidate_bucket": "lead_candidate,discard",
+        },
     )
 
     assert response.status_code == 200

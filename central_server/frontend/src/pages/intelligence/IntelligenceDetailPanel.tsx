@@ -5,8 +5,10 @@ import {
   ExternalLink,
   FilePlus2,
   Heart,
+  ChevronDown,
   Library,
   MessageCircle,
+  Pencil,
   RefreshCw,
   Scale,
   Send,
@@ -16,10 +18,15 @@ import { useEffect, useMemo, useState } from 'react';
 import { listEmployees } from '../../api/resources';
 import {
   canReevaluateReference,
+  ReferencePermissionHint,
   ReferenceRuleExplainSummary,
   ReevaluateResultPanel,
   type ReferenceExplainSnapshot,
 } from '../../components/ReferenceRuleExplain';
+import {
+  canRevokeOwnReferenceLibraryItem,
+  formatReferenceRevokeRemaining,
+} from '../../utils/intelligencePermissions';
 import { SafeImage } from '../../components/SafeImage';
 import { coverSrc } from '../../utils/mediaUrl';
 import { EmptyState, ErrorState, LoadingState } from '../../components/Status';
@@ -40,21 +47,10 @@ import {
   labelReferenceLibraryRating,
   labelReferenceLibraryType,
   labelSourceSurface,
+  REFERENCE_LIBRARY_RATING_FORM_OPTIONS,
+  REFERENCE_LIBRARY_TYPE_FORM_OPTIONS,
 } from '../../utils/intelligenceLabels';
 import { formatMetric } from '../../utils/formatMetric';
-const LIBRARY_TYPE_OPTIONS = [
-  { value: 'lead', label: '获客库' },
-  { value: 'non_lead', label: '非获客库' },
-  { value: 'uncategorized', label: '待分类' },
-];
-
-const RATING_OPTIONS = [
-  { value: 'watching', label: '待观察' },
-  { value: 'poor', label: '差' },
-  { value: 'medium', label: '中' },
-  { value: 'good', label: '好' },
-];
-
 function defaultLibraryTypeForBucket(bucket: string | null | undefined): 'lead' | 'non_lead' | 'uncategorized' {
   if (bucket === 'lead_candidate') return 'lead';
   if (bucket === 'content_candidate') return 'non_lead';
@@ -74,6 +70,7 @@ function formatCommentTime(value: string | null | undefined) {
 type Props = {
   role: Role;
   userId: string;
+  readOnly?: boolean;
   selected: IntelligenceItem | null;
   detail: ProductDetail | null;
   loading: boolean;
@@ -97,7 +94,15 @@ type Props = {
     selected_reason?: string;
     manual_tags?: string[];
   }) => Promise<void>;
+  onUpdateReferenceLibrary: (payload: {
+    library_type?: string;
+    rating?: string;
+    selected_reason?: string;
+    note?: string;
+  }) => Promise<void>;
+  onRevokeReferenceLibrary?: () => Promise<void>;
   onReevaluate: () => Promise<void>;
+  onOpenRules?: () => void;
   onClearReevaluateResults: () => void;
   onApplyTagFilter: (tag: string) => void;
   onOpenOperationsJob?: () => void;
@@ -106,6 +111,7 @@ type Props = {
 export function IntelligenceDetailPanel({
   role,
   userId,
+  readOnly = false,
   selected,
   detail,
   loading,
@@ -124,7 +130,10 @@ export function IntelligenceDetailPanel({
   onAssign,
   onAddNote,
   onCustomLibrary,
+  onUpdateReferenceLibrary,
+  onRevokeReferenceLibrary,
   onReevaluate,
+  onOpenRules,
   onClearReevaluateResults,
   onApplyTagFilter,
   onOpenOperationsJob,
@@ -132,6 +141,7 @@ export function IntelligenceDetailPanel({
   const [moreOpen, setMoreOpen] = useState(false);
   const [customOpen, setCustomOpen] = useState(false);
   const [libraryDecisionOpen, setLibraryDecisionOpen] = useState(false);
+  const [libraryEditOpen, setLibraryEditOpen] = useState(false);
   const [decisionLibraryType, setDecisionLibraryType] = useState<'lead' | 'non_lead' | 'uncategorized'>('non_lead');
   const [inlineReason, setInlineReason] = useState('');
   const [manualTagInput, setManualTagInput] = useState('');
@@ -141,12 +151,26 @@ export function IntelligenceDetailPanel({
   const [libraryType, setLibraryType] = useState('uncategorized');
   const [libraryRating, setLibraryRating] = useState('watching');
   const [libraryReason, setLibraryReason] = useState('');
+  const [libraryNote, setLibraryNote] = useState('');
+  const [savingLibrary, setSavingLibrary] = useState(false);
   const [submittingFetch, setSubmittingFetch] = useState<'detail' | 'comment' | null>(null);
 
-  const canReevaluate = canReevaluateReference(role);
-  const canAssign = role === 'admin' || role === 'supervisor';
+  const canReevaluate = !readOnly && canReevaluateReference(role);
+  const canAssign = !readOnly && (role === 'admin' || role === 'supervisor');
+  const canWrite = !readOnly;
   const inLibrary = Boolean(selected?.in_reference_library);
   const refItem = detail?.reference_library_items?.[0];
+  const canRevokeLibrary =
+    Boolean(refItem && onRevokeReferenceLibrary) && canRevokeOwnReferenceLibraryItem(role, refItem, userId);
+  const revokeRemaining = refItem ? formatReferenceRevokeRemaining(refItem) : null;
+
+  useEffect(() => {
+    if (!refItem) return;
+    setLibraryType(refItem.library_type || 'uncategorized');
+    setLibraryRating(refItem.rating || 'watching');
+    setLibraryReason(refItem.selected_reason || '');
+    setLibraryNote(refItem.note || '');
+  }, [refItem?.id, refItem?.library_type, refItem?.rating, refItem?.selected_reason, refItem?.note]);
   const badge = selected ? deriveContentStatusBadge(selected) : null;
   const hasSuccessfulDetailFetch = detail?.data_status === 'detail_ready' || detail?.data_status === 'comments_ready';
   const hasSuccessfulCommentFetch = detail?.data_status === 'comments_ready' || Boolean(detail?.comments.length);
@@ -166,6 +190,7 @@ export function IntelligenceDetailPanel({
   useEffect(() => {
     setDecisionLibraryType(defaultLibraryTypeForBucket(detail?.latest_candidate_decision?.candidate_bucket || selected?.candidate_bucket));
     setLibraryDecisionOpen(false);
+    setLibraryEditOpen(false);
     setInlineReason('');
   }, [detail?.identity.id, detail?.latest_candidate_decision?.candidate_bucket, selected?.candidate_bucket]);
 
@@ -258,12 +283,14 @@ export function IntelligenceDetailPanel({
     <aside className="detail-panel">
       <div className="detail-top-bar">
         <div className="panel-title">内容详情</div>
-        <button type="button" className="secondary detail-more-button" onClick={() => setMoreOpen((value) => !value)}>
-          {moreOpen ? '收起更多' : '更多操作'}
-        </button>
+        {canWrite ? (
+          <button type="button" className="secondary detail-more-button" onClick={() => setMoreOpen((value) => !value)}>
+            {moreOpen ? '收起更多' : '更多操作'}
+          </button>
+        ) : null}
       </div>
       <div className="detail-body">
-        {moreOpen && (
+        {canWrite && moreOpen && (
           <div className="more-panel detail-more-menu" data-testid="intelligence-more-panel">
             <div className="action-strip">
               <button
@@ -358,9 +385,9 @@ export function IntelligenceDetailPanel({
               <span className="muted-hint">数据层：{labelDataStatus(detail.data_status)}</span>
             </div>
 
-            {canReevaluate && (
+            <ReferenceRuleExplainSummary snapshot={explainSnapshot} onOpenRules={onOpenRules} />
+            {canReevaluate ? (
               <>
-                <ReferenceRuleExplainSummary snapshot={explainSnapshot} />
                 <div className="action-strip">
                   <button
                     type="button"
@@ -374,64 +401,68 @@ export function IntelligenceDetailPanel({
                 </div>
                 <ReevaluateResultPanel results={reevaluateResults} onClear={onClearReevaluateResults} />
               </>
-            )}
+            ) : canWrite ? (
+              <ReferencePermissionHint role={role} action="reevaluate" />
+            ) : null}
 
-            <div className="action-strip">
-              <button type="button" className="secondary" onClick={onArchive}>
-                <Archive size={14} />
-                归档
-              </button>
-            </div>
-
-            <button type="button" className="secondary linkish" onClick={() => setCustomOpen((value) => !value)}>
-              {customOpen ? '收起高级入库' : '高级入库'}
-            </button>
-            {customOpen && !inLibrary && (
-              <div className="detail-section">
-                <select value={libraryType} onChange={(event) => setLibraryType(event.target.value)}>
-                  {LIBRARY_TYPE_OPTIONS.map((item) => (
-                    <option key={item.value} value={item.value}>
-                      {item.label}
-                    </option>
-                  ))}
-                </select>
-                <input
-                  value={libraryReason}
-                  onChange={(event) => setLibraryReason(event.target.value)}
-                  placeholder="入库原因"
-                />
-                <select value={libraryRating} onChange={(event) => setLibraryRating(event.target.value)}>
-                  {RATING_OPTIONS.map((item) => (
-                    <option key={item.value} value={item.value}>
-                      {item.label}
-                    </option>
-                  ))}
-                </select>
-                <button
-                  type="button"
-                  onClick={() =>
-                    onCustomLibrary({
-                      library_type: libraryType,
-                      rating: libraryRating,
-                      selected_reason: libraryReason || undefined,
-                      manual_tags: manualTagInput
-                        .split(/[,，]/)
-                        .map((item) => item.trim())
-                        .filter(Boolean),
-                    })
-                  }
-                >
-                  <Library size={14} />
-                  高级入库
+            {canWrite ? (
+              <>
+                <div className="action-strip">
+                  <button type="button" className="secondary" onClick={onArchive}>
+                    <Archive size={14} />
+                    归档
+                  </button>
+                </div>
+                <button type="button" className="secondary linkish" onClick={() => setCustomOpen((value) => !value)}>
+                  {customOpen ? '收起高级入库' : '高级入库'}
                 </button>
-              </div>
-            )}
-
-            <textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="添加处理备注" />
-            <button type="button" onClick={() => note.trim() && onAddNote(note.trim())}>
-              <FilePlus2 size={14} />
-              添加备注
-            </button>
+                {customOpen && !inLibrary && (
+                  <div className="detail-section">
+                    <select value={libraryType} onChange={(event) => setLibraryType(event.target.value)}>
+                      {REFERENCE_LIBRARY_TYPE_FORM_OPTIONS.map((item) => (
+                        <option key={item.value} value={item.value}>
+                          {item.label}
+                        </option>
+                      ))}
+                    </select>
+                    <input
+                      value={libraryReason}
+                      onChange={(event) => setLibraryReason(event.target.value)}
+                      placeholder="入库原因"
+                    />
+                    <select value={libraryRating} onChange={(event) => setLibraryRating(event.target.value)}>
+                      {REFERENCE_LIBRARY_RATING_FORM_OPTIONS.map((item) => (
+                        <option key={item.value} value={item.value}>
+                          {item.label}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onCustomLibrary({
+                          library_type: libraryType,
+                          rating: libraryRating,
+                          selected_reason: libraryReason || undefined,
+                          manual_tags: manualTagInput
+                            .split(/[,，]/)
+                            .map((item) => item.trim())
+                            .filter(Boolean),
+                        })
+                      }
+                    >
+                      <Library size={14} />
+                      高级入库
+                    </button>
+                  </div>
+                )}
+                <textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="添加处理备注" />
+                <button type="button" onClick={() => note.trim() && onAddNote(note.trim())}>
+                  <FilePlus2 size={14} />
+                  添加备注
+                </button>
+              </>
+            ) : null}
           </div>
         )}
 
@@ -450,7 +481,12 @@ export function IntelligenceDetailPanel({
             {badge ? <b className={`tag status-badge status-${badge.tone}`}>{badge.label}</b> : null}
           </div>
 
-          <SafeImage src={coverSrc(detail.latest_snapshot) ?? coverSrc(selected)} className="detail-cover xhs-note-cover" placeholderClassName="detail-cover-placeholder xhs-note-cover-placeholder" />
+          <SafeImage
+            src={coverSrc(detail.latest_snapshot) ?? coverSrc(selected)}
+            className="detail-cover"
+            frameClassName="cover-media-frame cover-media-frame-detail"
+            placeholderClassName="detail-cover-placeholder"
+          />
 
           <div className="xhs-note-copy">
             <div className="detail-title">{detail.latest_snapshot?.title || selected.title || '未命名内容'}</div>
@@ -538,28 +574,144 @@ export function IntelligenceDetailPanel({
         </article>
 
         <div className="detail-sticky-actions">
-          {inLibrary ? (
-            <div className="primary-actions">
-              <button
-                type="button"
-                className="primary-cta"
-                onClick={() =>
-                  onOpenReferenceLibrary(
-                    selected.content_id,
-                    refItem?.id,
-                  )
-                }
-              >
-                <ExternalLink size={14} />
-                在对标库中编辑
-              </button>
-              {refItem && (
-                <span className="muted-hint">
-                  {labelReferenceLibraryType(refItem.library_type)} · {labelReferenceLibraryRating(refItem.rating)}
-                </span>
-              )}
+          {inLibrary && refItem ? (
+            <div
+              className={`detail-section library-quick-edit${libraryEditOpen && canWrite ? ' library-quick-edit--expanded' : ''}`}
+              data-testid="library-quick-edit"
+            >
+              {!canWrite || !libraryEditOpen ? (
+                <div className="library-status-compact" data-testid="library-status-compact">
+                  <div className="library-status-compact-main">
+                    <span className="library-status-badge">已入对标库</span>
+                    <span className="muted-hint">
+                      {labelReferenceLibraryType(refItem.library_type)} · {labelReferenceLibraryRating(refItem.rating)}
+                      {refItem.selected_reason ? ` · ${refItem.selected_reason}` : ''}
+                    </span>
+                  </div>
+                  <div className="action-strip compact">
+                    {canWrite ? (
+                      <button
+                        type="button"
+                        className="secondary"
+                        data-testid="library-edit-toggle"
+                        onClick={() => setLibraryEditOpen(true)}
+                      >
+                        <Pencil size={14} />
+                        编辑
+                      </button>
+                    ) : null}
+                    <button
+                      type="button"
+                      className="secondary"
+                      onClick={() => onOpenReferenceLibrary(selected.content_id, refItem.id)}
+                    >
+                      <ExternalLink size={14} />
+                      在作品库打开
+                    </button>
+                    {canWrite && canRevokeLibrary ? (
+                      <button
+                        type="button"
+                        className="secondary"
+                        data-testid="revoke-reference-library-btn"
+                        onClick={() => void onRevokeReferenceLibrary?.()}
+                      >
+                        撤回入库
+                      </button>
+                    ) : canWrite && role === 'operator' ? (
+                      <ReferencePermissionHint role={role} action="revoke" />
+                    ) : null}
+                  </div>
+                  {canWrite && revokeRemaining && role === 'operator' ? (
+                    <span className="muted-hint library-revoke-hint">撤回剩余：{revokeRemaining}</span>
+                  ) : null}
+                </div>
+              ) : null}
+              {canWrite && libraryEditOpen ? (
+                <>
+                  <div className="library-quick-edit-head">
+                    <b>编辑对标库信息</b>
+                    <button
+                      type="button"
+                      className="ghost"
+                      aria-label="收起编辑"
+                      onClick={() => setLibraryEditOpen(false)}
+                    >
+                      <ChevronDown size={16} />
+                      收起
+                    </button>
+                  </div>
+                  <div className="library-quick-edit-grid">
+                    <label>
+                      库类型
+                      <select value={libraryType} onChange={(event) => setLibraryType(event.target.value)}>
+                        {REFERENCE_LIBRARY_TYPE_FORM_OPTIONS.map((item) => (
+                          <option key={item.value} value={item.value}>
+                            {item.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      评级
+                      <select value={libraryRating} onChange={(event) => setLibraryRating(event.target.value)}>
+                        {REFERENCE_LIBRARY_RATING_FORM_OPTIONS.map((item) => (
+                          <option key={item.value} value={item.value}>
+                            {item.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+                  <input
+                    value={libraryReason}
+                    onChange={(event) => setLibraryReason(event.target.value)}
+                    placeholder="入库原因（可选）"
+                  />
+                  <textarea
+                    value={libraryNote}
+                    onChange={(event) => setLibraryNote(event.target.value)}
+                    placeholder="备注（可选）"
+                    rows={2}
+                  />
+                  <div className="action-strip">
+                    <button
+                      type="button"
+                      className="primary-cta"
+                      disabled={savingLibrary}
+                      onClick={async () => {
+                        setSavingLibrary(true);
+                        try {
+                          await onUpdateReferenceLibrary({
+                            library_type: libraryType,
+                            rating: libraryRating,
+                            selected_reason: libraryReason || undefined,
+                            note: libraryNote || undefined,
+                          });
+                          setLibraryEditOpen(false);
+                        } finally {
+                          setSavingLibrary(false);
+                        }
+                      }}
+                    >
+                      <Check size={14} />
+                      保存
+                    </button>
+                    <button type="button" className="secondary" onClick={() => setLibraryEditOpen(false)}>
+                      取消
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary"
+                      onClick={() => onOpenReferenceLibrary(selected.content_id, refItem.id)}
+                    >
+                      <ExternalLink size={14} />
+                      在作品库打开
+                    </button>
+                  </div>
+                </>
+              ) : null}
             </div>
-          ) : (
+          ) : canWrite ? (
             <div className="primary-actions intelligence-primary-actions" data-testid="intelligence-primary-actions">
               <button type="button" className="primary-cta" onClick={() => setLibraryDecisionOpen((value) => !value)}>
                 <Library size={14} />
@@ -574,17 +726,19 @@ export function IntelligenceDetailPanel({
                 不合适
               </button>
             </div>
-          )}
+          ) : readOnly ? (
+            <p className="muted-hint permission-hint">只读模式：可查看详情，入库与状态变更请联系运营或主管。</p>
+          ) : null}
         </div>
 
-        {libraryDecisionOpen && !inLibrary && (
+        {canWrite && libraryDecisionOpen && !inLibrary && (
           <div className="inline-modal" data-testid="library-reason-modal">
             <label>入库位置</label>
             <select
               value={decisionLibraryType}
               onChange={(event) => setDecisionLibraryType(event.target.value as 'lead' | 'non_lead' | 'uncategorized')}
             >
-              <option value="non_lead">内容库</option>
+              <option value="non_lead">非获客库</option>
               <option value="lead">获客库</option>
               <option value="uncategorized">待分类</option>
             </select>

@@ -25,7 +25,7 @@ type Props = {
 const navItems = [
   { route: 'intelligence', label: '情报中心', icon: Database },
   { route: 'reference-library', label: '对标作品库', icon: Library },
-  { route: 'tasks', label: '情报任务中心', icon: ClipboardList },
+  { route: 'tasks', label: '任务模板', icon: ClipboardList },
   { route: 'operations', label: '运行中心', icon: Activity },
   { route: 'accounts', label: '账号管理', icon: UsersRound },
   { route: 'benchmarks', label: '对标账号管理', icon: BarChart3 },

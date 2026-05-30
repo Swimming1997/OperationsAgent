@@ -21,6 +21,7 @@ export type IntelligenceFilters = {
   workflow_status?: string;
   assigned_to_user_id?: string;
   business_keyword?: string;
+  content_query?: string;
   discovered_after?: string;
   discovered_before?: string;
   data_status?: string;
@@ -49,8 +50,12 @@ export type ReferenceLibraryFilters = {
   selection_source?: string;
   rating?: string;
   usage_status?: string;
+  search_keyword?: string;
+  content_query?: string;
   sort_by?: string;
   sort_order?: string;
+  page?: string;
+  page_size?: string;
 };
 
 function query(filters: Record<string, string | undefined>) {
@@ -217,6 +222,14 @@ export function updateReferenceLibraryItem(
 
 export function archiveReferenceLibraryItem(role: Role, itemId: string, userId?: string) {
   return apiRequest<ReferenceLibraryItem>(`/api/reference-library/items/${itemId}/archive`, {
+    method: 'POST',
+    role,
+    userId,
+  });
+}
+
+export function revokeReferenceLibraryItem(role: Role, itemId: string, userId?: string) {
+  return apiRequest<ReferenceLibraryItem>(`/api/reference-library/items/${itemId}/revoke`, {
     method: 'POST',
     role,
     userId,

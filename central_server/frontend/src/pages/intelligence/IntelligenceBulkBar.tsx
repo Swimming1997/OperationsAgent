@@ -29,7 +29,7 @@ export function IntelligenceBulkBar({
       <span>已选 {selectedCount}</span>
       <button type="button" disabled={disabled} onClick={onBulkContentLibrary}>
         <CheckSquare size={14} />
-        批量入内容库
+        批量入非获客库
       </button>
       <button type="button" disabled={disabled} onClick={onBulkLeadLibrary}>
         <CheckSquare size={14} />

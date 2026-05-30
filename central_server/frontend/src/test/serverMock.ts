@@ -5,6 +5,7 @@ import { operationsJobDetail, operationsJobs, operationsSummary, operationsTaskR
 type FetchMockConfig = {
   blockedReadiness?: boolean;
   failRun?: boolean;
+  taskDetail?: typeof taskDetail;
   orgUsers?: Array<Record<string, unknown>>;
   orgEmployees?: Array<Record<string, unknown>>;
   authUserId?: string;
@@ -17,6 +18,7 @@ type FetchMockConfig = {
 export function installFetchMock(config: FetchMockConfig = {}) {
   const requests: Array<{ url: string; init?: RequestInit }> = [];
   const scenarioFilterStore = new Map<string, Record<string, unknown>>();
+  const activeTaskDetail = config.taskDetail ?? taskDetail;
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     requests.push({ url, init });
@@ -148,6 +150,9 @@ export function installFetchMock(config: FetchMockConfig = {}) {
     }
     if (url.includes('/api/product/accounts')) return json(init?.method === 'PATCH' || init?.method === 'POST' ? platformAccounts[0] : platformAccounts);
     if (url.includes('/api/business-account-types/type-1/rule-sets')) return json([{ id: 'bind-1', business_account_type_id: 'type-1', rule_set_id: 'rule-set-1', rule_set_name: 'SCI 关键词', is_default: false }]);
+    if (url.includes('/api/business-account-types/type-1/benchmark-groups')) {
+      return json([{ id: 'gbind-1', business_account_type_id: 'type-1', benchmark_group_id: 'group-1', benchmark_group_name: '论文对标组' }]);
+    }
     if (url.includes('/api/business-account-types') && init?.method === 'DELETE') return new Response(null, { status: 204 });
     if (url.includes('/api/business-account-types')) return json(init?.method === 'PATCH' || init?.method === 'POST' ? businessTypes[0] : businessTypes);
     if (url.includes('/api/product/me/local-agents/resolve-discover') && init?.method === 'POST') {
@@ -234,7 +239,29 @@ export function installFetchMock(config: FetchMockConfig = {}) {
       }
       return json({ items: Array.from(scenarioFilterStore.values()) });
     }
-    if (url.includes('/api/intelligence/contents/product')) return json(intelligenceList);
+    if (url.includes('/api/intelligence/contents/product')) {
+      const parsed = new URL(url, 'http://localhost');
+      const page = Math.max(1, Number(parsed.searchParams.get('page') || '1'));
+      const pageSize = Math.max(1, Number(parsed.searchParams.get('page_size') || '20'));
+      const contentQuery =
+        parsed.searchParams.get('content_query')?.trim() ||
+        parsed.searchParams.get('business_keyword')?.trim();
+      let items = [...intelligenceList.items];
+      if (contentQuery === '__no_match__') {
+        items = [];
+      } else if (contentQuery) {
+        const lowered = contentQuery.toLowerCase();
+        items = items.filter(
+          (item) =>
+            item.title?.toLowerCase().includes(lowered) ||
+            item.author_name?.toLowerCase().includes(lowered),
+        );
+      }
+      const total = contentQuery === '__no_match__' ? 0 : Math.max(25, items.length);
+      const start = (page - 1) * pageSize;
+      const paged = items.length > 0 ? items.slice(start, start + pageSize) : [];
+      return json({ items: paged, page, page_size: pageSize, total });
+    }
     if (url.includes('/api/intelligence/data-quality/overview')) {
       return json({
         generated_at: '2026-05-19T01:00:00Z',
@@ -285,12 +312,35 @@ export function installFetchMock(config: FetchMockConfig = {}) {
     if (url.includes('/api/reference-library/items/ref-1/events')) return json([
       { id: 'event-ref-1', library_item_id: 'ref-1', content_id: 'content-1', event_type: 'created', user_id: 'supervisor-user', employee_id: null, event_payload: {}, created_at: '2026-05-19T01:00:00Z' },
     ]);
+    if (url.includes('/api/reference-library/items/ref-1/revoke')) return json({ ...referenceLibraryItems[0], status: 'archived', usage_status: 'archived' });
     if (url.includes('/api/reference-library/items/ref-1/archive')) return json({ ...referenceLibraryItems[0], status: 'archived', usage_status: 'archived' });
     if (url.includes('/api/reference-library/items/ref-1') && init?.method === 'PATCH') {
       const body = init.body ? JSON.parse(String(init.body)) : {};
       return json({ ...referenceLibraryItems[0], ...body });
     }
-    if (url.includes('/api/reference-library/items')) return json({ items: referenceLibraryItems, page: 1, page_size: 20, total: referenceLibraryItems.length });
+    if (url.includes('/api/reference-library/items') && !url.includes('/items/')) {
+      const parsed = new URL(url, 'http://localhost');
+      const page = Math.max(1, Number(parsed.searchParams.get('page') || '1'));
+      const pageSize = Math.max(1, Number(parsed.searchParams.get('page_size') || '20'));
+      const contentQuery =
+        parsed.searchParams.get('content_query')?.trim() ||
+        parsed.searchParams.get('search_keyword')?.trim();
+      let items = [...referenceLibraryItems];
+      if (contentQuery === '__no_match__') {
+        items = [];
+      } else if (contentQuery) {
+        const lowered = contentQuery.toLowerCase();
+        items = items.filter(
+          (item) =>
+            item.title?.toLowerCase().includes(lowered) ||
+            item.author_name?.toLowerCase().includes(lowered),
+        );
+      }
+      const total = contentQuery === '__no_match__' ? 0 : Math.max(25, items.length);
+      const start = (page - 1) * pageSize;
+      const paged = items.length > 0 ? items.slice(start, start + pageSize) : [];
+      return json({ items: paged, page, page_size: pageSize, total });
+    }
     if (url.includes('/api/intelligence/contents/content-1/product-detail')) return json(productDetail);
     if (url.includes('/api/intelligence/contents/content-1/assign')) return json(productDetail.workflow_state);
     if (url.includes('/api/intelligence/contents/content-1/select')) return json({ ...productDetail.workflow_state, workflow_status: 'selected' });
@@ -298,17 +348,20 @@ export function installFetchMock(config: FetchMockConfig = {}) {
     if (url.includes('/api/intelligence/contents/content-1/archive')) return json({ ...productDetail.workflow_state, workflow_status: 'archived' });
     if (url.includes('/api/intelligence/contents/content-1/notes')) return json(productDetail.notes[0]);
     if (url.includes('/api/task-templates/list')) return json(taskList);
-    if (url.includes('/api/task-templates/task-1/readiness')) return json(config.blockedReadiness ? readinessBlocked : readinessReady);
+    if (url.includes('/api/task-templates/task-1/run-readiness')) return json(config.blockedReadiness ? readinessBlocked : readinessReady);
+    if (url.includes('/api/task-templates/task-1/readiness')) return json(readinessReady);
+    if (url.includes('/api/task-templates/task-1/schedules')) return json([]);
     if (url.includes('/api/task-templates/task-1/runs')) return json({ items: [taskRun] });
     if (url.includes('/api/task-runs/run-1')) return json(taskRun);
     if (url.includes('/api/task-templates/task-1/run')) {
       if (config.failRun) return jsonError({ detail: readinessBlocked }, 409);
       return json({ task_run_id: 'run-1', task_template_id: 'task-1', jobs_created: 1, jobs: [{ job_id: 'job-1', job_type: 'feed_collect', status: 'pending' }], readiness: readinessReady });
     }
-    if (url.includes('/api/task-templates/task-1')) return json(taskDetail);
-    if (url.includes('/api/task-templates/recommendation-feed')) return json(taskDetail);
-    if (url.includes('/api/task-templates/creator-monitor')) return json({ ...taskDetail, id: 'task-2', template_type: 'creator_monitor_task', typed_payload: { executor_account_id: 'account-1', benchmark_group_id: 'group-1', auto_detail_fetch: true } });
-    if (url.includes('/api/task-templates/keyword-search')) return json({ ...taskDetail, id: 'task-3', template_type: 'keyword_search_task', typed_payload: { executor_account_id: 'account-1', platform: 'xhs', keywords: ['论文'], max_items: 50 } });
+    if (url.includes('/api/task-templates/task-1') && init?.method === 'DELETE') return new Response(null, { status: 204 });
+    if (url.includes('/api/task-templates/task-1')) return json(activeTaskDetail);
+    if (url.includes('/api/task-templates/recommendation-feed')) return json(activeTaskDetail);
+    if (url.includes('/api/task-templates/creator-monitor')) return json({ ...activeTaskDetail, id: 'task-2', template_type: 'creator_monitor_task', typed_payload: { benchmark_group_id: 'group-1', auto_detail_fetch: true } });
+    if (url.includes('/api/task-templates/keyword-search')) return json({ ...activeTaskDetail, id: 'task-3', template_type: 'keyword_search_task', typed_payload: { platform: 'xhs', keywords: ['论文'], max_items: 50 } });
     if (url.includes('/api/operations/queue-summary')) return json(operationsSummary);
     if (url.includes('/api/operations/task-runs/run-1')) return json(operationsTaskRunDetail);
     if (url.includes('/api/operations/task-runs')) return json({ items: operationsTaskRuns, total: operationsTaskRuns.length, page: 1, page_size: 30 });

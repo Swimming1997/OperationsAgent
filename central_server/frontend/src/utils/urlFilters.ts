@@ -8,6 +8,7 @@ const INTELLIGENCE_KEYS: (keyof IntelligenceFilters)[] = [
   'workflow_status',
   'assigned_to_user_id',
   'business_keyword',
+  'content_query',
   'discovered_after',
   'discovered_before',
   'data_status',
@@ -26,6 +27,8 @@ const INTELLIGENCE_KEYS: (keyof IntelligenceFilters)[] = [
   'reference_rating',
   'sort_by',
   'sort_order',
+  'page',
+  'page_size',
 ];
 
 const REFERENCE_KEYS: (keyof ReferenceLibraryFilters)[] = [
@@ -34,8 +37,12 @@ const REFERENCE_KEYS: (keyof ReferenceLibraryFilters)[] = [
   'selection_source',
   'rating',
   'usage_status',
+  'search_keyword',
+  'content_query',
   'sort_by',
   'sort_order',
+  'page',
+  'page_size',
 ];
 
 function readRecord(params: URLSearchParams, keys: readonly string[]): Record<string, string> {

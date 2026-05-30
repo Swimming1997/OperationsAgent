@@ -1,6 +1,6 @@
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { installFetchMock } from '../test/serverMock';
 import { BenchmarkLibraryPage } from './BenchmarkLibraryPage';
 
@@ -18,15 +18,21 @@ describe('BenchmarkLibraryPage', () => {
     expect(await screen.findByTestId('benchmark-library-table')).toBeInTheDocument();
   });
 
-  it('shows disabled pending action hints', async () => {
+  it('shows edit panel and pagination summary', async () => {
     installFetchMock();
-    const user = userEvent.setup();
     render(<BenchmarkLibraryPage role="supervisor" userId="supervisor-user" />);
-    const table = await screen.findByTestId('benchmark-library-table');
-    await user.click(within(table).getAllByRole('button')[0]);
-    const rewrite = await screen.findByRole('button', { name: /仿写/ });
-    expect(rewrite).toBeDisabled();
-    expect(rewrite).toHaveAttribute('title', 'P1 仿写中心上线后开放');
+    expect(await screen.findByText(/共 \d+ 条/)).toBeInTheDocument();
+    expect(await screen.findByTestId('benchmark-edit-panel')).toBeInTheDocument();
+  });
+
+  it('shows empty state CTA when list is empty', async () => {
+    installFetchMock();
+    window.history.replaceState({}, '', '/reference-library?content_query=__no_match__');
+    const onOpen = vi.fn();
+    render(<BenchmarkLibraryPage role="supervisor" userId="supervisor-user" onOpenIntelligencePool={onOpen} />);
+    const cta = await screen.findByTestId('benchmark-empty-cta');
+    await userEvent.click(cta);
+    expect(onOpen).toHaveBeenCalled();
   });
 
   it('shows collected comments in selected benchmark detail', async () => {

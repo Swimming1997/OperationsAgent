@@ -17,8 +17,8 @@
 | 字段 | 类型 | 必填 | 允许 null | 说明 |
 |---|---|---:|---:|---|
 | name | string | 是 | 否 | 任务模板名称 |
+| business_account_type_id | string | 是 | 否 | 业务类型 ID |
 | enabled | boolean | 否 | 否 | 是否启用，默认 true |
-| executor_account_id | string | 是 | 否 | 执行平台账号 ID |
 | feed_type | enum | 是 | 否 | 当前主要使用 xhs_home_feed |
 | target_count | integer | 否 | 否 | 1-500，默认 50 |
 | refresh_rounds | integer | 否 | 否 | 1-20，默认 2 |
@@ -44,7 +44,7 @@
 |---|---|---:|---:|---|
 | name | string | 是 | 否 | 任务模板名称 |
 | enabled | boolean | 否 | 否 | 是否启用，默认 true |
-| executor_account_id | string | 是 | 否 | 执行平台账号 ID |
+| business_account_type_id | string | 是 | 否 | 业务类型 ID |
 | benchmark_group_id | string | 是 | 否 | 对标账号组 ID |
 | auto_detail_fetch | boolean | 否 | 否 | 是否后续自动补详情，默认 true |
 | behavior_profile_id | string | 否 | 是 | 行为策略 |
@@ -67,7 +67,7 @@
 |---|---|---:|---:|---|
 | name | string | 是 | 否 | 任务模板名称 |
 | enabled | boolean | 否 | 否 | 是否启用，默认 true |
-| executor_account_id | string | 是 | 否 | 执行平台账号 ID |
+| business_account_type_id | string | 是 | 否 | 业务类型 ID |
 | platform | enum | 是 | 否 | 平台，当前前端只启用 xhs |
 | keywords | string[] | 是 | 否 | 搜索关键词，不能为空 |
 | max_items | integer | 否 | 否 | 1-500，默认 50 |
@@ -83,6 +83,22 @@
 通用列表接口：
 
 `GET /api/task-templates/list`
+
+列表项额外字段：`business_account_type_name`、`created_by_display_name`、`permissions`（`can_edit` / `can_run` / `can_schedule`）。
+
+### 运行与就绪
+
+- `GET /api/task-templates/{template_id}/readiness`：模板配置就绪（不含执行账号）
+- `GET /api/task-templates/{template_id}/run-readiness?executor_account_id=`：选定账号后的运行就绪
+- `POST /api/task-templates/{template_id}/run`：body `{ "executor_account_id": "..." }`（必填）
+
+### 定时调度
+
+- `POST /api/task-schedules`：body 含 `task_template_id`、`executor_account_id`、`schedule_type`、`interval_seconds` 等
+- `PATCH /api/task-schedules/{schedule_id}`：可更新 `executor_account_id` / `enabled` 等
+- `GET /api/task-templates/{template_id}/schedules`：某模板下的调度列表
+
+operator 仅可编辑自己创建的模板；可为自有模板创建调度，且 `executor_account_id` 必须是本人有权限的采集账号。
 
 ## 2. 情报中心列表与详情接口
 

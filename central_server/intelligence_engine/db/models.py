@@ -270,6 +270,7 @@ class TaskRun(Base, TimestampMixin):
     task_template_id: Mapped[str] = mapped_column(String(36), ForeignKey("task_templates.id"), nullable=False)
     trigger_type: Mapped[str] = mapped_column(String(32), nullable=False)
     requested_by_user_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("users.id"))
+    executor_account_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("platform_accounts.id"))
     task_schedule_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("task_schedules.id"))
     status: Mapped[str] = mapped_column(String(64), default="materialized", nullable=False)
     jobs_total: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
@@ -494,6 +495,7 @@ class TaskTemplate(Base, TimestampMixin):
     platform: Mapped[str | None] = mapped_column(String(32))
     account_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("platform_accounts.id"))
     business_account_type_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("business_account_types.id"))
+    created_by_user_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("users.id"))
     config_json: Mapped[dict] = mapped_column(JsonType, default=dict, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
@@ -503,6 +505,8 @@ class TaskSchedule(Base, TimestampMixin):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
     task_template_id: Mapped[str] = mapped_column(String(36), ForeignKey("task_templates.id"), nullable=False)
+    executor_account_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("platform_accounts.id"))
+    created_by_user_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("users.id"))
     schedule_type: Mapped[str] = mapped_column(String(64), nullable=False)
     interval_seconds: Mapped[int | None] = mapped_column(Integer)
     daily_time_window_json: Mapped[dict] = mapped_column(JsonType, default=dict, nullable=False)

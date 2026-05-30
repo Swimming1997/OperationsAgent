@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -25,6 +25,7 @@ from intelligence_engine.db.models import (
     PlatformAccount,
     RuleProfile,
     TaskRun,
+    TaskSchedule,
     TaskTemplate,
     User,
     XhsSearchSuggestion,
@@ -64,6 +65,7 @@ from intelligence_engine.domain.product_schemas import (
     BusinessAccountTypeRead,
     BusinessAccountTypeUpdateRequest,
     BusinessAccountTypeRuleSetBindRequest,
+    BusinessAccountTypeBenchmarkGroupRead,
     BusinessAccountTypeRuleSetRead,
     ContentAssignRequest,
     ContentBulkStatusFailure,
@@ -134,11 +136,14 @@ from intelligence_engine.domain.product_schemas import (
     TaskRunRead,
     TaskScheduleCreateRequest,
     TaskScheduleRead,
+    TaskScheduleUpdateRequest,
     TaskRunResponse,
     TaskTemplateCreateRequest,
+    TaskTemplatePermissions,
     TaskTemplateReadiness,
     TaskTemplateListItem,
     TaskTemplateRead,
+    TaskTemplateRunRequest,
     UserCreateRequest,
     UserPasswordResetRequest,
     UserRead,
@@ -167,7 +172,9 @@ from intelligence_engine.storage.repositories.reference_library_repository impor
 from intelligence_engine.storage.repositories.job_repository import JobRepository
 from intelligence_engine.storage.repositories.product_repository import ProductRepository
 from intelligence_engine.services.intelligence_scenario_filter_service import (
+    assert_custom_scenario_create,
     assert_valid_scenario,
+    is_custom_scenario,
     filter_read_from_row,
     normalize_upsert_request,
 )
@@ -185,9 +192,26 @@ from intelligence_engine.api.account_access import (
     get_principal_employee_id,
     set_agent_employee,
 )
+from intelligence_engine.api.task_template_access import (
+    ensure_business_type_in_scope,
+    ensure_executor_account_for_template,
+    ensure_schedule_writable,
+    ensure_template_readable,
+    ensure_template_schedule_creatable,
+    ensure_template_deletable,
+    ensure_template_writable,
+    list_visible_business_type_ids,
+    template_permissions,
+    validate_template_bindings,
+)
 from intelligence_engine.services.agent_presence import effective_agent_status, sync_agent_presence
 from intelligence_engine.services.media_service import MediaService
 from intelligence_engine.security.auth import Principal, get_optional_principal, require_any_role
+from intelligence_engine.security.intelligence_access import (
+    INTELLIGENCE_READ_ROLES,
+    ensure_can_revoke_reference_library_item,
+    resolve_operator_intelligence_list_scope,
+)
 from intelligence_engine.services.account_login_service import AccountLoginService
 from intelligence_engine.services.employee_agent_pool import (
     AgentEmployeeConflictError,
@@ -507,7 +531,10 @@ def _derive_account_usage_status(
 
 
 def _task_template_read(service: TaskMaterializationService, template: TaskTemplate) -> TaskTemplateRead:
-    typed_payload = service.validate_template_payload(template.template_type, template.config_json or {})
+    from intelligence_engine.services.task_template_config import parse_template_config_dict, strip_legacy_template_config_keys
+
+    config = strip_legacy_template_config_keys(parse_template_config_dict(template.config_json))
+    typed_payload = service.read_template_config(template.template_type, config)
     return TaskTemplateRead(
         id=template.id,
         name=template.name,
@@ -515,7 +542,7 @@ def _task_template_read(service: TaskMaterializationService, template: TaskTempl
         platform=template.platform,
         account_id=template.account_id,
         business_account_type_id=template.business_account_type_id,
-        config=template.config_json or {},
+        config=config,
         enabled=template.enabled,
         typed_payload=typed_payload,
     )
@@ -560,14 +587,62 @@ def _product_options() -> ProductOptions:
 
 def _task_template_key_fields(template: TaskTemplate) -> dict:
     config = template.config_json or {}
-    keys = ("executor_account_id", "feed_type", "target_count", "benchmark_group_id", "platform", "keywords", "max_items", "rule_set_id")
+    keys = ("feed_type", "target_count", "benchmark_group_id", "platform", "keywords", "max_items", "rule_set_id")
     return {key: config.get(key) for key in keys if key in config}
 
 
-def _readiness(service: TaskMaterializationService, template: TaskTemplate) -> TaskTemplateReadiness:
-    checks = service.readiness_checks(template)
+def _readiness_from_checks(checks: list[dict]) -> TaskTemplateReadiness:
     messages = [item["message"] for item in checks if not item["ok"]]
     return TaskTemplateReadiness(ready=not messages, checks=checks, messages=messages)
+
+
+def _template_readiness(service: TaskMaterializationService, template: TaskTemplate) -> TaskTemplateReadiness:
+    return _readiness_from_checks(service.template_readiness_checks(template))
+
+
+def _run_readiness(service: TaskMaterializationService, template: TaskTemplate, executor_account_id: str) -> TaskTemplateReadiness:
+    return _readiness_from_checks(service.run_readiness_checks(template, executor_account_id))
+
+
+def _user_display_name(db: Session, user_id: str | None) -> str | None:
+    if not user_id:
+        return None
+    user = db.get(User, user_id)
+    return user.display_name if user else None
+
+
+def _task_template_list_item(db: Session, principal: Principal, template: TaskTemplate) -> TaskTemplateListItem:
+    business_type = _business_type(db, template.business_account_type_id)
+    perms = template_permissions(principal, template)
+    return TaskTemplateListItem(
+        id=template.id,
+        name=template.name,
+        template_type=template.template_type,
+        enabled=template.enabled,
+        platform=template.platform,
+        business_account_type_id=template.business_account_type_id,
+        business_account_type_name=business_type.name if business_type else None,
+        created_by_user_id=template.created_by_user_id,
+        created_by_display_name=_user_display_name(db, template.created_by_user_id),
+        key_fields=_task_template_key_fields(template),
+        permissions=TaskTemplatePermissions(**perms),
+    )
+
+
+def _schedule_read(schedule) -> TaskScheduleRead:
+    return TaskScheduleRead(
+        id=schedule.id,
+        task_template_id=schedule.task_template_id,
+        executor_account_id=schedule.executor_account_id,
+        created_by_user_id=schedule.created_by_user_id,
+        schedule_type=schedule.schedule_type,
+        interval_seconds=schedule.interval_seconds,
+        daily_time_window=schedule.daily_time_window_json or {},
+        enabled=schedule.enabled,
+        next_run_at=schedule.next_run_at,
+        last_run_at=schedule.last_run_at,
+        last_materialized_at=schedule.last_materialized_at,
+    )
 
 
 def _task_run_read(service: TaskMaterializationService, run: TaskRun, *, include_jobs: bool = True) -> TaskRunRead:
@@ -620,15 +695,33 @@ def _task_run_read(service: TaskMaterializationService, run: TaskRun, *, include
     )
 
 
-def _create_typed_task_template(db: Session, *, name: str, enabled: bool, template_type: str, payload: dict, platform: str | None = None) -> TaskTemplate:
+def _create_typed_task_template(
+    db: Session,
+    *,
+    name: str,
+    enabled: bool,
+    template_type: str,
+    business_account_type_id: str,
+    created_by_user_id: str | None,
+    payload: dict,
+    platform: str | None = None,
+) -> TaskTemplate:
     service = TaskMaterializationService(db)
-    config = service.validate_template_payload(template_type, payload)
+    config = service.validate_template_config(template_type, payload)
+    require_benchmark = template_type == "creator_monitor_task"
+    validate_template_bindings(
+        db,
+        business_account_type_id=business_account_type_id,
+        rule_set_id=config.get("rule_set_id"),
+        benchmark_group_id=config.get("benchmark_group_id"),
+        require_benchmark=require_benchmark,
+    )
     return ProductRepository(db).create_task_template(
         name=name,
         template_type=template_type,
         platform=platform or config.get("platform"),
-        account_id=config.get("executor_account_id"),
-        business_account_type_id=None,
+        business_account_type_id=business_account_type_id,
+        created_by_user_id=created_by_user_id,
         config=config,
         enabled=enabled,
     )
@@ -639,10 +732,31 @@ def _update_typed_task_template(db: Session, template: TaskTemplate, request) ->
     patch = request.model_dump(exclude_unset=True, mode="json")
     name = patch.pop("name", None)
     enabled = patch.pop("enabled", None)
+    business_account_type_id = patch.pop("business_account_type_id", None)
     config = dict(template.config_json or {})
     config.update(patch)
-    config = service.validate_template_payload(template.template_type, config)
-    return ProductRepository(db).update_task_template(template, name=name, enabled=enabled, config=config)
+    config = service.validate_template_config(template.template_type, config)
+    effective_business_type_id = business_account_type_id or template.business_account_type_id
+    if not effective_business_type_id:
+        raise HTTPException(status_code=400, detail="business account type is required")
+    require_benchmark = template.template_type == "creator_monitor_task"
+    validate_template_bindings(
+        db,
+        business_account_type_id=effective_business_type_id,
+        rule_set_id=config.get("rule_set_id"),
+        benchmark_group_id=config.get("benchmark_group_id"),
+        require_benchmark=require_benchmark,
+    )
+    return ProductRepository(db).update_task_template(
+        template,
+        name=name,
+        enabled=enabled,
+        business_account_type_id=business_account_type_id,
+        config=config,
+    )
+
+
+_TASK_TEMPLATE_READ_ROLES = (UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)
 
 
 def _user_read(repo: ProductRepository, user: User) -> UserRead:
@@ -914,7 +1028,7 @@ def _require_authenticated_user_id(principal: Principal) -> str:
 @router.get("/product/me/intelligence/scenario-filters", response_model=IntelligenceScenarioFilterListResponse)
 def list_my_intelligence_scenario_filters(
     db: Session = Depends(get_db),
-    principal: Principal = Depends(require_any_role(UserRoleName.OPERATOR, UserRoleName.ADMIN, UserRoleName.SUPERVISOR)),
+    principal: Principal = Depends(require_any_role(*INTELLIGENCE_READ_ROLES)),
 ):
     user_id = _require_authenticated_user_id(principal)
     repo = UserIntelligenceScenarioFilterRepository(db)
@@ -926,7 +1040,7 @@ def list_my_intelligence_scenario_filters(
 def get_my_intelligence_scenario_filter(
     scenario: str,
     db: Session = Depends(get_db),
-    principal: Principal = Depends(require_any_role(UserRoleName.OPERATOR, UserRoleName.ADMIN, UserRoleName.SUPERVISOR)),
+    principal: Principal = Depends(require_any_role(*INTELLIGENCE_READ_ROLES)),
 ):
     try:
         assert_valid_scenario(scenario)
@@ -948,11 +1062,17 @@ def upsert_my_intelligence_scenario_filter(
 ):
     try:
         assert_valid_scenario(scenario)
+        assert_custom_scenario_create(scenario, request.rolling)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     user_id = _require_authenticated_user_id(principal)
     filters_json, rolling_json = normalize_upsert_request(request)
-    row = UserIntelligenceScenarioFilterRepository(db).upsert(
+    repo = UserIntelligenceScenarioFilterRepository(db)
+    if is_custom_scenario(scenario) and repo.get(user_id, scenario) is None:
+        existing_custom = [row for row in repo.list_for_user(user_id) if is_custom_scenario(row.scenario)]
+        if len(existing_custom) >= 20:
+            raise HTTPException(status_code=400, detail="custom scenario limit reached")
+    row = repo.upsert(
         user_id,
         scenario,
         filters_json,
@@ -1517,16 +1637,32 @@ def list_benchmark_group_business_types(
     ]
 
 
+def _filtered_templates(db: Session, principal: Principal) -> list[TaskTemplate]:
+    visible = list_visible_business_type_ids(db, principal)
+    if visible is None:
+        return ProductRepository(db).list_task_templates()
+    if not visible:
+        return []
+    return ProductRepository(db).list_task_templates(business_account_type_ids=list(visible))
+
+
 @router.post("/task-templates", response_model=TaskTemplateRead)
-def create_task_template(request: TaskTemplateCreateRequest, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+def create_task_template(
+    request: TaskTemplateCreateRequest,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(*_TASK_TEMPLATE_READ_ROLES)),
+):
+    if not request.business_account_type_id:
+        raise HTTPException(status_code=400, detail="business_account_type_id is required")
+    ensure_business_type_in_scope(db, principal, request.business_account_type_id)
     service = TaskMaterializationService(db)
-    config = service.validate_template_payload(_enum_value(request.template_type), request.config)
+    config = service.validate_template_config(_enum_value(request.template_type), request.config)
     template = ProductRepository(db).create_task_template(
         name=request.name,
         template_type=_enum_value(request.template_type),
         platform=_enum_value(request.platform) if request.platform else None,
-        account_id=request.account_id,
         business_account_type_id=request.business_account_type_id,
+        created_by_user_id=principal.user_id,
         config=config,
         enabled=request.enabled,
     )
@@ -1535,54 +1671,96 @@ def create_task_template(request: TaskTemplateCreateRequest, db: Session = Depen
 
 
 @router.get("/task-templates", response_model=list[TaskTemplateRead])
-def list_task_templates(db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+def list_task_templates(
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(*_TASK_TEMPLATE_READ_ROLES)),
+):
     service = TaskMaterializationService(db)
-    return [
-        _task_template_read(service, item)
-        for item in ProductRepository(db).list_task_templates()
-    ]
+    return [_task_template_read(service, item) for item in _filtered_templates(db, principal)]
 
 
 @router.get("/task-templates/list", response_model=list[TaskTemplateListItem])
-def list_task_template_items(db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
-    return [
-        TaskTemplateListItem(
-            id=item.id,
-            name=item.name,
-            template_type=item.template_type,
-            enabled=item.enabled,
-            platform=item.platform,
-            account_id=item.account_id,
-            key_fields=_task_template_key_fields(item),
-        )
-        for item in ProductRepository(db).list_task_templates()
-    ]
+def list_task_template_items(
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(*_TASK_TEMPLATE_READ_ROLES)),
+):
+    return [_task_template_list_item(db, principal, item) for item in _filtered_templates(db, principal)]
 
 
 @router.get("/task-templates/{template_id}", response_model=TaskTemplateRead)
-def get_task_template(template_id: str, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+def get_task_template(
+    template_id: str,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(*_TASK_TEMPLATE_READ_ROLES)),
+):
     template = db.get(TaskTemplate, template_id)
     if not template:
         raise HTTPException(status_code=404, detail="task template not found")
+    ensure_template_readable(db, principal, template)
+    db.commit()
     return _task_template_read(TaskMaterializationService(db), template)
 
 
-@router.get("/task-templates/{template_id}/readiness", response_model=TaskTemplateReadiness)
-def get_task_template_readiness(template_id: str, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+@router.delete("/task-templates/{template_id}", status_code=204)
+def delete_task_template(
+    template_id: str,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(*_TASK_TEMPLATE_READ_ROLES)),
+):
     template = db.get(TaskTemplate, template_id)
     if not template:
         raise HTTPException(status_code=404, detail="task template not found")
-    return _readiness(TaskMaterializationService(db), template)
+    ensure_template_readable(db, principal, template)
+    ensure_template_deletable(principal, template)
+    ProductRepository(db).delete_task_template(template)
+    db.commit()
+
+
+@router.get("/task-templates/{template_id}/readiness", response_model=TaskTemplateReadiness)
+def get_task_template_readiness(
+    template_id: str,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(*_TASK_TEMPLATE_READ_ROLES)),
+):
+    template = db.get(TaskTemplate, template_id)
+    if not template:
+        raise HTTPException(status_code=404, detail="task template not found")
+    ensure_template_readable(db, principal, template)
+    db.commit()
+    return _template_readiness(TaskMaterializationService(db), template)
+
+
+@router.get("/task-templates/{template_id}/run-readiness", response_model=TaskTemplateReadiness)
+def get_task_template_run_readiness(
+    template_id: str,
+    executor_account_id: str = Query(...),
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(*_TASK_TEMPLATE_READ_ROLES)),
+):
+    template = db.get(TaskTemplate, template_id)
+    if not template:
+        raise HTTPException(status_code=404, detail="task template not found")
+    ensure_template_readable(db, principal, template)
+    ensure_executor_account_for_template(db, principal, template, executor_account_id)
+    db.commit()
+    return _run_readiness(TaskMaterializationService(db), template, executor_account_id)
 
 
 @router.post("/task-templates/recommendation-feed", response_model=TaskTemplateRead)
-def create_recommendation_feed_task_template(request: RecommendationFeedTaskTemplateCreate, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
-    payload = request.model_dump(mode="json", exclude={"name", "enabled"})
+def create_recommendation_feed_task_template(
+    request: RecommendationFeedTaskTemplateCreate,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(*_TASK_TEMPLATE_READ_ROLES)),
+):
+    ensure_business_type_in_scope(db, principal, request.business_account_type_id)
+    payload = request.model_dump(mode="json", exclude={"name", "enabled", "business_account_type_id"})
     template = _create_typed_task_template(
         db,
         name=request.name,
         enabled=request.enabled,
         template_type="recommendation_feed_task",
+        business_account_type_id=request.business_account_type_id,
+        created_by_user_id=principal.user_id,
         payload=payload,
         platform=Platform.XHS.value,
     )
@@ -1591,23 +1769,39 @@ def create_recommendation_feed_task_template(request: RecommendationFeedTaskTemp
 
 
 @router.patch("/task-templates/recommendation-feed/{template_id}", response_model=TaskTemplateRead)
-def update_recommendation_feed_task_template(template_id: str, request: RecommendationFeedTaskTemplateUpdate, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+def update_recommendation_feed_task_template(
+    template_id: str,
+    request: RecommendationFeedTaskTemplateUpdate,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(*_TASK_TEMPLATE_READ_ROLES)),
+):
     template = db.get(TaskTemplate, template_id)
     if not template or template.template_type != "recommendation_feed_task":
         raise HTTPException(status_code=404, detail="recommendation feed task template not found")
+    ensure_template_readable(db, principal, template)
+    ensure_template_writable(principal, template)
+    if request.business_account_type_id:
+        ensure_business_type_in_scope(db, principal, request.business_account_type_id)
     updated = _update_typed_task_template(db, template, request)
     db.commit()
     return _task_template_read(TaskMaterializationService(db), updated)
 
 
 @router.post("/task-templates/creator-monitor", response_model=TaskTemplateRead)
-def create_creator_monitor_task_template(request: CreatorMonitorTaskTemplateCreate, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
-    payload = request.model_dump(mode="json", exclude={"name", "enabled"})
+def create_creator_monitor_task_template(
+    request: CreatorMonitorTaskTemplateCreate,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(*_TASK_TEMPLATE_READ_ROLES)),
+):
+    ensure_business_type_in_scope(db, principal, request.business_account_type_id)
+    payload = request.model_dump(mode="json", exclude={"name", "enabled", "business_account_type_id"})
     template = _create_typed_task_template(
         db,
         name=request.name,
         enabled=request.enabled,
         template_type="creator_monitor_task",
+        business_account_type_id=request.business_account_type_id,
+        created_by_user_id=principal.user_id,
         payload=payload,
         platform=Platform.XHS.value,
     )
@@ -1616,23 +1810,39 @@ def create_creator_monitor_task_template(request: CreatorMonitorTaskTemplateCrea
 
 
 @router.patch("/task-templates/creator-monitor/{template_id}", response_model=TaskTemplateRead)
-def update_creator_monitor_task_template(template_id: str, request: CreatorMonitorTaskTemplateUpdate, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+def update_creator_monitor_task_template(
+    template_id: str,
+    request: CreatorMonitorTaskTemplateUpdate,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(*_TASK_TEMPLATE_READ_ROLES)),
+):
     template = db.get(TaskTemplate, template_id)
     if not template or template.template_type != "creator_monitor_task":
         raise HTTPException(status_code=404, detail="creator monitor task template not found")
+    ensure_template_readable(db, principal, template)
+    ensure_template_writable(principal, template)
+    if request.business_account_type_id:
+        ensure_business_type_in_scope(db, principal, request.business_account_type_id)
     updated = _update_typed_task_template(db, template, request)
     db.commit()
     return _task_template_read(TaskMaterializationService(db), updated)
 
 
 @router.post("/task-templates/keyword-search", response_model=TaskTemplateRead)
-def create_keyword_search_task_template(request: KeywordSearchTaskTemplateCreate, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
-    payload = request.model_dump(mode="json", exclude={"name", "enabled"})
+def create_keyword_search_task_template(
+    request: KeywordSearchTaskTemplateCreate,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(*_TASK_TEMPLATE_READ_ROLES)),
+):
+    ensure_business_type_in_scope(db, principal, request.business_account_type_id)
+    payload = request.model_dump(mode="json", exclude={"name", "enabled", "business_account_type_id"})
     template = _create_typed_task_template(
         db,
         name=request.name,
         enabled=request.enabled,
         template_type="keyword_search_task",
+        business_account_type_id=request.business_account_type_id,
+        created_by_user_id=principal.user_id,
         payload=payload,
         platform=_enum_value(request.platform),
     )
@@ -1641,27 +1851,48 @@ def create_keyword_search_task_template(request: KeywordSearchTaskTemplateCreate
 
 
 @router.patch("/task-templates/keyword-search/{template_id}", response_model=TaskTemplateRead)
-def update_keyword_search_task_template(template_id: str, request: KeywordSearchTaskTemplateUpdate, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+def update_keyword_search_task_template(
+    template_id: str,
+    request: KeywordSearchTaskTemplateUpdate,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(*_TASK_TEMPLATE_READ_ROLES)),
+):
     template = db.get(TaskTemplate, template_id)
     if not template or template.template_type != "keyword_search_task":
         raise HTTPException(status_code=404, detail="keyword search task template not found")
+    ensure_template_readable(db, principal, template)
+    ensure_template_writable(principal, template)
+    if request.business_account_type_id:
+        ensure_business_type_in_scope(db, principal, request.business_account_type_id)
     updated = _update_typed_task_template(db, template, request)
     db.commit()
     return _task_template_read(TaskMaterializationService(db), updated)
 
 
 @router.post("/task-templates/{template_id}/run", response_model=TaskRunResponse)
-def run_task_template(template_id: str, db: Session = Depends(get_db), principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+def run_task_template(
+    template_id: str,
+    request: TaskTemplateRunRequest,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(*_TASK_TEMPLATE_READ_ROLES)),
+):
     template = db.get(TaskTemplate, template_id)
     if not template:
         raise HTTPException(status_code=404, detail="task template not found")
+    ensure_template_readable(db, principal, template)
     if not template.enabled:
         raise HTTPException(status_code=400, detail="task template disabled")
+    ensure_executor_account_for_template(db, principal, template, request.executor_account_id)
     service = TaskMaterializationService(db)
-    readiness = _readiness(service, template)
+    readiness = _run_readiness(service, template, request.executor_account_id)
     if not readiness.ready:
         raise HTTPException(status_code=409, detail=readiness.model_dump(mode="json"))
-    run, job_ids = service.run_template(template, trigger_type=TaskRunTriggerType.MANUAL, requested_by_user_id=principal.user_id)
+    run, job_ids = service.run_template(
+        template,
+        executor_account_id=request.executor_account_id,
+        trigger_type=TaskRunTriggerType.MANUAL,
+        requested_by_user_id=principal.user_id,
+    )
     jobs = list(db.scalars(select(Job).where(Job.id.in_(job_ids)).order_by(Job.created_at.asc()))) if job_ids else []
     db.commit()
     return TaskRunResponse(
@@ -1674,7 +1905,10 @@ def run_task_template(template_id: str, db: Session = Depends(get_db), principal
 
 
 @router.get("/task-runs", response_model=TaskRunListResponse)
-def list_task_runs(db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+def list_task_runs(
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(*_TASK_TEMPLATE_READ_ROLES)),
+):
     service = TaskMaterializationService(db)
     runs = list(db.scalars(select(TaskRun).order_by(TaskRun.created_at.desc()).limit(50)))
     items = [_task_run_read(service, run, include_jobs=False) for run in runs]
@@ -1683,10 +1917,17 @@ def list_task_runs(db: Session = Depends(get_db), _principal: Principal = Depend
 
 
 @router.get("/task-runs/{task_run_id}", response_model=TaskRunRead)
-def get_task_run(task_run_id: str, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+def get_task_run(
+    task_run_id: str,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(*_TASK_TEMPLATE_READ_ROLES)),
+):
     run = db.get(TaskRun, task_run_id)
     if not run:
         raise HTTPException(status_code=404, detail="task run not found")
+    template = db.get(TaskTemplate, run.task_template_id)
+    if template:
+        ensure_template_readable(db, principal, template)
     service = TaskMaterializationService(db)
     body = _task_run_read(service, run)
     db.commit()
@@ -1694,9 +1935,15 @@ def get_task_run(task_run_id: str, db: Session = Depends(get_db), _principal: Pr
 
 
 @router.get("/task-templates/{template_id}/runs", response_model=TaskRunListResponse)
-def list_template_runs(template_id: str, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
-    if not db.get(TaskTemplate, template_id):
+def list_template_runs(
+    template_id: str,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(*_TASK_TEMPLATE_READ_ROLES)),
+):
+    template = db.get(TaskTemplate, template_id)
+    if not template:
         raise HTTPException(status_code=404, detail="task template not found")
+    ensure_template_readable(db, principal, template)
     service = TaskMaterializationService(db)
     runs = list(
         db.scalars(
@@ -1711,12 +1958,38 @@ def list_template_runs(template_id: str, db: Session = Depends(get_db), _princip
     return TaskRunListResponse(items=items)
 
 
-@router.post("/task-schedules", response_model=TaskScheduleRead)
-def create_task_schedule(request: TaskScheduleCreateRequest, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
-    if not db.get(TaskTemplate, request.task_template_id):
+@router.get("/task-templates/{template_id}/schedules", response_model=list[TaskScheduleRead])
+def list_template_schedules(
+    template_id: str,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(*_TASK_TEMPLATE_READ_ROLES)),
+):
+    template = db.get(TaskTemplate, template_id)
+    if not template:
         raise HTTPException(status_code=404, detail="task template not found")
+    ensure_template_readable(db, principal, template)
+    items = ProductRepository(db).list_task_schedules(task_template_id=template_id)
+    if _is_operator(principal):
+        items = [item for item in items if item.created_by_user_id == principal.user_id]
+    return [_schedule_read(item) for item in items]
+
+
+@router.post("/task-schedules", response_model=TaskScheduleRead)
+def create_task_schedule(
+    request: TaskScheduleCreateRequest,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(*_TASK_TEMPLATE_READ_ROLES)),
+):
+    template = db.get(TaskTemplate, request.task_template_id)
+    if not template:
+        raise HTTPException(status_code=404, detail="task template not found")
+    ensure_template_readable(db, principal, template)
+    ensure_template_schedule_creatable(principal, template)
+    ensure_executor_account_for_template(db, principal, template, request.executor_account_id)
     schedule = ProductRepository(db).create_task_schedule(
         task_template_id=request.task_template_id,
+        executor_account_id=request.executor_account_id,
+        created_by_user_id=principal.user_id,
         schedule_type=_enum_value(request.schedule_type),
         interval_seconds=request.interval_seconds,
         daily_time_window=request.daily_time_window,
@@ -1724,15 +1997,52 @@ def create_task_schedule(request: TaskScheduleCreateRequest, db: Session = Depen
         next_run_at=request.next_run_at,
     )
     db.commit()
-    return TaskScheduleRead(id=schedule.id, task_template_id=schedule.task_template_id, schedule_type=schedule.schedule_type, interval_seconds=schedule.interval_seconds, daily_time_window=schedule.daily_time_window_json, enabled=schedule.enabled, next_run_at=schedule.next_run_at, last_run_at=schedule.last_run_at, last_materialized_at=schedule.last_materialized_at)
+    return _schedule_read(schedule)
+
+
+@router.patch("/task-schedules/{schedule_id}", response_model=TaskScheduleRead)
+def update_task_schedule(
+    schedule_id: str,
+    request: TaskScheduleUpdateRequest,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(*_TASK_TEMPLATE_READ_ROLES)),
+):
+    schedule = db.get(TaskSchedule, schedule_id)
+    if not schedule:
+        raise HTTPException(status_code=404, detail="task schedule not found")
+    ensure_schedule_writable(principal, schedule)
+    template = db.get(TaskTemplate, schedule.task_template_id)
+    if not template:
+        raise HTTPException(status_code=404, detail="task template not found")
+    ensure_template_readable(db, principal, template)
+    patch = request.model_dump(exclude_unset=True)
+    if "executor_account_id" in patch and patch["executor_account_id"]:
+        ensure_executor_account_for_template(db, principal, template, patch["executor_account_id"])
+        schedule.executor_account_id = patch["executor_account_id"]
+    if "schedule_type" in patch and patch["schedule_type"] is not None:
+        schedule.schedule_type = _enum_value(patch["schedule_type"])
+    if "interval_seconds" in patch:
+        schedule.interval_seconds = patch["interval_seconds"]
+    if "daily_time_window" in patch and patch["daily_time_window"] is not None:
+        schedule.daily_time_window_json = patch["daily_time_window"]
+    if "enabled" in patch and patch["enabled"] is not None:
+        schedule.enabled = patch["enabled"]
+    if "next_run_at" in patch:
+        schedule.next_run_at = patch["next_run_at"]
+    db.commit()
+    return _schedule_read(schedule)
 
 
 @router.get("/task-schedules", response_model=list[TaskScheduleRead])
-def list_task_schedules(db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
-    return [
-        TaskScheduleRead(id=item.id, task_template_id=item.task_template_id, schedule_type=item.schedule_type, interval_seconds=item.interval_seconds, daily_time_window=item.daily_time_window_json or {}, enabled=item.enabled, next_run_at=item.next_run_at, last_run_at=item.last_run_at, last_materialized_at=item.last_materialized_at)
-        for item in ProductRepository(db).list_task_schedules()
-    ]
+def list_task_schedules(
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(*_TASK_TEMPLATE_READ_ROLES)),
+):
+    if _is_operator(principal):
+        items = ProductRepository(db).list_task_schedules(created_by_user_id=principal.user_id)
+    else:
+        items = ProductRepository(db).list_task_schedules()
+    return [_schedule_read(item) for item in items]
 
 
 @router.post("/task-schedules/materialize-due")
@@ -1750,7 +2060,10 @@ def create_behavior_profile(request: BehaviorProfileCreateRequest, db: Session =
 
 
 @router.get("/behavior-profiles", response_model=list[BehaviorProfileRead])
-def list_behavior_profiles(db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+def list_behavior_profiles(
+    db: Session = Depends(get_db),
+    _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+):
     return [
         BehaviorProfileRead(id=item.id, name=item.name, description=item.description, enabled=item.enabled, config=item.config_json or {})
         for item in ProductRepository(db).list_behavior_profiles()
@@ -1765,7 +2078,10 @@ def create_network_egress_profile(request: NetworkEgressProfileCreateRequest, db
 
 
 @router.get("/network-egress-profiles", response_model=list[NetworkEgressProfileRead])
-def list_network_egress_profiles(db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+def list_network_egress_profiles(
+    db: Session = Depends(get_db),
+    _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+):
     return [
         NetworkEgressProfileRead(id=item.id, name=item.name, strategy=item.strategy, description=item.description, enabled=item.enabled, config=item.config_json or {})
         for item in ProductRepository(db).list_network_egress_profiles()
@@ -1787,7 +2103,10 @@ def create_risk_policy(request: RiskPolicyCreateRequest, db: Session = Depends(g
 
 
 @router.get("/risk-policies", response_model=list[RiskPolicyRead])
-def list_risk_policies(db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+def list_risk_policies(
+    db: Session = Depends(get_db),
+    _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+):
     return [
         RiskPolicyRead(id=item.id, name=item.name, description=item.description, enabled=item.enabled, behavior_profile_id=item.behavior_profile_id, network_egress_profile_id=item.network_egress_profile_id, config=item.config_json or {})
         for item in ProductRepository(db).list_risk_policies()
@@ -1811,9 +2130,14 @@ def bind_business_account_type_rule_set(business_account_type_id: str, request: 
 
 
 @router.get("/business-account-types/{business_account_type_id}/rule-sets", response_model=list[BusinessAccountTypeRuleSetRead])
-def list_business_account_type_rule_sets(business_account_type_id: str, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR))):
+def list_business_account_type_rule_sets(
+    business_account_type_id: str,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+):
     if not db.get(BusinessAccountType, business_account_type_id):
         raise HTTPException(status_code=404, detail="business account type not found")
+    ensure_business_type_in_scope(db, principal, business_account_type_id)
     return [
         BusinessAccountTypeRuleSetRead(
             id=binding.id,
@@ -1823,6 +2147,29 @@ def list_business_account_type_rule_sets(business_account_type_id: str, db: Sess
             is_default=binding.is_default,
         )
         for binding, rule_set in ProductRepository(db).list_rule_sets_for_business_type(business_account_type_id)
+    ]
+
+
+@router.get(
+    "/business-account-types/{business_account_type_id}/benchmark-groups",
+    response_model=list[BusinessAccountTypeBenchmarkGroupRead],
+)
+def list_business_account_type_benchmark_groups(
+    business_account_type_id: str,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+):
+    if not db.get(BusinessAccountType, business_account_type_id):
+        raise HTTPException(status_code=404, detail="business account type not found")
+    ensure_business_type_in_scope(db, principal, business_account_type_id)
+    return [
+        BusinessAccountTypeBenchmarkGroupRead(
+            id=binding.id,
+            business_account_type_id=binding.business_account_type_id,
+            benchmark_group_id=binding.benchmark_group_id,
+            benchmark_group_name=group.name if group else None,
+        )
+        for binding, group in ProductRepository(db).list_benchmark_groups_for_business_type(business_account_type_id)
     ]
 
 
@@ -2015,6 +2362,17 @@ def get_candidate_bucket_options():
     return _product_options().candidate_buckets
 
 
+def _split_enum_filter(raw: str | None, enum_cls) -> list[str] | None:
+    if not raw:
+        return None
+    allowed = {item.value for item in enum_cls}
+    values = [item.strip() for item in raw.split(",") if item.strip()]
+    invalid = [item for item in values if item not in allowed]
+    if invalid:
+        raise HTTPException(status_code=422, detail=f"Invalid filter value: {', '.join(invalid)}")
+    return values or None
+
+
 @router.get("/product/options/account-statuses")
 def get_account_status_options():
     return _product_options().account_statuses
@@ -2029,10 +2387,11 @@ def get_agent_status_options():
 def list_product_intelligence_contents(
     platform: Platform | None = None,
     source_surface: SourceSurface | None = None,
-    candidate_bucket: CandidateBucket | None = None,
-    workflow_status: ContentWorkflowStatus | None = None,
+    candidate_bucket: str | None = Query(default=None),
+    workflow_status: str | None = Query(default=None),
     assigned_to_user_id: str | None = None,
     business_keyword: str | None = None,
+    content_query: str | None = None,
     search_keyword: str | None = None,
     discovered_after: datetime | None = None,
     discovered_before: datetime | None = None,
@@ -2055,19 +2414,26 @@ def list_product_intelligence_contents(
     page: int = 1,
     page_size: int = 20,
     db: Session = Depends(get_db),
-    principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+    principal: Principal = Depends(require_any_role(*INTELLIGENCE_READ_ROLES)),
 ):
-    if principal.has_role(UserRoleName.OPERATOR) and not principal.has_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR) and not assigned_to_user_id:
-        assigned_to_user_id = principal.user_id
+    candidate_bucket_values = _split_enum_filter(candidate_bucket, CandidateBucket)
+    workflow_status_values = _split_enum_filter(workflow_status, ContentWorkflowStatus)
+    operator_scope = resolve_operator_intelligence_list_scope(db, principal, assigned_to_user_id)
+    list_assigned_to_user_id = operator_scope.assigned_to_user_id if operator_scope else assigned_to_user_id
+    list_discovered_by_account_ids = (
+        list(operator_scope.discovered_by_account_ids) if operator_scope else None
+    )
     items, total = WorkflowRepository(db).list_intelligence_contents(
         page=page,
         page_size=page_size,
         platform=_enum_value(platform) if platform else None,
         source_surface=_enum_value(source_surface) if source_surface else None,
-        candidate_bucket=_enum_value(candidate_bucket) if candidate_bucket else None,
-        workflow_status=_enum_value(workflow_status) if workflow_status else None,
-        assigned_to_user_id=assigned_to_user_id,
+        candidate_buckets=candidate_bucket_values,
+        workflow_statuses=workflow_status_values,
+        assigned_to_user_id=list_assigned_to_user_id,
+        discovered_by_account_ids=list_discovered_by_account_ids,
         business_keyword=business_keyword,
+        content_query=content_query,
         search_keyword=search_keyword,
         discovered_after=discovered_after,
         discovered_before=discovered_before,
@@ -2094,7 +2460,7 @@ def list_product_intelligence_contents(
 
 
 @router.get("/intelligence/contents/{content_id}/product-detail", response_model=IntelligenceContentProductDetail)
-def get_intelligence_content_product_detail(content_id: str, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR))):
+def get_intelligence_content_product_detail(content_id: str, db: Session = Depends(get_db), _principal: Principal = Depends(require_any_role(*INTELLIGENCE_READ_ROLES))):
     content = _ensure_content(content_id, db)
     repo = WorkflowRepository(db)
     state = repo.ensure_state(content_id)
@@ -2398,10 +2764,12 @@ def list_reference_library_items(
     usage_status: str | None = None,
     sort_by: str = "selected_at",
     sort_order: str = "desc",
+    search_keyword: str | None = None,
+    content_query: str | None = None,
     page: int = 1,
     page_size: int = 20,
     db: Session = Depends(get_db),
-    _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+    _principal: Principal = Depends(require_any_role(*INTELLIGENCE_READ_ROLES)),
 ):
     items, total = ReferenceLibraryRepository(db).list_items(
         page=page,
@@ -2411,6 +2779,8 @@ def list_reference_library_items(
         selection_source=selection_source,
         rating=rating,
         usage_status=usage_status,
+        search_keyword=search_keyword,
+        content_query=content_query,
         sort_by=sort_by,
         sort_order=sort_order,
     )
@@ -2525,7 +2895,11 @@ def update_reference_library_item(item_id: str, request: ReferenceLibraryItemUpd
 
 
 @router.post("/reference-library/items/{item_id}/archive", response_model=ReferenceLibraryItemRead)
-def archive_reference_library_item(item_id: str, db: Session = Depends(get_db), principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR))):
+def archive_reference_library_item(
+    item_id: str,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR)),
+):
     repo = ReferenceLibraryRepository(db)
     item = repo.get_item(item_id)
     if not item:
@@ -2537,12 +2911,35 @@ def archive_reference_library_item(item_id: str, db: Session = Depends(get_db), 
     return ReferenceLibraryItemRead(**repo._item_dict(item, content, snapshot))
 
 
+@router.post("/reference-library/items/{item_id}/revoke", response_model=ReferenceLibraryItemRead)
+def revoke_reference_library_item(
+    item_id: str,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(UserRoleName.OPERATOR)),
+):
+    repo = ReferenceLibraryRepository(db)
+    item = repo.get_item(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="reference library item not found")
+    ensure_can_revoke_reference_library_item(principal, item)
+    content = db.get(ContentIdentity, item.content_id)
+    snapshot = db.get(ContentSnapshot, content.latest_snapshot_id) if content and content.latest_snapshot_id else None
+    item = repo.archive_item(
+        item,
+        user_id=principal.user_id,
+        employee_id=get_principal_employee_id(db, principal),
+        event_type="revoked",
+    )
+    db.commit()
+    return ReferenceLibraryItemRead(**repo._item_dict(item, content, snapshot))
+
+
 @router.get("/reference-library/items/{item_id}/events", response_model=list[ReferenceLibraryEventRead])
 def list_reference_library_item_events(
     item_id: str,
     limit: int = 100,
     db: Session = Depends(get_db),
-    _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+    _principal: Principal = Depends(require_any_role(*INTELLIGENCE_READ_ROLES)),
 ):
     repo = ReferenceLibraryRepository(db)
     if not repo.get_item(item_id):

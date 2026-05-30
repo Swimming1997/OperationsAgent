@@ -5,13 +5,25 @@ type Props = {
   alt?: string;
   className?: string;
   placeholderClassName?: string;
+  frameClassName?: string;
   label?: string;
 };
 
-export function SafeImage({ src, alt = '', className, placeholderClassName, label = '无图' }: Props) {
+export function SafeImage({
+  src,
+  alt = '',
+  className,
+  placeholderClassName,
+  frameClassName,
+  label = '无图',
+}: Props) {
   const [failed, setFailed] = useState(false);
+  const placeholder = (
+    <span className={placeholderClassName || className || 'image-placeholder'}>{label}</span>
+  );
   if (!src || failed) {
-    return <span className={placeholderClassName || className || 'image-placeholder'}>{label}</span>;
+    return frameClassName ? <div className={frameClassName}>{placeholder}</div> : placeholder;
   }
-  return <img className={className} src={src} alt={alt} onError={() => setFailed(true)} />;
+  const image = <img className={className} src={src} alt={alt} onError={() => setFailed(true)} />;
+  return frameClassName ? <div className={frameClassName}>{image}</div> : image;
 }

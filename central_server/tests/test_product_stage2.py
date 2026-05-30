@@ -25,6 +25,7 @@ from intelligence_engine.storage.repositories.content_repository import ContentR
 from intelligence_engine.storage.repositories.creator_repository import CreatorMonitorRepository
 from intelligence_engine.storage.repositories.job_repository import JobRepository
 from intelligence_engine.storage.repositories.product_repository import ProductRepository
+from tests.task_template_helpers import create_feed_template, materialize_for_account, run_template
 
 
 def _client(db_session) -> TestClient:
@@ -100,16 +101,8 @@ def _content(db_session):
 
 def test_recommendation_task_template_materializes_feed_collect_job(db_session):
     account = _account(db_session)
-    template = ProductRepository(db_session).create_task_template(
-        name="推荐流巡检",
-        template_type="recommendation_feed_task",
-        platform=Platform.XHS.value,
-        account_id=account.id,
-        business_account_type_id=None,
-        config={"executor_account_id": account.id, "feed_type": "xhs_home_feed", "target_count": 10, "refresh_rounds": 1, "per_round_scroll_target": 10},
-        enabled=True,
-    )
-    job_ids = TaskMaterializationService(db_session).materialize_template(template)
+    template = create_feed_template(db_session, account)
+    job_ids = materialize_for_account(db_session, template, account.id)
     job = db_session.get(Job, job_ids[0])
 
     assert job.job_type == JobType.FEED_COLLECT.value
@@ -156,12 +149,12 @@ def test_creator_task_template_materializes_multiple_creator_monitor_jobs(db_ses
         name="对标监控",
         template_type="creator_monitor_task",
         platform=Platform.XHS.value,
-        account_id=account.id,
-        business_account_type_id=None,
-        config={"executor_account_id": account.id, "benchmark_group_id": group.id, "max_latest_items": 20},
+        business_account_type_id=business_type.id,
+        created_by_user_id=None,
+        config={"benchmark_group_id": group.id, "max_latest_items": 20},
         enabled=True,
     )
-    job_ids = TaskMaterializationService(db_session).materialize_template(template)
+    job_ids = materialize_for_account(db_session, template, account.id)
 
     assert len(job_ids) == 2
     jobs = list(db_session.scalars(select(Job).where(Job.id.in_(job_ids))))
@@ -172,16 +165,18 @@ def test_creator_task_template_materializes_multiple_creator_monitor_jobs(db_ses
 
 def test_search_task_template_materializes_search_collect_job(db_session):
     account = _account(db_session)
+    business_type = ProductRepository(db_session).create_business_account_type(name="搜索类型", description=None, enabled=True)
+    account.business_account_type_id = business_type.id
     template = ProductRepository(db_session).create_task_template(
         name="关键词搜索",
         template_type="keyword_search_task",
         platform=Platform.XHS.value,
-        account_id=account.id,
-        business_account_type_id=None,
-        config={"executor_account_id": account.id, "platform": "xhs", "keywords": ["论文", "投稿"], "max_items": 30},
+        business_account_type_id=business_type.id,
+        created_by_user_id=None,
+        config={"platform": "xhs", "keywords": ["论文", "投稿"], "max_items": 30},
         enabled=True,
     )
-    job_ids = TaskMaterializationService(db_session).materialize_template(template)
+    job_ids = materialize_for_account(db_session, template, account.id)
     job = db_session.get(Job, job_ids[0])
 
     assert job.job_type == JobType.SEARCH_COLLECT.value
@@ -192,16 +187,20 @@ def test_search_task_template_materializes_search_collect_job(db_session):
 def test_manual_run_api_and_due_schedule_materialization(db_session):
     client = _client(db_session)
     account = _account(db_session)
+    business_type = ProductRepository(db_session).create_business_account_type(name="调度类型", description=None, enabled=True)
+    account.business_account_type_id = business_type.id
+    db_session.flush()
     template = client.post(
         "/api/task-templates",
         json={
             "name": "手动推荐流",
             "template_type": "recommendation_feed_task",
             "platform": "xhs",
-            "config": {"executor_account_id": account.id, "feed_type": "xhs_home_feed", "target_count": 5},
+            "business_account_type_id": business_type.id,
+            "config": {"feed_type": "xhs_home_feed", "target_count": 5, "refresh_rounds": 1, "per_round_scroll_target": 5},
         },
     ).json()
-    run_response = client.post(f"/api/task-templates/{template['id']}/run")
+    run_response = run_template(client, template["id"], account.id)
     assert run_response.status_code == 200
     assert run_response.json()["jobs_created"] == 1
     assert run_response.json()["task_run_id"]
@@ -210,6 +209,7 @@ def test_manual_run_api_and_due_schedule_materialization(db_session):
         "/api/task-schedules",
         json={
             "task_template_id": template["id"],
+            "executor_account_id": account.id,
             "schedule_type": "interval_seconds",
             "interval_seconds": 60,
             "next_run_at": (utcnow() - timedelta(seconds=1)).isoformat(),
@@ -287,24 +287,10 @@ def test_task_template_readiness_accepts_runtime_job_types_capabilities(db_sessi
         status=SessionStatus.READY.value,
         session_meta={"cdp_url": "http://127.0.0.1:9222"},
     )
-    template = ProductRepository(db_session).create_task_template(
-        name="Runtime 推荐流",
-        template_type="recommendation_feed_task",
-        platform=Platform.XHS.value,
-        account_id=account.id,
-        business_account_type_id=None,
-        config={
-            "executor_account_id": account.id,
-            "feed_type": "xhs_home_feed",
-            "target_count": 5,
-            "refresh_rounds": 1,
-            "per_round_scroll_target": 5,
-        },
-        enabled=True,
-    )
+    template = create_feed_template(db_session, account, name="Runtime 推荐流", target_count=5)
     db_session.commit()
 
-    response = client.get(f"/api/task-templates/{template.id}/readiness")
+    response = client.get(f"/api/task-templates/{template.id}/run-readiness", params={"executor_account_id": account.id})
 
     assert response.status_code == 200
     body = response.json()
@@ -317,15 +303,7 @@ def test_task_template_readiness_accepts_runtime_job_types_capabilities(db_sessi
 def test_task_template_readiness_success_and_failure(db_session):
     client = _client(db_session)
     account = _account(db_session)
-    template = ProductRepository(db_session).create_task_template(
-        name="可运行推荐流",
-        template_type="recommendation_feed_task",
-        platform=Platform.XHS.value,
-        account_id=account.id,
-        business_account_type_id=None,
-        config={"executor_account_id": account.id, "feed_type": "xhs_home_feed", "target_count": 5, "refresh_rounds": 1, "per_round_scroll_target": 5},
-        enabled=True,
-    )
+    template = create_feed_template(db_session, account, name="可运行推荐流", target_count=5)
     db_session.commit()
     response = client.get(f"/api/task-templates/{template.id}/readiness")
     assert response.status_code == 200
@@ -333,7 +311,7 @@ def test_task_template_readiness_success_and_failure(db_session):
 
     account.default_agent_id = None
     db_session.commit()
-    blocked = client.get(f"/api/task-templates/{template.id}/readiness")
+    blocked = client.get(f"/api/task-templates/{template.id}/run-readiness", params={"executor_account_id": account.id})
     assert blocked.json()["ready"] is False
     assert "账号未绑定 Agent" in blocked.json()["messages"]
 
@@ -341,17 +319,9 @@ def test_task_template_readiness_success_and_failure(db_session):
 def test_manual_run_creates_task_run_and_job_detail_aggregates_feed_summary(db_session):
     client = _client(db_session)
     account = _account(db_session)
-    template = ProductRepository(db_session).create_task_template(
-        name="运行摘要推荐流",
-        template_type="recommendation_feed_task",
-        platform=Platform.XHS.value,
-        account_id=account.id,
-        business_account_type_id=None,
-        config={"executor_account_id": account.id, "feed_type": "xhs_home_feed", "target_count": 10, "refresh_rounds": 1, "per_round_scroll_target": 10},
-        enabled=True,
-    )
+    template = create_feed_template(db_session, account, name="运行摘要推荐流")
     db_session.commit()
-    run_body = client.post(f"/api/task-templates/{template.id}/run").json()
+    run_body = run_template(client, template.id, account.id).json()
     assert run_body["jobs_created"] == 1
     job = db_session.get(Job, run_body["jobs"][0]["job_id"])
     assert job.task_run_id == run_body["task_run_id"]
@@ -400,13 +370,13 @@ def test_task_run_detail_aggregates_creator_summary(db_session):
         name="对标摘要",
         template_type="creator_monitor_task",
         platform=Platform.XHS.value,
-        account_id=account.id,
-        business_account_type_id=None,
-        config={"executor_account_id": account.id, "benchmark_group_id": group.id, "auto_detail_fetch": True},
+        business_account_type_id=business_type.id,
+        created_by_user_id=None,
+        config={"benchmark_group_id": group.id, "auto_detail_fetch": True},
         enabled=True,
     )
     db_session.commit()
-    run_body = client.post(f"/api/task-templates/{template.id}/run").json()
+    run_body = run_template(client, template.id, account.id).json()
     job = db_session.get(Job, run_body["jobs"][0]["job_id"])
     job_repo = JobRepository(db_session)
     job_repo.claim_jobs_for_agent(agent_id=account.default_agent_id, supported_job_types=[JobType.CREATOR_MONITOR], max_jobs=1, ttl_seconds=60)
@@ -460,7 +430,7 @@ def test_intelligence_contents_query_includes_workflow_info(db_session):
     assert item["discovery_sources_summary"]["source_surfaces"]["xhs_home_feed"] == 1
 
 
-def test_discarded_intelligence_is_hidden_from_default_pool_but_filterable(db_session):
+def test_discarded_intelligence_is_visible_when_status_filter_is_all(db_session):
     client = _client(db_session)
     content = _content(db_session)
 
@@ -470,7 +440,8 @@ def test_discarded_intelligence_is_hidden_from_default_pool_but_filterable(db_se
 
     default_response = client.get("/api/intelligence/contents/product")
     assert default_response.status_code == 200, default_response.text
-    assert default_response.json()["total"] == 0
+    assert default_response.json()["total"] == 1
+    assert default_response.json()["items"][0]["content_id"] == content.id
 
     discarded_response = client.get("/api/intelligence/contents/product", params={"workflow_status": "discarded"})
     assert discarded_response.status_code == 200, discarded_response.text
@@ -526,10 +497,9 @@ def test_task_rule_set_must_match_account_business_type(db_session):
         name="未绑定规则任务",
         template_type="recommendation_feed_task",
         platform=Platform.XHS.value,
-        account_id=account.id,
         business_account_type_id=business_type.id,
+        created_by_user_id=None,
         config={
-            "executor_account_id": account.id,
             "feed_type": "xhs_home_feed",
             "target_count": 5,
             "refresh_rounds": 1,
@@ -542,10 +512,9 @@ def test_task_rule_set_must_match_account_business_type(db_session):
         name="已绑定规则任务",
         template_type="recommendation_feed_task",
         platform=Platform.XHS.value,
-        account_id=account.id,
         business_account_type_id=business_type.id,
+        created_by_user_id=None,
         config={
-            "executor_account_id": account.id,
             "feed_type": "xhs_home_feed",
             "target_count": 5,
             "refresh_rounds": 1,
@@ -561,10 +530,10 @@ def test_task_rule_set_must_match_account_business_type(db_session):
     assert blocked_readiness.json()["ready"] is False
     assert "未绑定到业务类型" in "；".join(blocked_readiness.json()["messages"])
 
-    blocked_run = client.post(f"/api/task-templates/{blocked_template.id}/run")
+    blocked_run = run_template(client, blocked_template.id, account.id)
     assert blocked_run.status_code == 409
 
-    allowed_run = client.post(f"/api/task-templates/{allowed_template.id}/run")
+    allowed_run = run_template(client, allowed_template.id, account.id)
     assert allowed_run.status_code == 200
     assert allowed_run.json()["jobs_created"] == 1
 
@@ -592,18 +561,18 @@ def test_creator_task_benchmark_group_must_match_account_business_type(db_sessio
         name="未绑定对标组任务",
         template_type="creator_monitor_task",
         platform=Platform.XHS.value,
-        account_id=account.id,
         business_account_type_id=business_type.id,
-        config={"executor_account_id": account.id, "benchmark_group_id": blocked_group.id, "max_latest_items": 20},
+        created_by_user_id=None,
+        config={"benchmark_group_id": blocked_group.id, "max_latest_items": 20},
         enabled=True,
     )
     allowed_template = repo.create_task_template(
         name="已绑定对标组任务",
         template_type="creator_monitor_task",
         platform=Platform.XHS.value,
-        account_id=account.id,
         business_account_type_id=business_type.id,
-        config={"executor_account_id": account.id, "benchmark_group_id": allowed_group.id, "max_latest_items": 20},
+        created_by_user_id=None,
+        config={"benchmark_group_id": allowed_group.id, "max_latest_items": 20},
         enabled=True,
     )
     db_session.commit()
@@ -613,9 +582,9 @@ def test_creator_task_benchmark_group_must_match_account_business_type(db_sessio
     assert blocked_readiness.json()["ready"] is False
     assert "对标账号组" in "；".join(blocked_readiness.json()["messages"])
 
-    blocked_run = client.post(f"/api/task-templates/{blocked_template.id}/run")
+    blocked_run = run_template(client, blocked_template.id, account.id)
     assert blocked_run.status_code == 409
 
-    allowed_run = client.post(f"/api/task-templates/{allowed_template.id}/run")
+    allowed_run = run_template(client, allowed_template.id, account.id)
     assert allowed_run.status_code == 200
     assert allowed_run.json()["jobs_created"] == 1

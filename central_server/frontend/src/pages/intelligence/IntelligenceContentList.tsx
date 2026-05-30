@@ -13,6 +13,7 @@ type Props = {
   items: IntelligenceItem[];
   selectedId: string | null;
   selectedIds: string[];
+  selectionEnabled?: boolean;
   loading: boolean;
   onSelect: (contentId: string) => void;
   onToggleSelect: (contentId: string) => void;
@@ -34,6 +35,7 @@ export function IntelligenceContentList({
   items,
   selectedId,
   selectedIds,
+  selectionEnabled = true,
   loading,
   onSelect,
   onToggleSelect,
@@ -48,7 +50,7 @@ export function IntelligenceContentList({
   return (
     <div className="data-table intelligence-content-table">
       <div className="table-row table-head intelligence-content-row" data-testid="intelligence-table-head">
-        <span>选择</span>
+        {selectionEnabled ? <span>选择</span> : null}
         <span>内容</span>
         <span>互动</span>
         <span>状态</span>
@@ -64,15 +66,17 @@ export function IntelligenceContentList({
             onClick={() => onSelect(item.content_id)}
           >
             <span className="select-thumb">
-              <input
-                type="checkbox"
-                checked={selectedIds.includes(item.content_id)}
-                onChange={(event) => {
-                  event.stopPropagation();
-                  onToggleSelect(item.content_id);
-                }}
-                onClick={(event) => event.stopPropagation()}
-              />
+              {selectionEnabled ? (
+                <input
+                  type="checkbox"
+                  checked={selectedIds.includes(item.content_id)}
+                  onChange={(event) => {
+                    event.stopPropagation();
+                    onToggleSelect(item.content_id);
+                  }}
+                  onClick={(event) => event.stopPropagation()}
+                />
+              ) : null}
               <SafeImage src={coverSrc(item)} className="thumb-image" placeholderClassName="cover-empty" />
             </span>
             <span className="content-title-cell">

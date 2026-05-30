@@ -26,8 +26,19 @@ export const options: ProductOptions = {
     { value: 'creator_monitor_task', label: 'creator_monitor_task' },
     { value: 'keyword_search_task', label: 'keyword_search_task' },
   ],
-  workflow_statuses: [{ value: 'pending_review', label: 'pending_review' }, { value: 'assigned', label: 'assigned' }],
-  candidate_buckets: [{ value: 'content_candidate', label: 'content_candidate' }],
+  workflow_statuses: [
+    { value: 'pending_review', label: 'pending_review' },
+    { value: 'assigned', label: 'assigned' },
+    { value: 'selected', label: 'selected' },
+    { value: 'discarded', label: 'discarded' },
+    { value: 'archived', label: 'archived' },
+  ],
+  candidate_buckets: [
+    { value: 'lead_candidate', label: 'lead_candidate' },
+    { value: 'content_candidate', label: 'content_candidate' },
+    { value: 'pending_enrichment', label: 'pending_enrichment' },
+    { value: 'discard', label: 'discard' },
+  ],
   account_statuses: [{ value: 'active', label: 'active' }],
   agent_statuses: [{ value: 'online', label: 'online' }],
 };
@@ -199,8 +210,22 @@ export const referenceLibraryItems: ReferenceLibraryItem[] = [{
   collect_count: 5,
 }];
 
+const taskPermissions = { can_edit: true, can_run: true, can_schedule: true, can_delete: true };
+
 export const taskList: TaskTemplateListItem[] = [
-  { id: 'task-1', name: '推荐流巡检', template_type: 'recommendation_feed_task', enabled: true, platform: 'xhs', account_id: 'account-1', key_fields: { target_count: 50 } },
+  {
+    id: 'task-1',
+    name: '推荐流巡检',
+    template_type: 'recommendation_feed_task',
+    enabled: true,
+    platform: 'xhs',
+    business_account_type_id: 'type-1',
+    business_account_type_name: '论文服务号',
+    created_by_user_id: 'supervisor-user',
+    created_by_display_name: '主管',
+    key_fields: { target_count: 50 },
+    permissions: taskPermissions,
+  },
 ];
 
 export const taskDetail: TaskTemplateDetail = {
@@ -208,20 +233,21 @@ export const taskDetail: TaskTemplateDetail = {
   name: '推荐流巡检',
   template_type: 'recommendation_feed_task',
   platform: 'xhs',
-  account_id: 'account-1',
-  business_account_type_id: null,
+  account_id: null,
+  business_account_type_id: 'type-1',
   enabled: true,
   config: {},
-  typed_payload: { executor_account_id: 'account-1', feed_type: 'xhs_home_feed', target_count: 50, refresh_rounds: 2, per_round_scroll_target: 50 },
+  typed_payload: { feed_type: 'xhs_home_feed', target_count: 50, refresh_rounds: 2, per_round_scroll_target: 50 },
 };
 
 export const readinessReady: TaskTemplateReadiness = {
   ready: true,
   messages: [],
   checks: [
+    { key: 'business_account_type', ok: true, message: '已设置业务类型' },
     { key: 'executor_account', ok: true, message: '执行账号存在' },
-    { key: 'agent_online', ok: true, message: '绑定 Agent 当前在线' },
-    { key: 'session_ready', ok: true, message: '账号 Session 已就绪' },
+    { key: 'agent_pool_online', ok: true, message: '在线 Agent 1 台' },
+    { key: 'session_pool_ready', ok: true, message: '绑定池存在 ready 会话' },
   ],
 };
 

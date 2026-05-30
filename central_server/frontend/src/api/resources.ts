@@ -5,6 +5,7 @@ import type {
   BenchmarkGroupBusinessType,
   BenchmarkGroupMember,
   BusinessAccountType,
+  BusinessAccountTypeBenchmarkGroup,
   BusinessAccountTypeRuleSet,
   Employee,
   KeywordRule,
@@ -157,6 +158,13 @@ export function deleteKeywordRule(role: Role, ruleId: string, userId?: string) {
 
 export function listBusinessTypeRuleSets(role: Role, businessTypeId: string, userId?: string) {
   return apiRequest<BusinessAccountTypeRuleSet[]>(`/api/business-account-types/${businessTypeId}/rule-sets`, { role, userId });
+}
+
+export function listBusinessTypeBenchmarkGroups(role: Role, businessTypeId: string, userId?: string) {
+  return apiRequest<BusinessAccountTypeBenchmarkGroup[]>(
+    `/api/business-account-types/${businessTypeId}/benchmark-groups`,
+    { role, userId },
+  );
 }
 
 export function bindBusinessTypeRuleSet(role: Role, businessTypeId: string, ruleSetId: string, isDefault = false, userId?: string) {

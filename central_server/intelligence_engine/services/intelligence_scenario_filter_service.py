@@ -1,17 +1,37 @@
 from datetime import datetime, timedelta, timezone
 
 from intelligence_engine.db.models import UserIntelligenceScenarioFilter
+import re
+
 from intelligence_engine.domain.user_intelligence_scenario_filter_schemas import (
+    CUSTOM_SCENARIO_PREFIX,
     IntelligenceScenarioFilterRead,
     IntelligenceScenarioFilterUpsertRequest,
     IntelligenceScenarioRollingConfig,
-    VALID_INTELLIGENCE_SCENARIOS,
+    SYSTEM_INTELLIGENCE_SCENARIOS,
 )
+
+_CUSTOM_SCENARIO_PATTERN = re.compile(r"^custom-[a-z0-9]{4,24}$")
+
+
+def is_custom_scenario(scenario: str) -> bool:
+    return bool(_CUSTOM_SCENARIO_PATTERN.match(scenario))
 
 
 def assert_valid_scenario(scenario: str) -> None:
-    if scenario not in VALID_INTELLIGENCE_SCENARIOS:
-        raise ValueError(f"unsupported scenario: {scenario}")
+    if scenario in SYSTEM_INTELLIGENCE_SCENARIOS:
+        return
+    if is_custom_scenario(scenario):
+        return
+    raise ValueError(f"unsupported scenario: {scenario}")
+
+
+def assert_custom_scenario_create(scenario: str, rolling: IntelligenceScenarioRollingConfig) -> None:
+    assert_valid_scenario(scenario)
+    if not is_custom_scenario(scenario):
+        return
+    if not rolling.label:
+        raise ValueError("custom scenario requires label")
 
 
 def rolling_config_from_dict(raw: dict | None) -> IntelligenceScenarioRollingConfig:

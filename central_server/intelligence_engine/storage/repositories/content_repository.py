@@ -172,8 +172,10 @@ class ContentRepository:
         enqueue_detail_job: bool | None = None,
     ) -> tuple[ContentIdentity, bool, ContentDiscoveryEvent, bool, bool | None]:
         content, is_new = self.upsert_identity_from_candidate(candidate)
-        WorkflowRepository(self.db).ensure_state(content.id)
+        workflow_repo = WorkflowRepository(self.db)
+        workflow_repo.ensure_state(content.id)
         event = self.insert_discovery_event(content=content, job_id=job_id, account_id=account_id, candidate=candidate)
+        workflow_repo.maybe_auto_assign_from_discovery_account(content_id=content.id, account_id=account_id)
         detail_job_enqueued = False
         feed_prelim_pass: bool | None = None
         parent_job = self.db.get(Job, job_id)

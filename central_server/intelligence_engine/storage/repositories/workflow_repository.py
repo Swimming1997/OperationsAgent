@@ -3,6 +3,7 @@
 from sqlalchemy import Text, and_, func, or_, select
 from sqlalchemy.orm import Session
 
+from intelligence_engine.services.content_query import build_content_query_condition, resolve_content_query
 from intelligence_engine.services.media_service import MediaService
 from intelligence_engine.db.models import (
     User,
@@ -14,6 +15,8 @@ from intelligence_engine.db.models import (
     ContentOperatorNote,
     ContentSnapshot,
     ContentWorkflowState,
+    Employee,
+    PlatformAccount,
     ReferenceLibraryItem,
     utcnow,
 )
@@ -63,6 +66,25 @@ class WorkflowRepository:
         self.db.flush()
         return state
 
+    def maybe_auto_assign_from_discovery_account(self, *, content_id: str, account_id: str | None) -> ContentWorkflowState | None:
+        if not account_id:
+            return None
+        account = self.db.get(PlatformAccount, account_id)
+        if not account or not account.employee_id:
+            return None
+        employee = self.db.get(Employee, account.employee_id)
+        if not employee or not employee.user_id:
+            return None
+        state = self.ensure_state(content_id)
+        if state.assigned_to_user_id:
+            return state
+        return self.assign(
+            content_id=content_id,
+            assigned_to_user_id=employee.user_id,
+            assigned_by_user_id=None,
+            remark="自动分配：由负责账号采集发现",
+        )
+
     def set_status(self, *, content_id: str, status: ContentWorkflowStatus | str, user_id: str | None = None, note: str | None = None) -> ContentWorkflowState:
         now = utcnow()
         state = self.ensure_state(content_id)
@@ -110,9 +132,13 @@ class WorkflowRepository:
         platform: str | None = None,
         source_surface: str | None = None,
         candidate_bucket: str | None = None,
+        candidate_buckets: list[str] | None = None,
         workflow_status: str | None = None,
+        workflow_statuses: list[str] | None = None,
         assigned_to_user_id: str | None = None,
+        discovered_by_account_ids: list[str] | None = None,
         business_keyword: str | None = None,
+        content_query: str | None = None,
         search_keyword: str | None = None,
         discovered_after: datetime | None = None,
         discovered_before: datetime | None = None,
@@ -134,52 +160,35 @@ class WorkflowRepository:
         sort_order: str = "desc",
         pool_only: bool = True,
     ) -> tuple[list[dict], int]:
+        query_keyword = resolve_content_query(content_query, business_keyword)
+        content_search_mode = bool(query_keyword)
+
         base_conditions = []
-        if pool_only and not candidate_bucket and not workflow_status:
+        if content_search_mode:
             base_conditions.append(
-                or_(
-                    CandidateDecision.id.is_(None),
-                    CandidateDecision.candidate_bucket.in_(
-                        [
-                            CandidateBucket.CONTENT_CANDIDATE.value,
-                            CandidateBucket.LEAD_CANDIDATE.value,
-                            CandidateBucket.PENDING_ENRICHMENT.value,
-                        ]
-                    ),
-                )
+                build_content_query_condition(query_keyword, include_business_keyword_hits=True)
             )
-        if pool_only and not workflow_status:
-            base_conditions.append(
-                or_(
-                    ContentWorkflowState.id.is_(None),
-                    ContentWorkflowState.workflow_status.notin_(
-                        [
-                            ContentWorkflowStatus.DISCARDED.value,
-                            ContentWorkflowStatus.ARCHIVED.value,
-                        ]
-                    ),
-                )
-            )
+        candidate_bucket_values = candidate_buckets or ([candidate_bucket] if candidate_bucket else [])
+        workflow_status_values = workflow_statuses or ([workflow_status] if workflow_status else [])
         if platform:
             base_conditions.append(ContentIdentity.platform == platform)
         if source_surface:
             base_conditions.append(ContentDiscoveryEvent.source_surface == source_surface)
-        if candidate_bucket:
-            base_conditions.append(CandidateDecision.candidate_bucket == candidate_bucket)
-        if workflow_status:
-            base_conditions.append(ContentWorkflowState.workflow_status == workflow_status)
-        if assigned_to_user_id:
-            base_conditions.append(ContentWorkflowState.assigned_to_user_id == assigned_to_user_id)
-        if business_keyword:
-            keyword = business_keyword.lower()
+        if candidate_bucket_values:
+            base_conditions.append(CandidateDecision.candidate_bucket.in_(candidate_bucket_values))
+        if workflow_status_values:
+            base_conditions.append(ContentWorkflowState.workflow_status.in_(workflow_status_values))
+        if assigned_to_user_id and discovered_by_account_ids:
             base_conditions.append(
                 or_(
-                    func.lower(CandidateDecision.business_keyword_hits_json.cast(Text)).contains(keyword),
-                    func.lower(ContentIdentity.metadata_json.cast(Text)).contains(keyword),
-                    func.lower(ContentSnapshot.title).contains(keyword),
-                    func.lower(ContentSnapshot.body_text).contains(keyword),
+                    ContentWorkflowState.assigned_to_user_id == assigned_to_user_id,
+                    ContentDiscoveryEvent.account_id.in_(discovered_by_account_ids),
                 )
             )
+        elif assigned_to_user_id:
+            base_conditions.append(ContentWorkflowState.assigned_to_user_id == assigned_to_user_id)
+        elif discovered_by_account_ids:
+            base_conditions.append(ContentDiscoveryEvent.account_id.in_(discovered_by_account_ids))
         if search_keyword:
             keyword = search_keyword.lower()
             base_conditions.append(func.lower(ContentDiscoveryEvent.discovery_meta_json.cast(Text)).contains(keyword))
@@ -342,7 +351,11 @@ class WorkflowRepository:
                 detail_fetch_failed=bool(enrichment_flags.get("detail_failed")),
                 comment_fetch_failed=bool(enrichment_flags.get("comment_failed")),
             )
-            if data_status in {ContentDataStatus.COMMENTS_READY.value, ContentDataStatus.DETAIL_FAILED.value, ContentDataStatus.COMMENTS_FAILED.value}:
+            if data_status in {
+                ContentDataStatus.COMMENTS_READY.value,
+                ContentDataStatus.DETAIL_FAILED.value,
+                ContentDataStatus.COMMENTS_FAILED.value,
+            }:
                 if status_value != data_status:
                     continue
             platform_tags = extract_platform_tags(metadata, snapshot.raw_payload_json if snapshot else None)

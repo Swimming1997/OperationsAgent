@@ -105,14 +105,17 @@ def _content_with_snapshot(db_session):
 
 def test_typed_task_template_dto_validation_and_endpoints(db_session):
     account = _account(db_session)
+    business_type = ProductRepository(db_session).create_business_account_type(name="表单类型", description=None, enabled=True)
+    account.business_account_type_id = business_type.id
+    db_session.flush()
     RecommendationFeedTaskTemplateCreate(
         name="推荐流表单",
-        executor_account_id=account.id,
+        business_account_type_id=business_type.id,
         feed_type=FeedType.XHS_HOME_FEED,
         target_count=50,
     )
     try:
-        KeywordSearchTaskTemplateCreate(name="搜索", executor_account_id=account.id, platform=Platform.XHS, keywords=[])
+        KeywordSearchTaskTemplateCreate(name="搜索", business_account_type_id=business_type.id, platform=Platform.XHS, keywords=[])
     except ValueError as exc:
         assert "keywords" in str(exc)
     else:
@@ -123,7 +126,7 @@ def test_typed_task_template_dto_validation_and_endpoints(db_session):
         "/api/task-templates/recommendation-feed",
         json={
             "name": "推荐流表单",
-            "executor_account_id": account.id,
+            "business_account_type_id": business_type.id,
             "feed_type": "xhs_home_feed",
             "target_count": 20,
             "behavior_profile_id": "behavior-1",
@@ -214,17 +217,21 @@ def test_scheduler_cli_dry_run_and_run(tmp_path):
             default_agent_id=None,
             metadata={},
         )
+        business_type = ProductRepository(session).create_business_account_type(name="调度业务", description=None, enabled=True)
+        account.business_account_type_id = business_type.id
         template = ProductRepository(session).create_task_template(
             name="due-template",
             template_type="recommendation_feed_task",
             platform=Platform.XHS.value,
-            account_id=account.id,
-            business_account_type_id=None,
-            config={"executor_account_id": account.id, "feed_type": "xhs_home_feed", "target_count": 1},
+            business_account_type_id=business_type.id,
+            created_by_user_id=None,
+            config={"feed_type": "xhs_home_feed", "target_count": 1, "refresh_rounds": 1, "per_round_scroll_target": 1},
             enabled=True,
         )
         ProductRepository(session).create_task_schedule(
             task_template_id=template.id,
+            executor_account_id=account.id,
+            created_by_user_id=None,
             schedule_type="interval_seconds",
             interval_seconds=60,
             daily_time_window={},

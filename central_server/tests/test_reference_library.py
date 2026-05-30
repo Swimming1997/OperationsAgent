@@ -216,6 +216,46 @@ def test_reference_library_list_and_pool_filters_by_p0_fields(db_session):
     assert all(row["content_id"] != content.id for row in hidden.json()["items"])
 
 
+def test_reference_library_list_content_query_matches_title(db_session):
+    content = _seed_content(db_session)
+    client = _client(db_session)
+    created = client.post(
+        f"/api/intelligence/contents/{content.id}/reference-library-items",
+        json={"library_type": "non_lead", "user_id": "admin-user"},
+    )
+    assert created.status_code == 200, created.text
+
+    hit = client.get("/api/reference-library/items", params={"content_query": "SCI投稿"})
+    assert hit.status_code == 200, hit.text
+    assert hit.json()["total"] == 1
+
+    legacy = client.get("/api/reference-library/items", params={"search_keyword": "SCI投稿"})
+    assert legacy.status_code == 200, legacy.text
+    assert legacy.json()["total"] == 1
+
+    miss = client.get("/api/reference-library/items", params={"content_query": "__no_such_title__"})
+    assert miss.status_code == 200, miss.text
+    assert miss.json()["total"] == 0
+
+
+def test_reference_library_list_search_keyword_matches_title_and_metadata(db_session):
+    content = _seed_content(db_session)
+    client = _client(db_session)
+    created = client.post(
+        f"/api/intelligence/contents/{content.id}/reference-library-items",
+        json={"library_type": "non_lead", "user_id": "admin-user"},
+    )
+    assert created.status_code == 200, created.text
+
+    hit = client.get("/api/reference-library/items", params={"search_keyword": "SCI投稿"})
+    assert hit.status_code == 200, hit.text
+    assert hit.json()["total"] == 1
+
+    miss = client.get("/api/reference-library/items", params={"search_keyword": "__no_such_title__"})
+    assert miss.status_code == 200, miss.text
+    assert miss.json()["total"] == 0
+
+
 def test_reference_library_bulk_partial_success_and_idempotency(db_session):
     content = _seed_content(db_session)
     client = _client(db_session)

@@ -23,16 +23,19 @@ export type ReferenceExplainSnapshot = {
 type Props = {
   snapshot: ReferenceExplainSnapshot;
   title?: string;
+  onOpenRules?: () => void;
 };
 
-export function ReferenceRuleExplainSummary({ snapshot, title = '规则判断' }: Props) {
+export function ReferenceRuleExplainSummary({ snapshot, title = '规则判断', onOpenRules }: Props) {
   const locked = snapshot.manual_locked ?? isReferenceManualLocked(snapshot.metadata);
   const reason = snapshot.ai_reason || snapshot.selected_reason;
 
   return (
     <div className="detail-section reference-explain-summary" data-testid="reference-rule-explain">
       <b>{title}</b>
-      {snapshot.in_library === false && <span className="muted-hint">当前未入对标库，重评将尝试按 RuleProfile 自动入库。</span>}
+      {snapshot.in_library === false && (
+        <span className="muted-hint">当前未入对标库，规则重评将按平台入选规则（RuleProfile）尝试自动入库。</span>
+      )}
       <span>
         入库状态：
         {snapshot.in_library === false ? '未入库' : `${labelReferenceLibraryType(snapshot.library_type)} · ${labelReferenceLibraryRating(snapshot.rating)}`}
@@ -44,6 +47,7 @@ export function ReferenceRuleExplainSummary({ snapshot, title = '规则判断' }
       </span>
       <span>命中词：{formatTags(snapshot.matched_keywords)}</span>
       <span>判断原因：{reason || '-'}</span>
+      <ReferenceRuleSettingsLink onOpenRules={onOpenRules} />
     </div>
   );
 }
@@ -86,6 +90,55 @@ export function ReevaluateResultPanel({ results, onClear }: ResultsProps) {
   );
 }
 
-export function canReevaluateReference(role: string): boolean {
-  return role === 'admin' || role === 'supervisor';
+import {
+  canArchiveReference,
+  canEditReferenceLibrary,
+  canReevaluateReference,
+  canRevokeOwnReferenceLibraryItem,
+  formatReferenceRevokeRemaining,
+  isIntelligenceReadOnly,
+  referenceArchiveActionLabel,
+} from '../utils/intelligencePermissions';
+
+export {
+  canArchiveReference,
+  canEditReferenceLibrary,
+  canReevaluateReference,
+  canRevokeOwnReferenceLibraryItem,
+  formatReferenceRevokeRemaining,
+  isIntelligenceReadOnly,
+  referenceArchiveActionLabel,
+};
+
+type RuleSettingsLinkProps = {
+  onOpenRules?: () => void;
+};
+
+export function ReferenceRuleSettingsLink({ onOpenRules }: RuleSettingsLinkProps) {
+  if (!onOpenRules) return null;
+  return (
+    <button type="button" className="secondary linkish" onClick={onOpenRules}>
+      查看关键词与入选规则配置
+    </button>
+  );
+}
+
+export function ReferencePermissionHint({
+  role,
+  action,
+}: {
+  role: string;
+  action: 'archive' | 'reevaluate' | 'revoke';
+}) {
+  const allowed = action === 'reevaluate' ? canReevaluateReference(role) : canArchiveReference(role);
+  if (allowed) return null;
+  if (action === 'revoke') {
+    return (
+      <span className="muted-hint permission-hint">
+        「撤回入库」需在入库后 24 小时内，且须为本人操作；超期请联系主管。
+      </span>
+    );
+  }
+  const label = action === 'archive' ? '移出对标库' : '规则重评';
+  return <span className="muted-hint permission-hint">「{label}」需主管或管理员权限</span>;
 }

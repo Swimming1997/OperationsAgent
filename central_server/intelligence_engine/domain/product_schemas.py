@@ -354,10 +354,55 @@ class KeywordSearchTaskPayload(ApiModel):
         return self
 
 
+class RecommendationFeedTemplateConfig(ApiModel):
+    feed_type: FeedType
+    target_count: int = Field(default=50, ge=1, le=500)
+    refresh_rounds: int = Field(default=2, ge=1, le=20)
+    per_round_scroll_target: int = Field(default=50, ge=1, le=500)
+    rule_set_id: str | None = None
+    behavior_profile_id: str | None = None
+    network_egress_profile_id: str | None = None
+    risk_policy_id: str | None = None
+
+
+class CreatorMonitorTemplateConfig(ApiModel):
+    benchmark_group_id: str
+    auto_detail_fetch: bool = True
+    max_latest_items: int = Field(default=20, ge=1, le=100)
+    rule_set_id: str | None = None
+    behavior_profile_id: str | None = None
+    network_egress_profile_id: str | None = None
+    risk_policy_id: str | None = None
+
+
+class KeywordSearchTemplateConfig(ApiModel):
+    platform: Platform
+    keywords: list[str] = Field(default_factory=list)
+    keyword_group: str | None = None
+    max_items: int = Field(default=50, ge=1, le=500)
+    search_sort: XhsSearchSort = XhsSearchSort.COMPREHENSIVE
+    note_type: XhsNoteType = XhsNoteType.ALL
+    publish_time: XhsPublishTime = XhsPublishTime.ALL
+    search_scope: XhsSearchScope = XhsSearchScope.ALL
+    location_filter: XhsLocationFilter = XhsLocationFilter.ALL
+    per_keyword_limit: int | None = Field(default=None, ge=1, le=500)
+    collect_suggestions_first: bool = False
+    rule_set_id: str | None = None
+    behavior_profile_id: str | None = None
+    network_egress_profile_id: str | None = None
+    risk_policy_id: str | None = None
+
+    @model_validator(mode="after")
+    def require_keywords_or_group(self):
+        if not self.keywords and not self.keyword_group:
+            raise ValueError("keywords or keyword_group is required")
+        return self
+
+
 class RecommendationFeedTaskTemplateCreate(ApiModel):
     name: str
+    business_account_type_id: str
     enabled: bool = True
-    executor_account_id: str
     feed_type: FeedType
     target_count: int = Field(default=50, ge=1, le=500)
     refresh_rounds: int = Field(default=2, ge=1, le=20)
@@ -370,8 +415,8 @@ class RecommendationFeedTaskTemplateCreate(ApiModel):
 
 class RecommendationFeedTaskTemplateUpdate(ApiModel):
     name: str | None = None
+    business_account_type_id: str | None = None
     enabled: bool | None = None
-    executor_account_id: str | None = None
     feed_type: FeedType | None = None
     target_count: int | None = Field(default=None, ge=1, le=500)
     refresh_rounds: int | None = Field(default=None, ge=1, le=20)
@@ -384,8 +429,8 @@ class RecommendationFeedTaskTemplateUpdate(ApiModel):
 
 class CreatorMonitorTaskTemplateCreate(ApiModel):
     name: str
+    business_account_type_id: str
     enabled: bool = True
-    executor_account_id: str
     benchmark_group_id: str
     auto_detail_fetch: bool = True
     rule_set_id: str | None = None
@@ -396,8 +441,8 @@ class CreatorMonitorTaskTemplateCreate(ApiModel):
 
 class CreatorMonitorTaskTemplateUpdate(ApiModel):
     name: str | None = None
+    business_account_type_id: str | None = None
     enabled: bool | None = None
-    executor_account_id: str | None = None
     benchmark_group_id: str | None = None
     auto_detail_fetch: bool | None = None
     rule_set_id: str | None = None
@@ -408,8 +453,8 @@ class CreatorMonitorTaskTemplateUpdate(ApiModel):
 
 class KeywordSearchTaskTemplateCreate(ApiModel):
     name: str
+    business_account_type_id: str
     enabled: bool = True
-    executor_account_id: str
     platform: Platform
     keywords: list[str] = Field(default_factory=list)
     max_items: int = Field(default=50, ge=1, le=500)
@@ -427,8 +472,8 @@ class KeywordSearchTaskTemplateCreate(ApiModel):
 
 class KeywordSearchTaskTemplateUpdate(ApiModel):
     name: str | None = None
+    business_account_type_id: str | None = None
     enabled: bool | None = None
-    executor_account_id: str | None = None
     platform: Platform | None = None
     keywords: list[str] | None = None
     max_items: int | None = Field(default=None, ge=1, le=500)
@@ -450,18 +495,34 @@ class TaskTemplateRead(ApiModel):
     typed_payload: dict[str, Any] = Field(default_factory=dict)
 
 
+class TaskTemplatePermissions(ApiModel):
+    can_edit: bool
+    can_run: bool
+    can_schedule: bool
+    can_delete: bool
+
+
 class TaskTemplateListItem(ApiModel):
     id: str
     name: str
     template_type: str
     enabled: bool
     platform: str | None = None
-    account_id: str | None = None
+    business_account_type_id: str | None = None
+    business_account_type_name: str | None = None
+    created_by_user_id: str | None = None
+    created_by_display_name: str | None = None
     key_fields: dict[str, Any] = Field(default_factory=dict)
+    permissions: TaskTemplatePermissions
+
+
+class TaskTemplateRunRequest(ApiModel):
+    executor_account_id: str
 
 
 class TaskScheduleCreateRequest(ApiModel):
     task_template_id: str
+    executor_account_id: str
     schedule_type: TaskScheduleType
     interval_seconds: int | None = None
     daily_time_window: dict[str, Any] = Field(default_factory=dict)
@@ -469,9 +530,20 @@ class TaskScheduleCreateRequest(ApiModel):
     next_run_at: datetime | None = None
 
 
+class TaskScheduleUpdateRequest(ApiModel):
+    executor_account_id: str | None = None
+    schedule_type: TaskScheduleType | None = None
+    interval_seconds: int | None = None
+    daily_time_window: dict[str, Any] | None = None
+    enabled: bool | None = None
+    next_run_at: datetime | None = None
+
+
 class TaskScheduleRead(ApiModel):
     id: str
     task_template_id: str
+    executor_account_id: str | None = None
+    created_by_user_id: str | None = None
     schedule_type: str
     interval_seconds: int | None = None
     daily_time_window: dict[str, Any] = Field(default_factory=dict)
@@ -736,6 +808,13 @@ class BenchmarkGroupBusinessAccountTypeRead(ApiModel):
     benchmark_group_id: str
     business_account_type_id: str
     business_account_type_name: str | None = None
+
+
+class BusinessAccountTypeBenchmarkGroupRead(ApiModel):
+    id: str
+    business_account_type_id: str
+    benchmark_group_id: str
+    benchmark_group_name: str | None = None
 
 
 class KeywordRuleSetCreateRequest(ApiModel):

@@ -1,4 +1,4 @@
-from sqlalchemy import Text, and_, func, select
+from sqlalchemy import Text, and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from intelligence_engine.db.models import (
@@ -9,6 +9,7 @@ from intelligence_engine.db.models import (
     utcnow,
 )
 from intelligence_engine.domain.enums import ReferenceLibraryItemStatus
+from intelligence_engine.services.content_query import build_content_query_condition, resolve_content_query
 
 
 LEGACY_LIBRARY_TYPE_MAP = {
@@ -145,7 +146,14 @@ class ReferenceLibraryRepository:
         )
         return item
 
-    def archive_item(self, item: ReferenceLibraryItem, *, user_id: str | None, employee_id: str | None) -> ReferenceLibraryItem:
+    def archive_item(
+        self,
+        item: ReferenceLibraryItem,
+        *,
+        user_id: str | None,
+        employee_id: str | None,
+        event_type: str = "archived",
+    ) -> ReferenceLibraryItem:
         item.status = ReferenceLibraryItemStatus.ARCHIVED.value
         item.usage_status = "archived"
         item.updated_at = utcnow()
@@ -153,7 +161,7 @@ class ReferenceLibraryRepository:
         self._add_event(
             library_item_id=item.id,
             content_id=item.content_id,
-            event_type="archived",
+            event_type=event_type,
             user_id=user_id,
             employee_id=employee_id,
             payload={},
@@ -171,6 +179,8 @@ class ReferenceLibraryRepository:
         rating: str | None = None,
         status: str | None = ReferenceLibraryItemStatus.ACTIVE.value,
         usage_status: str | None = None,
+        search_keyword: str | None = None,
+        content_query: str | None = None,
         sort_by: str = "selected_at",
         sort_order: str = "desc",
     ) -> tuple[list[dict], int]:
@@ -187,8 +197,14 @@ class ReferenceLibraryRepository:
             conditions.append(ReferenceLibraryItem.status == status)
         if usage_status:
             conditions.append(ReferenceLibraryItem.usage_status == usage_status)
+        query_keyword = resolve_content_query(content_query, search_keyword)
+        if query_keyword:
+            conditions.append(
+                build_content_query_condition(query_keyword, include_reference_item_fields=True)
+            )
 
         count_stmt = select(func.count(ReferenceLibraryItem.id)).join(ContentIdentity, ContentIdentity.id == ReferenceLibraryItem.content_id)
+        count_stmt = count_stmt.join(ContentSnapshot, ContentSnapshot.id == ContentIdentity.latest_snapshot_id, isouter=True)
         if conditions:
             count_stmt = count_stmt.where(and_(*conditions))
         total = self.db.scalar(count_stmt) or 0

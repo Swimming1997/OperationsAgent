@@ -1,7 +1,11 @@
-import { RotateCcw, Save, Search } from 'lucide-react';
+import { Check, Plus, RotateCcw, Save, Search, Trash2, X } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
 import type { IntelligenceFilters } from '../../api/intelligence';
 import type { ProductOptions } from '../../types/api';
 import { INTELLIGENCE_SOURCE_OPTIONS, localizeOptionItems } from '../../utils/intelligenceLabels';
+import { IntelligenceScenarioTabs } from './IntelligenceScenarioTabs';
+import type { CustomIntelligenceScenario, IntelligenceScenario } from './scenarioPresets';
+import { isCustomScenario, listCustomScenarios, type ScenarioFilterState } from './scenarioPresets';
 
 const DATA_STATUS_OPTIONS = [
   { value: '', label: '全部' },
@@ -32,12 +36,16 @@ type DisplayOptions = {
 };
 
 type Props = {
+  scenario: IntelligenceScenario;
   filters: IntelligenceFilters;
   quickFilters: IntelligenceFilters;
   displayOptions: DisplayOptions | null;
   advancedOpen: boolean;
+  filterPreferencesEnabled?: boolean;
   hasCustomizedFilters: boolean;
   savingScenarioFilters: boolean;
+  savedScenarioFilters: Partial<Record<IntelligenceScenario, ScenarioFilterState>>;
+  onScenarioChange: (scenario: IntelligenceScenario) => void;
   onAdvancedOpenChange: (open: boolean) => void;
   onQuickFilterChange: (key: keyof IntelligenceFilters, value: string) => void;
   onFilterChange: (key: keyof IntelligenceFilters, value: string) => void;
@@ -45,15 +53,123 @@ type Props = {
   onReset: () => void;
   onSaveScenarioFilters: () => void;
   onRestoreSystemDefault: () => void;
+  onAddCustomScenario: (label: string) => void;
+  onDeleteCustomScenario: () => void;
 };
 
+function splitMultiValue(value?: string) {
+  return (value || '').split(',').map((item) => item.trim()).filter(Boolean);
+}
+
+function joinMultiValue(values: string[]) {
+  return values.length > 0 ? values.join(',') : '';
+}
+
+function MultiFilterDropdown({
+  id,
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  id: string;
+  label: string;
+  value?: string;
+  options: Array<{ value: string; label: string }>;
+  onChange: (value: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const selectedValues = splitMultiValue(value);
+  const selectedSet = new Set(selectedValues);
+  const selectedOptions = selectedValues
+    .map((selected) => options.find((item) => item.value === selected))
+    .filter((item): item is { value: string; label: string } => Boolean(item));
+
+  useEffect(() => {
+    if (!open) return;
+    function handlePointerDown(event: MouseEvent) {
+      if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handlePointerDown);
+    return () => document.removeEventListener('mousedown', handlePointerDown);
+  }, [open]);
+
+  function applyChange(next: string) {
+    onChange(next);
+    setOpen(false);
+  }
+
+  function toggle(nextValue: string) {
+    const next = selectedSet.has(nextValue)
+      ? selectedValues.filter((item) => item !== nextValue)
+      : [...selectedValues, nextValue];
+    applyChange(joinMultiValue(next));
+  }
+
+  function remove(nextValue: string) {
+    onChange(joinMultiValue(selectedValues.filter((item) => item !== nextValue)));
+  }
+
+  return (
+    <div className="multi-filter-field">
+      <label id={`${id}-label`}>{label}</label>
+      <div ref={menuRef} className={`multi-filter-menu${open ? ' is-open' : ''}`}>
+        <button
+          type="button"
+          id={id}
+          className="multi-filter-trigger"
+          aria-labelledby={`${id}-label ${id}`}
+          aria-expanded={open}
+          aria-haspopup="listbox"
+          onClick={() => setOpen((current) => !current)}
+        >
+          <span>{selectedOptions.length > 0 ? `已选 ${selectedOptions.length} 项` : '全部'}</span>
+        </button>
+        {open ? (
+          <div className="multi-filter-options" role="listbox" aria-labelledby={`${id}-label`}>
+            <button type="button" className="multi-filter-option" onClick={() => applyChange('')}>
+              <span className="multi-filter-check">{selectedOptions.length === 0 ? <Check size={14} /> : null}</span>
+              全部
+            </button>
+            {options.map((item) => (
+              <button key={item.value} type="button" className="multi-filter-option" onClick={() => toggle(item.value)}>
+                <span className="multi-filter-check">{selectedSet.has(item.value) ? <Check size={14} /> : null}</span>
+                {item.label}
+              </button>
+            ))}
+          </div>
+        ) : null}
+      </div>
+      {selectedOptions.length > 0 ? (
+        <div className="multi-filter-tags" aria-label={`${label}已选条件`}>
+          {selectedOptions.map((item) => (
+            <span key={item.value} className="filter-token">
+              {item.label}
+              <button type="button" aria-label={`移除${item.label}`} onClick={() => remove(item.value)}>
+                <X size={12} />
+              </button>
+            </span>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export function IntelligenceFilterPanel({
+  scenario,
   filters,
   quickFilters,
   displayOptions,
   advancedOpen,
+  filterPreferencesEnabled = true,
   hasCustomizedFilters,
   savingScenarioFilters,
+  savedScenarioFilters,
+  onScenarioChange,
   onAdvancedOpenChange,
   onQuickFilterChange,
   onFilterChange,
@@ -61,7 +177,22 @@ export function IntelligenceFilterPanel({
   onReset,
   onSaveScenarioFilters,
   onRestoreSystemDefault,
+  onAddCustomScenario,
+  onDeleteCustomScenario,
 }: Props) {
+  const [addingCustomScenario, setAddingCustomScenario] = useState(false);
+  const [customScenarioLabel, setCustomScenarioLabel] = useState('');
+  const customScenarios = listCustomScenarios(savedScenarioFilters);
+  const isCustom = isCustomScenario(scenario);
+
+  function submitCustomScenario() {
+    const label = customScenarioLabel.trim();
+    if (!label) return;
+    onAddCustomScenario(label);
+    setCustomScenarioLabel('');
+    setAddingCustomScenario(false);
+  }
+
   return (
     <aside className="filter-panel">
       <div className="panel-title">筛选</div>
@@ -78,13 +209,6 @@ export function IntelligenceFilterPanel({
         ))}
       </select>
 
-      <label>搜索关键词</label>
-      <input
-        value={quickFilters.search_keyword || ''}
-        onChange={(event) => onQuickFilterChange('search_keyword', event.target.value)}
-        placeholder="如：论文、SCI"
-      />
-
       <label>排序</label>
       <select
         value={quickFilters.sort_by || 'latest_discovered_at'}
@@ -97,6 +221,16 @@ export function IntelligenceFilterPanel({
         ))}
       </select>
 
+      <div className="filter-scenario-section">
+        <span className="layer-label">场景快捷筛选</span>
+        <IntelligenceScenarioTabs
+          active={scenario}
+          customScenarios={customScenarios}
+          onChange={onScenarioChange}
+          variant="sidebar"
+        />
+      </div>
+
       <button
         type="button"
         className="secondary advanced-filter-toggle"
@@ -107,7 +241,8 @@ export function IntelligenceFilterPanel({
 
       {advancedOpen && (
         <div className="advanced-filters" data-testid="intelligence-advanced-filters">
-          {hasCustomizedFilters && <p className="filter-hint">当前 Tab 已保存个人筛选规则。</p>}
+          {hasCustomizedFilters && !isCustom && <p className="filter-hint">当前场景已保存个人筛选规则。</p>}
+          {isCustom && <p className="filter-hint">自定义场景快捷筛选，修改后请保存。</p>}
 
           <label>平台</label>
           <select value={filters.platform || ''} onChange={(event) => onFilterChange('platform', event.target.value)}>
@@ -118,6 +253,14 @@ export function IntelligenceFilterPanel({
               </option>
             ))}
           </select>
+
+          <label htmlFor="filter-discovery-search-keyword">发现时搜索词（采集任务）</label>
+          <input
+            id="filter-discovery-search-keyword"
+            value={filters.search_keyword || ''}
+            onChange={(event) => onFilterChange('search_keyword', event.target.value)}
+            placeholder="如：SCI（发现元数据中的任务关键词）"
+          />
 
           <label>数据状态</label>
           <select value={filters.data_status || ''} onChange={(event) => onFilterChange('data_status', event.target.value)}>
@@ -156,19 +299,13 @@ export function IntelligenceFilterPanel({
             ))}
           </select>
 
-          <label htmlFor="filter-candidate-bucket">候选分类</label>
-          <select
+          <MultiFilterDropdown
             id="filter-candidate-bucket"
+            label="候选分类"
             value={filters.candidate_bucket || ''}
-            onChange={(event) => onFilterChange('candidate_bucket', event.target.value)}
-          >
-            <option value="">全部</option>
-            {displayOptions?.candidate_buckets.map((item) => (
-              <option key={item.value} value={item.value}>
-                {item.label}
-              </option>
-            ))}
-          </select>
+            options={displayOptions?.candidate_buckets || []}
+            onChange={(value) => onFilterChange('candidate_bucket', value)}
+          />
 
           <label htmlFor="filter-manual-tag">运营标签</label>
           <input
@@ -178,25 +315,12 @@ export function IntelligenceFilterPanel({
             placeholder="如：稍后看"
           />
 
-          <label htmlFor="filter-workflow-status">审核状态</label>
-          <select
+          <MultiFilterDropdown
             id="filter-workflow-status"
+            label="审核状态"
             value={filters.workflow_status || ''}
-            onChange={(event) => onFilterChange('workflow_status', event.target.value)}
-          >
-            <option value="">全部</option>
-            {displayOptions?.workflow_statuses.map((item) => (
-              <option key={item.value} value={item.value}>
-                {item.label}
-              </option>
-            ))}
-          </select>
-
-          <label>业务关键词</label>
-          <input
-            value={filters.business_keyword || ''}
-            onChange={(event) => onFilterChange('business_keyword', event.target.value)}
-            placeholder="正文/标题命中"
+            options={displayOptions?.workflow_statuses || []}
+            onChange={(value) => onFilterChange('workflow_status', value)}
           />
 
           <label htmlFor="filter-discovered-after">发现时间不早于</label>
@@ -212,20 +336,81 @@ export function IntelligenceFilterPanel({
             }
           />
 
+          {filterPreferencesEnabled ? (
           <div className="filter-persist-actions">
             <button type="button" className="secondary" disabled={savingScenarioFilters} onClick={onSaveScenarioFilters}>
               <Save size={14} />
-              保存筛选
+              {isCustom ? '保存场景' : '保存到当前场景'}
             </button>
-            <button
-              type="button"
-              className="secondary"
-              disabled={!hasCustomizedFilters || savingScenarioFilters}
-              onClick={onRestoreSystemDefault}
-            >
-              恢复系统默认
-            </button>
+            {isCustom ? (
+              <button
+                type="button"
+                className="secondary"
+                disabled={savingScenarioFilters}
+                onClick={onDeleteCustomScenario}
+                data-testid="delete-custom-scenario-btn"
+              >
+                <Trash2 size={14} />
+                删除场景
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="secondary"
+                disabled={!hasCustomizedFilters || savingScenarioFilters}
+                onClick={onRestoreSystemDefault}
+              >
+                恢复系统默认
+              </button>
+            )}
           </div>
+          ) : null}
+
+          {filterPreferencesEnabled ? (
+          <div className="filter-custom-scenario-create">
+            {addingCustomScenario ? (
+              <div className="filter-custom-scenario-form">
+                <label htmlFor="custom-scenario-label">场景名称</label>
+                <input
+                  id="custom-scenario-label"
+                  value={customScenarioLabel}
+                  onChange={(event) => setCustomScenarioLabel(event.target.value)}
+                  onKeyDown={(event) => event.key === 'Enter' && submitCustomScenario()}
+                  placeholder="如：近7天高赞线索"
+                  maxLength={32}
+                  autoFocus
+                />
+                <div className="filter-custom-scenario-form-actions">
+                  <button type="button" disabled={!customScenarioLabel.trim() || savingScenarioFilters} onClick={submitCustomScenario}>
+                    创建
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={() => {
+                      setAddingCustomScenario(false);
+                      setCustomScenarioLabel('');
+                    }}
+                  >
+                    取消
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button
+                type="button"
+                className="secondary filter-add-scenario-btn"
+                disabled={savingScenarioFilters}
+                onClick={() => setAddingCustomScenario(true)}
+                data-testid="add-custom-scenario-btn"
+              >
+                <Plus size={14} />
+                添加场景快捷筛选
+              </button>
+            )}
+            <p className="filter-hint">将当前高级筛选条件保存为新的场景快捷筛选项。</p>
+          </div>
+          ) : null}
         </div>
       )}
 

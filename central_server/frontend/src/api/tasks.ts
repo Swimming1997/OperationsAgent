@@ -1,12 +1,21 @@
 import { apiRequest } from './client';
-import type { Role, TaskRun, TaskRunListResponse, TaskRunResponse, TaskTemplateDetail, TaskTemplateListItem, TaskTemplateReadiness } from '../types/api';
+import type {
+  Role,
+  TaskRun,
+  TaskRunListResponse,
+  TaskRunResponse,
+  TaskSchedule,
+  TaskTemplateDetail,
+  TaskTemplateListItem,
+  TaskTemplateReadiness,
+} from '../types/api';
 
 export type TaskTemplateType = 'recommendation_feed_task' | 'creator_monitor_task' | 'keyword_search_task';
 
 export type TaskFormData = {
   name: string;
+  business_account_type_id: string;
   enabled: boolean;
-  executor_account_id: string;
   feed_type?: string;
   target_count?: number;
   refresh_rounds?: number;
@@ -20,6 +29,13 @@ export type TaskFormData = {
   behavior_profile_id?: string;
   network_egress_profile_id?: string;
   risk_policy_id?: string;
+};
+
+export type TaskScheduleFormData = {
+  schedule_type: string;
+  interval_seconds?: number;
+  executor_account_id: string;
+  enabled: boolean;
 };
 
 export function listTaskTemplates(role: Role, userId?: string) {
@@ -43,12 +59,26 @@ export function updateTaskTemplate(role: Role, type: TaskTemplateType, templateI
   return apiRequest<TaskTemplateDetail>(endpoint(type, templateId), { method: 'PATCH', role, userId, body: payload });
 }
 
-export function runTaskTemplate(role: Role, templateId: string, userId?: string) {
-  return apiRequest<TaskRunResponse>(`/api/task-templates/${templateId}/run`, { method: 'POST', role, userId });
+export function deleteTaskTemplate(role: Role, templateId: string, userId?: string) {
+  return apiRequest<void>(`/api/task-templates/${templateId}`, { method: 'DELETE', role, userId });
+}
+
+export function runTaskTemplate(role: Role, templateId: string, executorAccountId: string, userId?: string) {
+  return apiRequest<TaskRunResponse>(`/api/task-templates/${templateId}/run`, {
+    method: 'POST',
+    role,
+    userId,
+    body: { executor_account_id: executorAccountId },
+  });
 }
 
 export function getTaskTemplateReadiness(role: Role, templateId: string, userId?: string) {
   return apiRequest<TaskTemplateReadiness>(`/api/task-templates/${templateId}/readiness`, { role, userId });
+}
+
+export function getTaskTemplateRunReadiness(role: Role, templateId: string, executorAccountId: string, userId?: string) {
+  const params = new URLSearchParams({ executor_account_id: executorAccountId });
+  return apiRequest<TaskTemplateReadiness>(`/api/task-templates/${templateId}/run-readiness?${params}`, { role, userId });
 }
 
 export function getTaskRun(role: Role, taskRunId: string, userId?: string) {
@@ -57,4 +87,16 @@ export function getTaskRun(role: Role, taskRunId: string, userId?: string) {
 
 export function listTaskTemplateRuns(role: Role, templateId: string, userId?: string) {
   return apiRequest<TaskRunListResponse>(`/api/task-templates/${templateId}/runs`, { role, userId });
+}
+
+export function listTemplateSchedules(role: Role, templateId: string, userId?: string) {
+  return apiRequest<TaskSchedule[]>(`/api/task-templates/${templateId}/schedules`, { role, userId });
+}
+
+export function createTaskSchedule(role: Role, body: TaskScheduleFormData & { task_template_id: string }, userId?: string) {
+  return apiRequest<TaskSchedule>('/api/task-schedules', { method: 'POST', role, userId, body });
+}
+
+export function patchTaskSchedule(role: Role, scheduleId: string, body: Partial<TaskScheduleFormData>, userId?: string) {
+  return apiRequest<TaskSchedule>(`/api/task-schedules/${scheduleId}`, { method: 'PATCH', role, userId, body });
 }

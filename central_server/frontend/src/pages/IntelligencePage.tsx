@@ -1,10 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { FilterSearchRow } from '../components/FilterSearchRow';
+import { ListPaginationBar } from '../components/ListPaginationBar';
 import {
   addContentNote,
   assignContent,
   bulkCreateReferenceLibraryItems,
   bulkSetContentStatus,
   createReferenceLibraryItem,
+  revokeReferenceLibraryItem,
+  updateReferenceLibraryItem,
   enqueueCommentFetch,
   enqueueDetailFetch,
   fetchIntelligenceContents,
@@ -22,15 +26,23 @@ import {
 import { fetchOptions } from '../api/options';
 import type { ReferenceExplainSnapshot } from '../components/ReferenceRuleExplain';
 import type { IntelligenceItem, ProductDetail, ProductOptions, ReferenceLibraryReevaluateResult, Role } from '../types/api';
+import {
+  canEditIntelligence,
+  isIntelligenceReadOnly,
+  shouldUseReferenceRevokeEndpoint,
+} from '../utils/intelligencePermissions';
 import { parseIntelligenceFilters, replaceRouteSearch, serializeIntelligenceFilters } from '../utils/urlFilters';
 import { IntelligenceBulkBar } from './intelligence/IntelligenceBulkBar';
 import { IntelligenceContentList } from './intelligence/IntelligenceContentList';
 import { IntelligenceDetailPanel } from './intelligence/IntelligenceDetailPanel';
 import { buildDisplayOptions, IntelligenceFilterPanel } from './intelligence/IntelligenceFilterPanel';
-import { IntelligenceScenarioTabs } from './intelligence/IntelligenceScenarioTabs';
 import {
   applyAdvancedFilterChange,
+  buildActiveListFilters,
   cloneScenarioFilterState,
+  createCustomScenarioId,
+  isCustomScenario,
+  materializeScenarioFilterState,
   mergeScenarioStateWithUrlOverlay,
   parseScenarioFromSearch,
   pickAdvancedFiltersFromParsed,
@@ -49,41 +61,48 @@ type Props = {
   initialContentId?: string;
   onOpenReferenceLibrary?: (contentId: string, itemId?: string) => void;
   onOpenOperationsJob?: (jobId: string) => void;
+  onOpenRules?: () => void;
 };
 
-const defaultFilters: IntelligenceFilters = { sort_by: 'latest_discovered_at', sort_order: 'desc' };
-const pageSize = '20';
 
-const defaultQuickFilters: IntelligenceFilters = {
-  sort_by: 'latest_discovered_at',
-  sort_order: 'desc',
-};
+const PAGE_SIZE = 20;
+const pageSize = String(PAGE_SIZE);
 
-export function IntelligencePage({ role, userId, initialContentId, onOpenReferenceLibrary, onOpenOperationsJob }: Props) {
+export function IntelligencePage({ role, userId, initialContentId, onOpenReferenceLibrary, onOpenOperationsJob, onOpenRules }: Props) {
+  const readOnly = isIntelligenceReadOnly(role);
+  const canEdit = canEditIntelligence(role);
+  const initialParsed = useMemo(
+    () =>
+      parseIntelligenceFilters(window.location.search, {
+        sort_by: 'latest_discovered_at',
+        sort_order: 'desc',
+      }),
+    [],
+  );
   const initialScenario = useMemo(() => parseScenarioFromSearch(window.location.search), []);
   const scenarioRef = useRef<IntelligenceScenario>(initialScenario);
   const [scenario, setScenario] = useState<IntelligenceScenario>(() => initialScenario);
+  const [page, setPage] = useState(() => Math.max(1, Number(initialParsed.page || '1')));
+  const initialContentQuery = initialParsed.content_query || initialParsed.business_keyword || '';
+  const [contentSearchInput, setContentSearchInput] = useState(initialContentQuery);
+  const [appliedContentQuery, setAppliedContentQuery] = useState(initialContentQuery);
+  const pendingSelectRef = useRef<'first' | 'last' | null>(null);
   const [options, setOptions] = useState<ProductOptions | null>(null);
   const [savedScenarioFilters, setSavedScenarioFilters] = useState<
     Partial<Record<IntelligenceScenario, ScenarioFilterState>>
   >({});
   const [advancedFilterState, setAdvancedFilterState] = useState<ScenarioFilterState>(() =>
-    systemDefaultScenarioFilters(initialScenario),
+    materializeScenarioFilterState(systemDefaultScenarioFilters(initialScenario)),
   );
   const [filtersLoaded, setFiltersLoaded] = useState(false);
   const [savingScenarioFilters, setSavingScenarioFilters] = useState(false);
-  const [quickFilters, setQuickFilters] = useState<IntelligenceFilters>(() => {
-    const parsed = parseIntelligenceFilters(window.location.search, defaultQuickFilters);
-    return {
-      source_surface: parsed.source_surface,
-      search_keyword: parsed.search_keyword,
-      sort_by: parsed.sort_by || 'latest_discovered_at',
-      sort_order: parsed.sort_order || 'desc',
-    };
-  });
+  const [quickFilters, setQuickFilters] = useState<IntelligenceFilters>(() => ({
+    source_surface: initialParsed.source_surface,
+    sort_by: initialParsed.sort_by || 'latest_discovered_at',
+    sort_order: initialParsed.sort_order || 'desc',
+  }));
   const [advancedOpen, setAdvancedOpen] = useState(() => initialScenario === 'all');
   const [items, setItems] = useState<IntelligenceItem[]>([]);
-  const [hiddenDecisionIds, setHiddenDecisionIds] = useState<string[]>([]);
   const [total, setTotal] = useState(0);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(
@@ -99,19 +118,21 @@ export function IntelligencePage({ role, userId, initialContentId, onOpenReferen
   const [reevaluateResults, setReevaluateResults] = useState<ReferenceLibraryReevaluateResult[]>([]);
 
   const resolvedAdvancedFilters = useMemo(
-    () => resolveScenarioFilters(advancedFilterState),
+    () => resolveScenarioFilters(materializeScenarioFilterState(advancedFilterState)),
     [advancedFilterState],
   );
 
-  const activeFilters = useMemo(
-    () => ({
-      ...defaultFilters,
-      ...resolvedAdvancedFilters,
-      ...quickFilters,
-    }),
-    [resolvedAdvancedFilters, quickFilters],
+  const listQueryFilters = useMemo(
+    (): IntelligenceFilters =>
+      buildActiveListFilters(advancedFilterState, quickFilters, {
+        contentQuery: appliedContentQuery || undefined,
+        page: String(page),
+        pageSize,
+      }),
+    [advancedFilterState, quickFilters, appliedContentQuery, page],
   );
 
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const hasCustomizedFilters = Boolean(savedScenarioFilters[scenario]);
 
   useEffect(() => {
@@ -148,8 +169,12 @@ export function IntelligencePage({ role, userId, initialContentId, onOpenReferen
   }, [currentReferenceItem, selected]);
 
   const syncUrl = useCallback(
-    (contentId?: string | null) => {
-      const merged = { ...resolvedAdvancedFilters, ...quickFilters };
+    (contentId?: string | null, pageOverride?: number) => {
+      const merged = buildActiveListFilters(advancedFilterState, quickFilters, {
+        contentQuery: appliedContentQuery || undefined,
+        page: String(pageOverride ?? page),
+        pageSize,
+      });
       replaceRouteSearch(
         '/intelligence',
         serializeIntelligenceFilters(merged, {
@@ -158,38 +183,46 @@ export function IntelligencePage({ role, userId, initialContentId, onOpenReferen
         }),
       );
     },
-    [resolvedAdvancedFilters, quickFilters, scenario],
+    [advancedFilterState, quickFilters, appliedContentQuery, page, scenario],
   );
 
   const loadList = useCallback(
-    async (preferredContentId?: string | null, justHandledContentId?: string | null) => {
+    async (preferredContentId?: string | null, pageOverride?: number) => {
+      const targetPage = pageOverride ?? page;
       setLoadingList(true);
       setError('');
       try {
-        const response = await fetchIntelligenceContents(role, { ...activeFilters, page: '1', page_size: pageSize }, userId);
-        const hidden = new Set([
-          ...hiddenDecisionIds,
-          ...(justHandledContentId ? [justHandledContentId] : []),
-        ]);
-        const visibleItems = response.items.filter((item) => !hidden.has(item.content_id));
-        setItems(visibleItems);
+        const response = await fetchIntelligenceContents(
+          role,
+          { ...listQueryFilters, page: String(targetPage), page_size: pageSize },
+          userId,
+        );
+        setItems(response.items);
         setTotal(response.total);
+        if (targetPage !== page) setPage(targetPage);
         setSelectedIds([]);
-        const nextSelected =
-          preferredContentId && visibleItems.some((item) => item.content_id === preferredContentId)
+        const pendingSelect = pendingSelectRef.current;
+        pendingSelectRef.current = null;
+        let nextSelected =
+          preferredContentId && response.items.some((item) => item.content_id === preferredContentId)
             ? preferredContentId
-            : selectedId && visibleItems.some((item) => item.content_id === selectedId)
+            : selectedId && response.items.some((item) => item.content_id === selectedId)
               ? selectedId
-              : visibleItems[0]?.content_id || null;
+              : response.items[0]?.content_id || null;
+        if (pendingSelect === 'first' && response.items.length > 0) {
+          nextSelected = response.items[0].content_id;
+        } else if (pendingSelect === 'last' && response.items.length > 0) {
+          nextSelected = response.items[response.items.length - 1].content_id;
+        }
         setSelectedId(nextSelected);
-        syncUrl(nextSelected);
+        syncUrl(nextSelected, targetPage);
       } catch (err) {
         setError(err instanceof Error ? err.message : '加载失败');
       } finally {
         setLoadingList(false);
       }
     },
-    [activeFilters, hiddenDecisionIds, role, selectedId, syncUrl, userId],
+    [listQueryFilters, page, role, selectedId, syncUrl, userId],
   );
 
   useEffect(() => {
@@ -210,10 +243,16 @@ export function IntelligencePage({ role, userId, initialContentId, onOpenReferen
           map[item.scenario] = scenarioStateFromApi(item);
         });
         setSavedScenarioFilters(map);
-        const currentScenario = scenarioRef.current;
+        let currentScenario = scenarioRef.current;
+        if (isCustomScenario(currentScenario) && !map[currentScenario]) {
+          currentScenario = 'pending';
+          setScenario('pending');
+        }
         const urlAdvanced = pickAdvancedFiltersFromParsed(parseIntelligenceFilters(window.location.search, {}));
         const base = map[currentScenario] ?? systemDefaultScenarioFilters(currentScenario);
-        setAdvancedFilterState(cloneScenarioFilterState(mergeScenarioStateWithUrlOverlay(base, urlAdvanced)));
+        setAdvancedFilterState(
+          materializeScenarioFilterState(cloneScenarioFilterState(mergeScenarioStateWithUrlOverlay(base, urlAdvanced))),
+        );
         setFiltersLoaded(true);
       })
       .catch((err) => {
@@ -229,7 +268,7 @@ export function IntelligencePage({ role, userId, initialContentId, onOpenReferen
   useEffect(() => {
     if (!filtersLoaded) return;
     void loadList();
-  }, [filtersLoaded, scenario]);
+  }, [filtersLoaded, page, scenario, advancedFilterState, quickFilters, appliedContentQuery]);
 
   useEffect(() => {
     if (!selectedId) {
@@ -258,14 +297,30 @@ export function IntelligencePage({ role, userId, initialContentId, onOpenReferen
 
   function loadScenarioFilters(next: IntelligenceScenario) {
     const base = savedScenarioFilters[next] ?? systemDefaultScenarioFilters(next);
-    setAdvancedFilterState(cloneScenarioFilterState(base));
+    setAdvancedFilterState(materializeScenarioFilterState(cloneScenarioFilterState(base)));
   }
 
   function changeScenario(next: IntelligenceScenario) {
     setScenario(next);
-    setHiddenDecisionIds([]);
-    setAdvancedOpen(next === 'all');
+    setPage(1);
+    setAdvancedOpen(next === 'all' || isCustomScenario(next));
     loadScenarioFilters(next);
+  }
+
+  function applyContentSearch() {
+    setAppliedContentQuery(contentSearchInput.trim());
+    setPage(1);
+  }
+
+  function clearContentSearch() {
+    setContentSearchInput('');
+    setAppliedContentQuery('');
+    setPage(1);
+  }
+
+  function runQuery() {
+    setAppliedContentQuery(contentSearchInput.trim());
+    setPage(1);
   }
 
   function handleAdvancedOpenChange(open: boolean) {
@@ -277,13 +332,60 @@ export function IntelligencePage({ role, userId, initialContentId, onOpenReferen
     setError('');
     try {
       const payload = splitAdvancedFiltersForSave(advancedFilterState);
+      if (isCustomScenario(scenario) && !payload.rolling.label) {
+        payload.rolling.label = savedScenarioFilters[scenario]?.rolling.label;
+      }
       const saved = await saveMyScenarioFilters(role, scenario, payload, userId);
       const nextState = scenarioStateFromApi(saved);
       setSavedScenarioFilters((current) => ({ ...current, [scenario]: nextState }));
-      setAdvancedFilterState(cloneScenarioFilterState(nextState));
-      setFeedback('筛选已保存');
+      setAdvancedFilterState(materializeScenarioFilterState(cloneScenarioFilterState(nextState)));
+      setFeedback(isCustomScenario(scenario) ? '自定义场景已保存' : '筛选已保存');
     } catch (err) {
       setError(err instanceof Error ? err.message : '保存筛选失败');
+    } finally {
+      setSavingScenarioFilters(false);
+    }
+  }
+
+  async function handleAddCustomScenario(label: string) {
+    setSavingScenarioFilters(true);
+    setError('');
+    try {
+      const customId = createCustomScenarioId();
+      const payload = splitAdvancedFiltersForSave(advancedFilterState);
+      payload.rolling = { ...payload.rolling, label: label.trim() };
+      const saved = await saveMyScenarioFilters(role, customId, payload, userId);
+      const nextState = scenarioStateFromApi(saved);
+      setSavedScenarioFilters((current) => ({ ...current, [customId]: nextState }));
+      setScenario(customId);
+      setPage(1);
+      setAdvancedOpen(true);
+      setAdvancedFilterState(materializeScenarioFilterState(cloneScenarioFilterState(nextState)));
+      setFeedback(`已添加场景「${label.trim()}」`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '添加场景失败');
+    } finally {
+      setSavingScenarioFilters(false);
+    }
+  }
+
+  async function handleDeleteCustomScenario() {
+    if (!isCustomScenario(scenario)) return;
+    const label = savedScenarioFilters[scenario]?.rolling.label || '自定义场景';
+    if (!window.confirm(`确定删除场景快捷筛选「${label}」？`)) return;
+    setSavingScenarioFilters(true);
+    setError('');
+    try {
+      await deleteMyScenarioFilters(role, scenario, userId);
+      setSavedScenarioFilters((current) => {
+        const next = { ...current };
+        delete next[scenario];
+        return next;
+      });
+      setFeedback(`已删除场景「${label}」`);
+      changeScenario('pending');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '删除场景失败');
     } finally {
       setSavingScenarioFilters(false);
     }
@@ -299,9 +401,12 @@ export function IntelligencePage({ role, userId, initialContentId, onOpenReferen
         delete next[scenario];
         return next;
       });
-      setAdvancedFilterState(cloneScenarioFilterState(systemDefaultScenarioFilters(scenario)));
+      setAdvancedFilterState(materializeScenarioFilterState(cloneScenarioFilterState(systemDefaultScenarioFilters(scenario))));
+      setContentSearchInput('');
+      setAppliedContentQuery('');
+      setPage(1);
       setFeedback('已恢复系统默认');
-      await loadList();
+      await loadList(null, 1);
     } catch (err) {
       setError(err instanceof Error ? err.message : '恢复系统默认失败');
     } finally {
@@ -311,7 +416,8 @@ export function IntelligencePage({ role, userId, initialContentId, onOpenReferen
 
   function applyTagFilter(tag: string) {
     setAdvancedFilterState((current) => applyAdvancedFilterChange(current, 'tag', tag));
-    void loadList();
+    setPage(1);
+    void loadList(null, 1);
   }
 
   function nextContentIdAfter(contentId: string) {
@@ -322,11 +428,9 @@ export function IntelligencePage({ role, userId, initialContentId, onOpenReferen
 
   async function advanceAfterDecision(contentId: string, message: string) {
     const nextId = nextContentIdAfter(contentId);
-    setHiddenDecisionIds((current) => [...new Set([...current, contentId])]);
-    setItems((current) => current.filter((item) => item.content_id !== contentId));
     setSelectedId(nextId);
     setFeedback(nextId ? `${message}，已切到下一条` : message);
-    await loadList(nextId, contentId);
+    await loadList(nextId);
   }
 
   async function handleAddToLibrary(libraryType: 'lead' | 'non_lead' | 'uncategorized', reason?: string) {
@@ -342,7 +446,7 @@ export function IntelligencePage({ role, userId, initialContentId, onOpenReferen
       },
       userId,
     );
-    const label = libraryType === 'lead' ? '已入获客库' : libraryType === 'non_lead' ? '已入内容库' : '已入待分类库';
+    const label = libraryType === 'lead' ? '已入获客库' : libraryType === 'non_lead' ? '已入非获客库' : '已入待分类库';
     await advanceAfterDecision(contentId, label);
   }
 
@@ -377,7 +481,7 @@ export function IntelligencePage({ role, userId, initialContentId, onOpenReferen
         content_id: contentId,
         library_type: libraryType,
         rating: 'watching',
-        selected_reason: libraryType === 'lead' ? '批量入获客库' : '批量入内容库',
+        selected_reason: libraryType === 'lead' ? '批量入获客库' : '批量入非获客库',
       })),
       userId,
     );
@@ -419,10 +523,30 @@ export function IntelligencePage({ role, userId, initialContentId, onOpenReferen
     (delta: number) => {
       if (items.length === 0) return;
       const index = items.findIndex((item) => item.content_id === selectedId);
-      const nextIndex = index < 0 ? 0 : Math.min(Math.max(index + delta, 0), items.length - 1);
-      selectContent(items[nextIndex].content_id);
+      const currentIndex = index < 0 ? 0 : index;
+
+      if (delta > 0) {
+        if (currentIndex < items.length - 1) {
+          selectContent(items[currentIndex + 1].content_id);
+          return;
+        }
+        if (page < totalPages) {
+          pendingSelectRef.current = 'first';
+          setPage((value) => value + 1);
+        }
+        return;
+      }
+
+      if (currentIndex > 0) {
+        selectContent(items[currentIndex - 1].content_id);
+        return;
+      }
+      if (page > 1) {
+        pendingSelectRef.current = 'last';
+        setPage((value) => value - 1);
+      }
     },
-    [items, selectedId],
+    [items, page, selectedId, totalPages, selectContent],
   );
 
   useIntelligenceKeyboard({
@@ -434,19 +558,23 @@ export function IntelligencePage({ role, userId, initialContentId, onOpenReferen
     onWatchLater: () => selectedId && void handleWatchLater(),
     onDiscard: () => selectedId && void handleDiscard(),
     onShowHelp: () => {
-      window.alert('快捷键：J/K 切换条目，H 入获客库，L 入内容库，S 稍后处理，X 不合适');
+      window.alert('快捷键：J/K 切换条目（页末 J、页首 K 可翻页），H 入获客库，L 入非获客库，S 稍后处理，X 不合适');
     },
   });
 
   return (
     <section className="page-grid intelligence-grid">
       <IntelligenceFilterPanel
+        scenario={scenario}
         filters={resolvedAdvancedFilters}
         quickFilters={quickFilters}
         displayOptions={displayOptions}
         advancedOpen={advancedOpen}
+        filterPreferencesEnabled={canEdit}
         hasCustomizedFilters={hasCustomizedFilters}
         savingScenarioFilters={savingScenarioFilters}
+        savedScenarioFilters={savedScenarioFilters}
+        onScenarioChange={changeScenario}
         onAdvancedOpenChange={handleAdvancedOpenChange}
         onQuickFilterChange={(key, value) => {
           setQuickFilters((current) => ({ ...current, [key]: value || undefined }));
@@ -454,40 +582,74 @@ export function IntelligencePage({ role, userId, initialContentId, onOpenReferen
         onFilterChange={(key, value) => {
           setAdvancedFilterState((current) => applyAdvancedFilterChange(current, key, value));
         }}
-        onSearch={() => void loadList()}
+        onSearch={runQuery}
         onReset={() => {
           loadScenarioFilters(scenario);
-          setQuickFilters(defaultQuickFilters);
-          void loadList();
+          setQuickFilters({
+            sort_by: 'latest_discovered_at',
+            sort_order: 'desc',
+          });
+          setContentSearchInput('');
+          setAppliedContentQuery('');
+          setPage(1);
         }}
         onSaveScenarioFilters={() => void handleSaveScenarioFilters()}
         onRestoreSystemDefault={() => void handleRestoreSystemDefault()}
+        onAddCustomScenario={(label) => void handleAddCustomScenario(label)}
+        onDeleteCustomScenario={() => void handleDeleteCustomScenario()}
       />
 
       <section className="list-panel">
-        <div className="section-head">
-          <div>
+        <div className="section-head intelligence-list-head">
+          <div className="section-head-main">
             <h1>情报中心</h1>
-            <IntelligenceScenarioTabs active={scenario} onChange={changeScenario} />
-            <span>当前 {items.length} / 共 {total} 条</span>
+            {readOnly ? <p className="muted-hint permission-hint">当前为只读账号，可浏览情报与对标库，无法入库或修改。</p> : null}
+            <span>
+              共 {total} 条 · 第 {page}/{totalPages} 页
+              {appliedContentQuery ? ` · 内容搜索「${appliedContentQuery}」` : ''}
+            </span>
+            {appliedContentQuery ? (
+              <p className="muted-hint content-search-hint">
+                {role === 'operator'
+                  ? '内容搜索仅在「分配给您」或「由您负责账号采集发现」且符合当前筛选条件的情报中匹配。'
+                  : '内容搜索在当前筛选配置范围内匹配标题/作者/正文。'}
+              </p>
+            ) : null}
           </div>
-          {error && <span className="inline-error">{error}</span>}
+          <div className="section-head-toolbar">
+            <FilterSearchRow
+              id="intelligence-content-search"
+              label="内容搜索（标题/作者/正文）"
+              value={contentSearchInput}
+              appliedQuery={appliedContentQuery}
+              layout="inline"
+              placeholder="标题 / 作者 / 正文"
+              onChange={setContentSearchInput}
+              onSearch={applyContentSearch}
+              onClear={clearContentSearch}
+              clearLabel={(query) => `清除「${query}」`}
+            />
+            {error && <span className="inline-error">{error}</span>}
+          </div>
         </div>
 
-        <IntelligenceBulkBar
-          role={role}
-          selectedCount={selectedIds.length}
-          reevaluating={reevaluating}
-          onBulkLeadLibrary={() => void handleBulkLibrary('lead')}
-          onBulkContentLibrary={() => void handleBulkLibrary('non_lead')}
-          onBulkDiscard={() => void handleBulkDiscard()}
-          onBulkReevaluate={() => void runReevaluate(selectedIds)}
-        />
+        {canEdit ? (
+          <IntelligenceBulkBar
+            role={role}
+            selectedCount={selectedIds.length}
+            reevaluating={reevaluating}
+            onBulkLeadLibrary={() => void handleBulkLibrary('lead')}
+            onBulkContentLibrary={() => void handleBulkLibrary('non_lead')}
+            onBulkDiscard={() => void handleBulkDiscard()}
+            onBulkReevaluate={() => void runReevaluate(selectedIds)}
+          />
+        ) : null}
 
         <IntelligenceContentList
           items={items}
           selectedId={selectedId}
           selectedIds={selectedIds}
+          selectionEnabled={canEdit}
           loading={loadingList || !filtersLoaded}
           onSelect={selectContent}
           onToggleSelect={(contentId) =>
@@ -496,11 +658,23 @@ export function IntelligencePage({ role, userId, initialContentId, onOpenReferen
             )
           }
         />
+
+        {!loadingList && filtersLoaded && total > 0 && (
+          <ListPaginationBar
+            testId="intelligence-pagination"
+            page={page}
+            totalPages={totalPages}
+            disabled={loadingList}
+            onPrev={() => setPage((value) => Math.max(1, value - 1))}
+            onNext={() => setPage((value) => Math.min(totalPages, value + 1))}
+          />
+        )}
       </section>
 
       <IntelligenceDetailPanel
         role={role}
         userId={userId}
+        readOnly={readOnly}
         selected={selected}
         detail={detail}
         loading={loadingDetail}
@@ -567,6 +741,25 @@ export function IntelligencePage({ role, userId, initialContentId, onOpenReferen
           setFeedback('已入库');
           await reloadDetail();
         }}
+        onUpdateReferenceLibrary={async (payload) => {
+          const itemId = detail?.reference_library_items?.[0]?.id;
+          if (!itemId) return;
+          await updateReferenceLibraryItem(role, itemId, payload, userId);
+          setFeedback('对标库信息已更新');
+          await reloadDetail();
+          await loadList(selectedId);
+        }}
+        onRevokeReferenceLibrary={async () => {
+          const refItem = detail?.reference_library_items?.[0];
+          if (!refItem?.id) return;
+          if (!shouldUseReferenceRevokeEndpoint(role, refItem, userId)) return;
+          if (!window.confirm('确定撤回入库？条目将移出对标库。')) return;
+          await revokeReferenceLibraryItem(role, refItem.id, userId);
+          setFeedback('已撤回入库');
+          await reloadDetail();
+          await loadList(selectedId);
+        }}
+        onOpenRules={onOpenRules}
         onReevaluate={async () => {
           if (!selectedId) return;
           await runReevaluate([selectedId]);

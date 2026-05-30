@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from pydantic import ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -26,7 +27,20 @@ from intelligence_engine.db.models import (
 )
 from intelligence_engine.domain.enums import AgentStatus, JobStatus, JobType, Platform, SessionStatus, TaskRunStatus, TaskRunTriggerType, TaskScheduleType, TaskTemplateType, AccountRole
 from intelligence_engine.domain.job_priority import priority_for_task_run_trigger
-from intelligence_engine.domain.product_schemas import CreatorMonitorTaskPayload, KeywordSearchTaskPayload, RecommendationFeedTaskPayload
+from intelligence_engine.api.task_template_access import benchmark_group_binding_status, rule_set_binding_status
+from intelligence_engine.domain.product_schemas import (
+    CreatorMonitorTaskPayload,
+    CreatorMonitorTemplateConfig,
+    KeywordSearchTaskPayload,
+    KeywordSearchTemplateConfig,
+    RecommendationFeedTaskPayload,
+    RecommendationFeedTemplateConfig,
+)
+from intelligence_engine.services.task_template_config import (
+    LEGACY_TEMPLATE_DEFAULTS,
+    parse_template_config_dict,
+    strip_legacy_template_config_keys,
+)
 from intelligence_engine.storage.repositories.creator_repository import CreatorMonitorRepository
 from intelligence_engine.storage.repositories.job_repository import JobRepository
 
@@ -50,23 +64,55 @@ class TaskMaterializationService:
     def __init__(self, db: Session):
         self.db = db
 
-    def validate_template_payload(self, template_type: str, config: dict[str, Any]) -> dict[str, Any]:
+    def validate_template_config(self, template_type: str, config: dict[str, Any]) -> dict[str, Any]:
+        normalized = strip_legacy_template_config_keys(parse_template_config_dict(config))
         if template_type == TaskTemplateType.RECOMMENDATION_FEED_TASK.value:
-            return RecommendationFeedTaskPayload.model_validate(config).model_dump(mode="json")
+            return RecommendationFeedTemplateConfig.model_validate(normalized).model_dump(mode="json")
         if template_type == TaskTemplateType.CREATOR_MONITOR_TASK.value:
-            return CreatorMonitorTaskPayload.model_validate(config).model_dump(mode="json")
+            return CreatorMonitorTemplateConfig.model_validate(normalized).model_dump(mode="json")
         if template_type == TaskTemplateType.KEYWORD_SEARCH_TASK.value:
-            return KeywordSearchTaskPayload.model_validate(config).model_dump(mode="json")
+            return KeywordSearchTemplateConfig.model_validate(normalized).model_dump(mode="json")
         raise ValueError(f"unsupported task template type: {template_type}")
 
-    def materialize_template(self, template: TaskTemplate) -> list[str]:
-        return self.materialize_template_for_run(template, task_run_id=None)
+    def read_template_config(self, template_type: str, config: Any) -> dict[str, Any]:
+        """Validate stored config for API reads; tolerate legacy payloads missing new fields."""
+        normalized = strip_legacy_template_config_keys(parse_template_config_dict(config))
+        try:
+            return self.validate_template_config(template_type, normalized)
+        except ValidationError:
+            merged = {**LEGACY_TEMPLATE_DEFAULTS.get(template_type, {}), **normalized}
+            try:
+                return self.validate_template_config(template_type, merged)
+            except ValidationError:
+                return merged
+
+    def validate_runtime_payload(self, template_type: str, config: dict[str, Any], *, executor_account_id: str) -> dict[str, Any]:
+        runtime = {**(config or {}), "executor_account_id": executor_account_id}
+        if template_type == TaskTemplateType.RECOMMENDATION_FEED_TASK.value:
+            return RecommendationFeedTaskPayload.model_validate(runtime).model_dump(mode="json")
+        if template_type == TaskTemplateType.CREATOR_MONITOR_TASK.value:
+            return CreatorMonitorTaskPayload.model_validate(runtime).model_dump(mode="json")
+        if template_type == TaskTemplateType.KEYWORD_SEARCH_TASK.value:
+            return KeywordSearchTaskPayload.model_validate(runtime).model_dump(mode="json")
+        raise ValueError(f"unsupported task template type: {template_type}")
+
+    def validate_template_payload(self, template_type: str, config: dict[str, Any]) -> dict[str, Any]:
+        """Backward-compatible alias for stored template config validation."""
+        return self.validate_template_config(template_type, config)
+
+    def materialize_template(self, template: TaskTemplate, *, executor_account_id: str) -> list[str]:
+        return self.materialize_template_for_run(
+            template,
+            executor_account_id=executor_account_id,
+            task_run_id=None,
+        )
 
     def create_task_run(
         self,
         template: TaskTemplate,
         *,
         trigger_type: TaskRunTriggerType,
+        executor_account_id: str,
         requested_by_user_id: str | None = None,
         task_schedule_id: str | None = None,
     ) -> TaskRun:
@@ -74,6 +120,7 @@ class TaskMaterializationService:
             task_template_id=template.id,
             trigger_type=enum_value(trigger_type),
             requested_by_user_id=requested_by_user_id,
+            executor_account_id=executor_account_id,
             task_schedule_id=task_schedule_id,
             status=TaskRunStatus.MATERIALIZED.value,
             result_summary_json={},
@@ -87,10 +134,15 @@ class TaskMaterializationService:
         self,
         template: TaskTemplate,
         *,
+        executor_account_id: str,
         task_run_id: str | None,
         trigger_type: TaskRunTriggerType | None = None,
     ) -> list[str]:
-        config = self.validate_template_payload(template.template_type, template.config_json or {})
+        config = self.validate_runtime_payload(
+            template.template_type,
+            template.config_json or {},
+            executor_account_id=executor_account_id,
+        )
         priority = priority_for_task_run_trigger(trigger_type) if task_run_id and trigger_type else None
         if template.template_type == TaskTemplateType.RECOMMENDATION_FEED_TASK.value:
             return self._materialize_recommendation_feed(config, task_run_id=task_run_id, priority=priority, trigger_type=trigger_type)
@@ -104,6 +156,7 @@ class TaskMaterializationService:
         self,
         template: TaskTemplate,
         *,
+        executor_account_id: str,
         trigger_type: TaskRunTriggerType,
         requested_by_user_id: str | None = None,
         task_schedule_id: str | None = None,
@@ -111,11 +164,17 @@ class TaskMaterializationService:
         run = self.create_task_run(
             template,
             trigger_type=trigger_type,
+            executor_account_id=executor_account_id,
             requested_by_user_id=requested_by_user_id,
             task_schedule_id=task_schedule_id,
         )
         try:
-            job_ids = self.materialize_template_for_run(template, task_run_id=run.id, trigger_type=trigger_type)
+            job_ids = self.materialize_template_for_run(
+                template,
+                executor_account_id=executor_account_id,
+                task_run_id=run.id,
+                trigger_type=trigger_type,
+            )
         except Exception as exc:
             run.status = TaskRunStatus.FAILED.value
             run.error_summary_json = {"message": str(exc)}
@@ -141,7 +200,14 @@ class TaskMaterializationService:
             template = self.db.get(TaskTemplate, schedule.task_template_id)
             if not template or not template.enabled:
                 continue
-            run, job_ids = self.run_template(template, trigger_type=TaskRunTriggerType.SCHEDULED, task_schedule_id=schedule.id)
+            if not schedule.executor_account_id:
+                continue
+            run, job_ids = self.run_template(
+                template,
+                executor_account_id=schedule.executor_account_id,
+                trigger_type=TaskRunTriggerType.SCHEDULED,
+                task_schedule_id=schedule.id,
+            )
             schedule.last_materialized_at = now
             schedule.last_run_at = now
             schedule.next_run_at = self._next_run_at(schedule, now)
@@ -448,16 +514,79 @@ class TaskMaterializationService:
             return None
         return schedule.next_run_at
 
-    def readiness_checks(self, template: TaskTemplate) -> list[dict[str, Any]]:
+    def template_readiness_checks(self, template: TaskTemplate) -> list[dict[str, Any]]:
         checks: list[dict[str, Any]] = []
+        business_type_id = template.business_account_type_id
+        checks.append(
+            {
+                "key": "business_account_type",
+                "ok": bool(business_type_id),
+                "message": "已设置业务类型" if business_type_id else "缺少业务类型",
+            }
+        )
         try:
-            config = self.validate_template_payload(template.template_type, template.config_json or {})
+            config = self.validate_template_config(template.template_type, template.config_json or {})
         except Exception as exc:
-            return [{"key": "template_config", "ok": False, "message": f"模板配置不完整: {exc}"}]
+            return checks + [{"key": "template_config", "ok": False, "message": f"模板配置不完整: {exc}"}]
 
-        account_id = config.get("executor_account_id")
-        account = self.db.get(PlatformAccount, account_id) if account_id else None
-        checks.append({"key": "executor_account", "ok": bool(account), "message": "执行账号存在" if account else "缺少执行账号"})
+        rule_set_id = config.get("rule_set_id")
+        if rule_set_id:
+            ok, message = rule_set_binding_status(self.db, business_account_type_id=business_type_id, rule_set_id=rule_set_id)
+            checks.append({"key": "rule_set_business_type_binding", "ok": ok, "message": message})
+
+        if template.template_type == TaskTemplateType.CREATOR_MONITOR_TASK.value:
+            group_id = config.get("benchmark_group_id")
+            ok, message = benchmark_group_binding_status(
+                self.db,
+                business_account_type_id=business_type_id,
+                benchmark_group_id=group_id,
+            )
+            checks.append({"key": "benchmark_group_business_type_binding", "ok": ok, "message": message})
+            group = self.db.get(BenchmarkGroup, group_id) if group_id else None
+            member_count = 0
+            if group:
+                member_count = self.db.scalar(
+                    select(func.count(BenchmarkGroupMember.id))
+                    .where(BenchmarkGroupMember.benchmark_group_id == group.id)
+                    .where(BenchmarkGroupMember.enabled.is_(True))
+                ) or 0
+            checks.append(
+                {
+                    "key": "benchmark_group_members",
+                    "ok": bool(group and group.enabled and member_count > 0),
+                    "message": f"对标组有效，含 {member_count} 个成员"
+                    if group and group.enabled and member_count > 0
+                    else "对标组为空或未启用",
+                }
+            )
+        if template.template_type == TaskTemplateType.RECOMMENDATION_FEED_TASK.value:
+            ok = bool(
+                config.get("feed_type")
+                and config.get("target_count")
+                and config.get("refresh_rounds")
+                and config.get("per_round_scroll_target")
+            )
+            checks.append(
+                {
+                    "key": "recommendation_feed_config",
+                    "ok": ok,
+                    "message": "推荐页任务关键字段完整" if ok else "推荐页任务关键字段不完整",
+                }
+            )
+        return checks
+
+    def run_readiness_checks(self, template: TaskTemplate, executor_account_id: str) -> list[dict[str, Any]]:
+        checks = list(self.template_readiness_checks(template))
+        account = self.db.get(PlatformAccount, executor_account_id)
+        checks.append({"key": "executor_account", "ok": bool(account), "message": "执行账号存在" if account else "执行账号不存在"})
+        if account and template.business_account_type_id and account.business_account_type_id != template.business_account_type_id:
+            checks.append(
+                {
+                    "key": "executor_account_business_type",
+                    "ok": False,
+                    "message": "执行账号业务类型与模板不一致",
+                }
+            )
         pool_agents = self._agent_pool_for_account(account) if account else []
         checks.append(
             {
@@ -484,12 +613,13 @@ class TaskMaterializationService:
                 .order_by(AccountSession.last_validated_at.desc().nullslast(), AccountSession.created_at.desc())
                 .limit(1)
             )
-        checks.append({"key": "session_pool_ready", "ok": bool(ready_session), "message": "绑定池存在 ready 会话" if ready_session else "绑定池暂无 ready 会话"})
-
-        rule_set_id = config.get("rule_set_id")
-        if rule_set_id:
-            ok, message = self._rule_set_binding_status(account, rule_set_id)
-            checks.append({"key": "rule_set_business_type_binding", "ok": ok, "message": message})
+        checks.append(
+            {
+                "key": "session_pool_ready",
+                "ok": bool(ready_session),
+                "message": "绑定池存在 ready 会话" if ready_session else "绑定池暂无 ready 会话",
+            }
+        )
 
         expected_job_type = expected_job_type_for_template(template.template_type)
         agent = online_agents[0] if online_agents else (pool_agents[0] if pool_agents else None)
@@ -508,24 +638,11 @@ class TaskMaterializationService:
                 legacy_kind = legacy_runner or legacy_probe
                 support_message += f"；当前绑定的是旧脚本 Agent（{legacy_kind}），请在账号管理改绑 Local Agent Runtime V1（capabilities.runtime=local_agent_runtime_v1）"
         checks.append({"key": "agent_supports_job_type", "ok": supports, "message": support_message})
-
-        if template.template_type == TaskTemplateType.CREATOR_MONITOR_TASK.value:
-            group_id = config.get("benchmark_group_id")
-            ok, message = self._benchmark_group_binding_status(account, group_id)
-            checks.append({"key": "benchmark_group_business_type_binding", "ok": ok, "message": message})
-            group = self.db.get(BenchmarkGroup, group_id) if group_id else None
-            member_count = 0
-            if group:
-                member_count = self.db.scalar(
-                    select(func.count(BenchmarkGroupMember.id))
-                    .where(BenchmarkGroupMember.benchmark_group_id == group.id)
-                    .where(BenchmarkGroupMember.enabled.is_(True))
-                ) or 0
-            checks.append({"key": "benchmark_group_members", "ok": bool(group and group.enabled and member_count > 0), "message": f"对标组有效，含 {member_count} 个成员" if group and group.enabled and member_count > 0 else "对标组为空或未启用"})
-        if template.template_type == TaskTemplateType.RECOMMENDATION_FEED_TASK.value:
-            ok = bool(config.get("feed_type") and config.get("target_count") and config.get("refresh_rounds") and config.get("per_round_scroll_target"))
-            checks.append({"key": "recommendation_feed_config", "ok": ok, "message": "推荐页任务关键字段完整" if ok else "推荐页任务关键字段不完整"})
         return checks
+
+    def readiness_checks(self, template: TaskTemplate) -> list[dict[str, Any]]:
+        """Template-only readiness (no executor account)."""
+        return self.template_readiness_checks(template)
 
     def _agent_pool_for_account(self, account: PlatformAccount | None) -> list[LocalAgent]:
         if not account:

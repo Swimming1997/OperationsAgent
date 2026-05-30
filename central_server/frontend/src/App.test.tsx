@@ -17,7 +17,7 @@ describe('App shell', () => {
       expect(screen.getByTestId('current-user-panel')).toHaveTextContent('演示主管');
     });
     expect(screen.getByRole('button', { name: /情报中心/ })).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: /情报任务中心/ }));
+    await user.click(screen.getByRole('button', { name: /任务模板/ }));
     expect(await screen.findByText('模板配置与手动执行')).toBeInTheDocument();
   });
 });

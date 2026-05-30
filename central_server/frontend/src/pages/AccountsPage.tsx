@@ -72,6 +72,7 @@ export function AccountsPage({ role, userId }: Props) {
   const [rightPanel, setRightPanel] = useState<RightPanelMode>('idle');
   const [accountForm, setAccountForm] = useState<Partial<PlatformAccount>>(() => emptyCreateForm({}));
   const [typeForm, setTypeForm] = useState<Partial<BusinessAccountType>>({ name: '', enabled: true });
+  const [typeEditorOpen, setTypeEditorOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [loginSession, setLoginSession] = useState<AccountLoginSession | null>(null);
@@ -347,6 +348,21 @@ export function AccountsPage({ role, userId }: Props) {
     }
   }
 
+  function openNewType() {
+    setTypeForm({ name: '', enabled: true });
+    setTypeEditorOpen(true);
+  }
+
+  function openEditType(item: BusinessAccountType) {
+    setTypeForm(item);
+    setTypeEditorOpen(true);
+  }
+
+  function closeTypeEditor() {
+    setTypeEditorOpen(false);
+    setTypeForm({ name: '', enabled: true });
+  }
+
   async function saveType() {
     if (!typeForm.name?.trim()) return;
     setError('');
@@ -357,7 +373,7 @@ export function AccountsPage({ role, userId }: Props) {
         await createBusinessAccountType(role, { name: typeForm.name.trim(), description: typeForm.description ?? null, enabled: true }, userId);
       }
       await reload();
-      setTypeForm({ name: '', enabled: true });
+      closeTypeEditor();
     } catch (err) {
       setError(err instanceof Error ? err.message : '业务账号类型保存失败');
     }
@@ -368,7 +384,7 @@ export function AccountsPage({ role, userId }: Props) {
     try {
       await deleteBusinessAccountType(role, type.id, userId);
       if (typeForm.id === type.id) {
-        setTypeForm({ name: '', enabled: true });
+        closeTypeEditor();
       }
       if (businessTypeFilter === type.id) {
         setBusinessTypeFilter('');
@@ -958,39 +974,61 @@ export function AccountsPage({ role, userId }: Props) {
             value={adminEmployeeFilter}
             options={managementEmployeeOptions}
             onChange={(value) => setAdminEmployeeFilter(value || '')}
-            allowEmpty
+            allowEmpty={false}
           />
         ) : null}
-        <ResourceSelect
-          label="业务账号类型"
-          value={businessTypeFilter}
-          options={businessTypeFilterOptions}
-          onChange={(value) => setBusinessTypeFilter(value || '')}
-          allowEmpty={false}
-        />
         {role !== 'operator' ? (
-          <div className="detail-section">
-            <b>业务账号类型枚举</b>
-            <div className="mini-list scroll-list">
-              {types.length === 0 ? <span className="muted-hint">暂无类型，请先添加</span> : types.map((item) => (
-                <div key={item.id} className={`mini-row ${typeForm.id === item.id ? 'selected' : ''}`}>
-                  <button type="button" className="mini-row-main" onClick={() => setTypeForm(item)}>
-                    <span>{item.name}</span>
-                    <small>{item.description || '无描述'}</small>
-                  </button>
-                  <button type="button" className="icon-button danger" title="删除业务账号类型" onClick={() => void removeType(item)}>
-                    <Trash2 size={14} />
-                  </button>
+          <div className="filter-group business-type-group">
+            <div className="filter-group-title">业务账号类型</div>
+            <ResourceSelect
+              label="筛选账号"
+              value={businessTypeFilter}
+              options={businessTypeFilterOptions}
+              onChange={(value) => setBusinessTypeFilter(value || '')}
+              allowEmpty={false}
+            />
+            <div className="filter-group-body">
+              <span className="filter-group-subtitle">已定义类型</span>
+              <div className="mini-list scroll-list">
+                {types.length === 0 ? <span className="muted-hint">暂无类型，请先添加</span> : types.map((item) => (
+                  <div key={item.id} className={`mini-row ${typeEditorOpen && typeForm.id === item.id ? 'selected' : ''}`}>
+                    <button type="button" className="mini-row-main" onClick={() => openEditType(item)}>
+                      <span>{item.name}</span>
+                      <small>{item.description || '无描述'}</small>
+                    </button>
+                    <button type="button" className="icon-button danger" title="删除业务账号类型" onClick={() => void removeType(item)}>
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+              {!typeEditorOpen ? (
+                <button type="button" className="secondary" onClick={openNewType}><Plus size={14} />新增类型</button>
+              ) : (
+                <div className="type-edit-form">
+                  <span className="filter-group-subtitle">{typeForm.id ? '编辑类型' : '新增类型'}</span>
+                  <label>类型名称</label><input value={typeForm.name || ''} onChange={(event) => setTypeForm({ ...typeForm, name: event.target.value })} />
+                  <label>描述</label><input value={typeForm.description || ''} onChange={(event) => setTypeForm({ ...typeForm, description: event.target.value })} />
+                  <div className="type-edit-actions">
+                    <button type="button" onClick={() => void saveType()}><Save size={14} />保存类型</button>
+                    <button type="button" className="secondary" onClick={closeTypeEditor}>取消</button>
+                  </div>
                 </div>
-              ))}
+              )}
             </div>
-            <button type="button" className="secondary" onClick={() => setTypeForm({ name: '', enabled: true })}><Plus size={14} />新增类型</button>
-            <label>类型名称</label><input value={typeForm.name || ''} onChange={(event) => setTypeForm({ ...typeForm, name: event.target.value })} />
-            <label>描述</label><input value={typeForm.description || ''} onChange={(event) => setTypeForm({ ...typeForm, description: event.target.value })} />
-            <button type="button" onClick={() => void saveType()}><Save size={14} />保存类型</button>
           </div>
-        ) : null}
-        <button type="button" className="secondary" onClick={() => void reload()}><RefreshCw size={14} />刷新</button>
+        ) : (
+          <ResourceSelect
+            label="业务账号类型"
+            value={businessTypeFilter}
+            options={businessTypeFilterOptions}
+            onChange={(value) => setBusinessTypeFilter(value || '')}
+            allowEmpty={false}
+          />
+        )}
+        <div className="accounts-create-action">
+          <button type="button" className={rightPanel === 'create' ? 'primary-btn' : undefined} onClick={openCreate}><Plus size={14} />添加运营账号</button>
+        </div>
       </aside>
       <section className="list-panel">
         <div className="section-head">
@@ -999,11 +1037,11 @@ export function AccountsPage({ role, userId }: Props) {
             <p className="ops-intro">添加运营账号并由本地 Agent 拉起浏览器完成平台登录，无需手工填写平台 ID。</p>
             <span>{visibleAccounts.length} 个运营账号</span>
           </div>
-          <button type="button" className={rightPanel === 'create' ? 'primary-btn' : undefined} onClick={openCreate}><Plus size={14} />添加运营账号</button>
+          <button type="button" className="secondary" onClick={() => void reload()}><RefreshCw size={14} />刷新</button>
         </div>
         {error ? <ErrorState text={error} /> : null}
         {loading ? <LoadingState text="账号加载中" /> : visibleAccounts.length === 0 ? (
-          <EmptyState text="暂无运营账号，点击右上角「添加运营账号」" />
+          <EmptyState text="暂无运营账号，点击左侧「添加运营账号」" />
         ) : (
           <div className="data-table">
             <div className="table-row table-head account-row account-row-v2">

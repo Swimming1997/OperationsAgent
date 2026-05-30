@@ -17,9 +17,12 @@ from intelligence_engine.db.models import (
     NetworkEgressProfile,
     PlatformAccount,
     RiskPolicy,
+    Job,
+    JobEvent,
     KeywordRuleSet,
     KeywordRule,
     Role,
+    TaskRun,
     TaskSchedule,
     TaskTemplate,
     User,
@@ -425,14 +428,35 @@ class ProductRepository:
         )
         return list(rows)
 
+    def list_benchmark_groups_for_business_type(
+        self, business_account_type_id: str
+    ) -> list[tuple[BusinessAccountTypeBenchmarkGroup, BenchmarkGroup | None]]:
+        rows = self.db.execute(
+            select(BusinessAccountTypeBenchmarkGroup, BenchmarkGroup)
+            .join(BenchmarkGroup, BenchmarkGroup.id == BusinessAccountTypeBenchmarkGroup.benchmark_group_id, isouter=True)
+            .where(BusinessAccountTypeBenchmarkGroup.business_account_type_id == business_account_type_id)
+            .order_by(BusinessAccountTypeBenchmarkGroup.created_at.desc())
+        )
+        return list(rows)
 
-    def create_task_template(self, *, name: str, template_type: str, platform: str | None, account_id: str | None, business_account_type_id: str | None, config: dict, enabled: bool) -> TaskTemplate:
+    def create_task_template(
+        self,
+        *,
+        name: str,
+        template_type: str,
+        platform: str | None,
+        business_account_type_id: str,
+        created_by_user_id: str | None,
+        config: dict,
+        enabled: bool,
+    ) -> TaskTemplate:
         template = TaskTemplate(
             name=name,
             template_type=template_type,
             platform=platform,
-            account_id=account_id,
+            account_id=None,
             business_account_type_id=business_account_type_id,
+            created_by_user_id=created_by_user_id,
             config_json=config,
             enabled=enabled,
         )
@@ -440,22 +464,60 @@ class ProductRepository:
         self.db.flush()
         return template
 
-    def list_task_templates(self) -> list[TaskTemplate]:
-        return list(self.db.scalars(select(TaskTemplate).order_by(TaskTemplate.created_at.desc())))
+    def list_task_templates(self, *, business_account_type_ids: list[str] | None = None) -> list[TaskTemplate]:
+        stmt = select(TaskTemplate).order_by(TaskTemplate.created_at.desc())
+        if business_account_type_ids is not None:
+            stmt = stmt.where(TaskTemplate.business_account_type_id.in_(business_account_type_ids))
+        return list(self.db.scalars(stmt))
 
-    def update_task_template(self, template: TaskTemplate, *, name: str | None = None, enabled: bool | None = None, config: dict | None = None) -> TaskTemplate:
+    def delete_task_template(self, template: TaskTemplate) -> None:
+        run_ids = list(self.db.scalars(select(TaskRun.id).where(TaskRun.task_template_id == template.id)))
+        if run_ids:
+            job_ids = list(self.db.scalars(select(Job.id).where(Job.task_run_id.in_(run_ids))))
+            if job_ids:
+                self.db.execute(delete(JobEvent).where(JobEvent.job_id.in_(job_ids)))
+                self.db.execute(delete(Job).where(Job.id.in_(job_ids)))
+            self.db.execute(delete(TaskRun).where(TaskRun.task_template_id == template.id))
+        self.db.execute(delete(TaskSchedule).where(TaskSchedule.task_template_id == template.id))
+        self.db.delete(template)
+        self.db.flush()
+
+    def update_task_template(
+        self,
+        template: TaskTemplate,
+        *,
+        name: str | None = None,
+        enabled: bool | None = None,
+        business_account_type_id: str | None = None,
+        config: dict | None = None,
+    ) -> TaskTemplate:
         if name is not None:
             template.name = name
         if enabled is not None:
             template.enabled = enabled
+        if business_account_type_id is not None:
+            template.business_account_type_id = business_account_type_id
         if config is not None:
             template.config_json = config
         self.db.flush()
         return template
 
-    def create_task_schedule(self, *, task_template_id: str, schedule_type: str, interval_seconds: int | None, daily_time_window: dict, enabled: bool, next_run_at) -> TaskSchedule:
+    def create_task_schedule(
+        self,
+        *,
+        task_template_id: str,
+        executor_account_id: str,
+        created_by_user_id: str | None,
+        schedule_type: str,
+        interval_seconds: int | None,
+        daily_time_window: dict,
+        enabled: bool,
+        next_run_at,
+    ) -> TaskSchedule:
         schedule = TaskSchedule(
             task_template_id=task_template_id,
+            executor_account_id=executor_account_id,
+            created_by_user_id=created_by_user_id,
             schedule_type=schedule_type,
             interval_seconds=interval_seconds,
             daily_time_window_json=daily_time_window,
@@ -466,8 +528,13 @@ class ProductRepository:
         self.db.flush()
         return schedule
 
-    def list_task_schedules(self) -> list[TaskSchedule]:
-        return list(self.db.scalars(select(TaskSchedule).order_by(TaskSchedule.created_at.desc())))
+    def list_task_schedules(self, *, created_by_user_id: str | None = None, task_template_id: str | None = None) -> list[TaskSchedule]:
+        stmt = select(TaskSchedule).order_by(TaskSchedule.created_at.desc())
+        if created_by_user_id is not None:
+            stmt = stmt.where(TaskSchedule.created_by_user_id == created_by_user_id)
+        if task_template_id is not None:
+            stmt = stmt.where(TaskSchedule.task_template_id == task_template_id)
+        return list(self.db.scalars(stmt))
 
     def create_behavior_profile(self, *, name: str, description: str | None, enabled: bool, config: dict) -> BehaviorProfile:
         item = BehaviorProfile(name=name, description=description, enabled=enabled, config_json=config)

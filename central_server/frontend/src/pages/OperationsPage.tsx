@@ -379,7 +379,7 @@ function HeadActions({ onRefresh, onOpenTasks }: { onRefresh: () => void; onOpen
   return (
     <div className="head-actions">
       <button type="button" className="secondary" onClick={onRefresh}><RefreshCw size={14} />刷新</button>
-      {onOpenTasks ? <button type="button" className="secondary" onClick={onOpenTasks}>返回任务中心</button> : null}
+      {onOpenTasks ? <button type="button" className="secondary" onClick={onOpenTasks}>返回任务模板</button> : null}
     </div>
   );
 }

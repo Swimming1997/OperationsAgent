@@ -247,14 +247,25 @@ export type ProductDetail = {
   pending_comment_job_id: string | null;
 };
 
+export type TaskTemplatePermissions = {
+  can_edit: boolean;
+  can_run: boolean;
+  can_schedule: boolean;
+  can_delete: boolean;
+};
+
 export type TaskTemplateListItem = {
   id: string;
   name: string;
   template_type: string;
   enabled: boolean;
   platform: string | null;
-  account_id: string | null;
+  business_account_type_id: string | null;
+  business_account_type_name: string | null;
+  created_by_user_id: string | null;
+  created_by_display_name: string | null;
   key_fields: Record<string, unknown>;
+  permissions: TaskTemplatePermissions;
 };
 
 export type TaskTemplateDetail = {
@@ -267,6 +278,20 @@ export type TaskTemplateDetail = {
   config: Record<string, unknown>;
   enabled: boolean;
   typed_payload: Record<string, unknown>;
+};
+
+export type TaskSchedule = {
+  id: string;
+  task_template_id: string;
+  executor_account_id: string | null;
+  created_by_user_id: string | null;
+  schedule_type: string;
+  interval_seconds: number | null;
+  daily_time_window: Record<string, unknown>;
+  enabled: boolean;
+  next_run_at: string | null;
+  last_run_at: string | null;
+  last_materialized_at: string | null;
 };
 
 export type TaskRunResponse = {
@@ -527,6 +552,13 @@ export type BusinessAccountTypeRuleSet = {
   rule_set_id: string;
   rule_set_name: string | null;
   is_default: boolean;
+};
+
+export type BusinessAccountTypeBenchmarkGroup = {
+  id: string;
+  business_account_type_id: string;
+  benchmark_group_id: string;
+  benchmark_group_name: string | null;
 };
 
 export type BehaviorProfile = {
