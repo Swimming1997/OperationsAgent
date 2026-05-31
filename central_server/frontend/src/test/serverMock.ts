@@ -9,6 +9,35 @@ import {
   operationsTaskRuns,
 } from './operationsMockData';
 
+const mockManualTags = {
+  items: [
+    {
+      id: 'tag-watch-later',
+      name: '稍后看',
+      status: 'active',
+      is_system: true,
+      created_by_user_id: null,
+      usage_count: 2,
+      created_at: '2026-05-19T00:00:00Z',
+      updated_at: '2026-05-19T00:00:00Z',
+      archived_at: null,
+      can_delete: false,
+    },
+    {
+      id: 'tag-rewrite',
+      name: '可仿写',
+      status: 'active',
+      is_system: false,
+      created_by_user_id: 'supervisor-user',
+      usage_count: 1,
+      created_at: '2026-05-19T00:00:00Z',
+      updated_at: '2026-05-19T00:00:00Z',
+      archived_at: null,
+      can_delete: false,
+    },
+  ],
+};
+
 type FetchMockConfig = {
   blockedReadiness?: boolean;
   failRun?: boolean;
@@ -300,6 +329,24 @@ export function installFetchMock(config: FetchMockConfig = {}) {
           reason: '人工锁定，规则重评已跳过',
         }],
       });
+    }
+    if (url.includes('/api/manual-tags') && init?.method === 'POST') {
+      const body = init.body ? JSON.parse(String(init.body)) : {};
+      return json({
+        id: 'tag-new',
+        name: body.name || '新标签',
+        status: 'active',
+        is_system: false,
+        created_by_user_id: 'supervisor-user',
+        usage_count: 0,
+        created_at: '2026-05-19T00:00:00Z',
+        updated_at: '2026-05-19T00:00:00Z',
+        archived_at: null,
+        can_delete: true,
+      });
+    }
+    if (url.includes('/api/manual-tags')) {
+      return json(mockManualTags);
     }
     if (url.includes('/api/intelligence/contents/') && url.includes('/reference-library-items') && init?.method === 'POST') {
       return json(referenceLibraryItems[0]);

@@ -15,6 +15,7 @@ import {
   fetchProductDetail,
   reEvaluateReferenceLibraryItems,
   setContentStatus,
+  updateContentManualTagIds,
   updateManualTags,
   type IntelligenceFilters,
 } from '../api/intelligence';
@@ -722,9 +723,9 @@ export function IntelligencePage({ role, userId, initialContentId, onOpenReferen
           }
           await reloadDetail();
         }}
-        onSaveManualTags={async (tags) => {
+        onSaveManualTagIds={async (tagIds) => {
           if (!selectedId) return;
-          await updateManualTags(role, selectedId, tags, userId);
+          await updateContentManualTagIds(role, selectedId, tagIds, userId);
           setFeedback('运营标签已保存');
           await reloadDetail();
         }}

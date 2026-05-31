@@ -28,6 +28,7 @@ import {
   formatReferenceRevokeRemaining,
 } from '../../utils/intelligencePermissions';
 import { SafeImage } from '../../components/SafeImage';
+import { ManualTagPicker } from '../../components/ManualTagPicker';
 import { coverFallbackSrc, coverSrc } from '../../utils/mediaUrl';
 import { EmptyState, ErrorState, LoadingState } from '../../components/Status';
 import type {
@@ -85,7 +86,7 @@ type Props = {
   onOpenReferenceLibrary: (contentId: string, itemId?: string) => void;
   onEnqueueDetail: () => Promise<void>;
   onEnqueueComment: () => Promise<void>;
-  onSaveManualTags: (tags: string[]) => Promise<void>;
+  onSaveManualTagIds: (tagIds: string[]) => Promise<void>;
   onAssign: (assigneeUserId: string) => Promise<void>;
   onAddNote: (note: string) => Promise<void>;
   onCustomLibrary: (payload: {
@@ -126,7 +127,7 @@ export function IntelligenceDetailPanel({
   onOpenReferenceLibrary,
   onEnqueueDetail,
   onEnqueueComment,
-  onSaveManualTags,
+  onSaveManualTagIds,
   onAssign,
   onAddNote,
   onCustomLibrary,
@@ -144,7 +145,6 @@ export function IntelligenceDetailPanel({
   const [libraryEditOpen, setLibraryEditOpen] = useState(false);
   const [decisionLibraryType, setDecisionLibraryType] = useState<'lead' | 'non_lead' | 'uncategorized'>('non_lead');
   const [inlineReason, setInlineReason] = useState('');
-  const [manualTagInput, setManualTagInput] = useState('');
   const [note, setNote] = useState('');
   const [assignee, setAssignee] = useState(userId);
   const [employees, setEmployees] = useState<Employee[]>([]);
@@ -180,12 +180,6 @@ export function IntelligenceDetailPanel({
       .then(setEmployees)
       .catch(() => setEmployees([]));
   }, [role, userId]);
-
-  useEffect(() => {
-    if (detail) {
-      setManualTagInput((detail.manual_tags || []).join(', '));
-    }
-  }, [detail?.identity.id, detail?.manual_tags]);
 
   useEffect(() => {
     setDecisionLibraryType(defaultLibraryTypeForBucket(detail?.latest_candidate_decision?.candidate_bucket || selected?.candidate_bucket));
@@ -318,36 +312,16 @@ export function IntelligenceDetailPanel({
             )}
 
             <div className="detail-section">
-              <b>标签</b>
-              <span>运营：{formatTags(detail.manual_tags)}</span>
-              {(detail.manual_tags || []).map((tag) => (
-                <button key={tag} type="button" className="tag-button" onClick={() => onApplyTagFilter(tag)}>
-                  {tag}
-                </button>
-              ))}
-            </div>
-
-            <div className="detail-section">
               <b>运营标签</b>
-              <input
-                value={manualTagInput}
-                onChange={(event) => setManualTagInput(event.target.value)}
-                placeholder="逗号分隔，如：可仿写, 求助"
+              <ManualTagPicker
+                role={role}
+                userId={userId}
+                valueNames={detail.manual_tags || []}
+                disabled={!canWrite}
+                onChange={async (tagIds) => {
+                  await onSaveManualTagIds(tagIds);
+                }}
               />
-              <button
-                type="button"
-                onClick={() =>
-                  onSaveManualTags(
-                    manualTagInput
-                      .split(/[,，]/)
-                      .map((item) => item.trim())
-                      .filter(Boolean),
-                  )
-                }
-              >
-                <FilePlus2 size={14} />
-                保存标签
-              </button>
             </div>
 
             {canAssign && (
@@ -444,10 +418,7 @@ export function IntelligenceDetailPanel({
                           library_type: libraryType,
                           rating: libraryRating,
                           selected_reason: libraryReason || undefined,
-                          manual_tags: manualTagInput
-                            .split(/[,，]/)
-                            .map((item) => item.trim())
-                            .filter(Boolean),
+                          manual_tags: detail.manual_tags || [],
                         })
                       }
                     >

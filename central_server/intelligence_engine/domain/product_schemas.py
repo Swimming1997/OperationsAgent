@@ -971,8 +971,30 @@ class IntelligenceContentProductDetail(ApiModel):
 
 
 class ManualTagsUpdateRequest(ApiModel):
+    tag_ids: list[str] = Field(default_factory=list)
     manual_tags: list[str] = Field(default_factory=list)
     user_id: str | None = None
+
+
+class ManualTagCreateRequest(ApiModel):
+    name: str
+
+
+class ManualTagRead(ApiModel):
+    id: str
+    name: str
+    status: str
+    is_system: bool
+    created_by_user_id: str | None = None
+    usage_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+    archived_at: datetime | None = None
+    can_delete: bool = False
+
+
+class ManualTagListResponse(ApiModel):
+    items: list[ManualTagRead] = Field(default_factory=list)
 
 
 class EnqueueFetchResponse(ApiModel):

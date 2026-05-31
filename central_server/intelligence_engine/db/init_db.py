@@ -3,6 +3,7 @@
 from intelligence_engine.db.base import Base
 from intelligence_engine.db.models import *  # noqa: F403
 from intelligence_engine.db.session import SessionLocal, engine
+from intelligence_engine.services.manual_tag_service import ManualTagService
 from intelligence_engine.storage.repositories.product_repository import ProductRepository
 
 
@@ -11,6 +12,7 @@ def init_db() -> None:
     ensure_runtime_schema()
     with SessionLocal() as db:
         ProductRepository(db).ensure_default_roles()
+        ManualTagService(db).ensure_bootstrap()
         db.commit()
 
 

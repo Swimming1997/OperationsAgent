@@ -169,6 +169,7 @@ from intelligence_engine.storage.repositories.user_intelligence_scenario_filter_
 )
 from intelligence_engine.storage.repositories.content_repository import ContentRepository
 from intelligence_engine.storage.repositories.reference_library_repository import ReferenceLibraryRepository
+from intelligence_engine.storage.repositories.manual_tag_repository import ManualTagRepository
 from intelligence_engine.storage.repositories.job_repository import JobRepository
 from intelligence_engine.storage.repositories.product_repository import ProductRepository
 from intelligence_engine.services.intelligence_scenario_filter_service import (
@@ -181,6 +182,7 @@ from intelligence_engine.services.intelligence_scenario_filter_service import (
 from intelligence_engine.services.job_queue_diagnostics import build_task_run_queue_context
 from intelligence_engine.services.task_materialization import TaskMaterializationService
 from intelligence_engine.services.benchmark_selection import BenchmarkSelectionService, SelectionActor
+from intelligence_engine.services.manual_tag_service import ManualTagActionError, ManualTagService
 from intelligence_engine.services.rule_profile import RuleProfileService
 from intelligence_engine.storage.repositories.operation_rule_repository import OperationRuleRepository
 from intelligence_engine.storage.repositories.workflow_repository import WorkflowRepository
@@ -2419,6 +2421,8 @@ def list_product_intelligence_contents(
     tag: str | None = None,
     platform_tag: str | None = None,
     manual_tag: str | None = None,
+    manual_tag_id: str | None = None,
+    untagged: bool | None = None,
     search_sort: str | None = None,
     note_type_filter: str | None = None,
     publish_time_filter: str | None = None,
@@ -2461,6 +2465,8 @@ def list_product_intelligence_contents(
         tag=tag,
         platform_tag=platform_tag,
         manual_tag=manual_tag,
+        manual_tag_id=manual_tag_id,
+        untagged=untagged,
         search_sort=search_sort,
         note_type_filter=note_type_filter,
         publish_time_filter=publish_time_filter,
@@ -2607,7 +2613,7 @@ def get_intelligence_content_product_detail(content_id: str, db: Session = Depen
         ],
         platform_tags=extract_platform_tags(metadata, snapshot.raw_payload_json if snapshot else None),
         search_tags=extract_search_tags(metadata, discovery_meta_rows),
-        manual_tags=extract_manual_tags(metadata),
+        manual_tags=ManualTagRepository(db).list_content_tag_names(content_id) or extract_manual_tags(metadata),
         data_status=data_status_value,
         pending_detail_job_id=pending_detail_job,
         pending_comment_job_id=pending_comment_job,
@@ -2704,14 +2710,32 @@ def list_intelligence_content_notes(content_id: str, db: Session = Depends(get_d
 
 @router.patch("/intelligence/contents/{content_id}/manual-tags", response_model=ContentIdentityDetail)
 def update_intelligence_manual_tags(content_id: str, request: ManualTagsUpdateRequest, db: Session = Depends(get_db), principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR))):
+    service = ManualTagService(db)
+    tag_ids = list(request.tag_ids)
+    if not tag_ids and request.manual_tags:
+        from intelligence_engine.storage.repositories.manual_tag_repository import ManualTagRepository
+
+        repo = ManualTagRepository(db)
+        service.ensure_bootstrap()
+        for raw_name in request.manual_tags:
+            name = repo.normalize_name(raw_name)
+            if not name:
+                continue
+            tag = repo.get_by_name(name)
+            if not tag:
+                tag = repo.create_tag(name=name, created_by_user_id=request.user_id or principal.user_id)
+            tag_ids.append(tag.id)
     try:
-        content = WorkflowRepository(db).update_manual_tags(
+        content = service.set_content_tags(
             content_id=content_id,
-            manual_tags=request.manual_tags,
+            tag_ids=tag_ids,
+            principal=principal,
             user_id=request.user_id or principal.user_id,
         )
     except ValueError:
         raise HTTPException(status_code=404, detail="content not found")
+    except ManualTagActionError as error:
+        raise HTTPException(status_code=400, detail={"code": error.code, "message": error.message})
     db.commit()
     return ContentIdentityDetail(
         id=content.id,
@@ -2790,6 +2814,8 @@ def list_reference_library_items(
     sort_order: str = "desc",
     search_keyword: str | None = None,
     content_query: str | None = None,
+    manual_tag_id: str | None = None,
+    untagged: bool | None = None,
     page: int = 1,
     page_size: int = 20,
     db: Session = Depends(get_db),
@@ -2805,6 +2831,8 @@ def list_reference_library_items(
         usage_status=usage_status,
         search_keyword=search_keyword,
         content_query=content_query,
+        manual_tag_id=manual_tag_id,
+        untagged=untagged,
         sort_by=sort_by,
         sort_order=sort_order,
     )

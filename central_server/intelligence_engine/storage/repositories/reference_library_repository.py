@@ -1,15 +1,18 @@
-from sqlalchemy import Text, and_, func, or_, select
+from sqlalchemy import Text, and_, exists, func, or_, select
 from sqlalchemy.orm import Session
 
 from intelligence_engine.db.models import (
     ContentIdentity,
+    ContentManualTag,
     ContentSnapshot,
+    ManualTag,
     ReferenceLibraryEvent,
     ReferenceLibraryItem,
     utcnow,
 )
 from intelligence_engine.domain.enums import ReferenceLibraryItemStatus
 from intelligence_engine.services.content_query import build_content_query_condition, resolve_content_query
+from intelligence_engine.storage.repositories.manual_tag_repository import ManualTagRepository
 
 
 LEGACY_LIBRARY_TYPE_MAP = {
@@ -181,6 +184,8 @@ class ReferenceLibraryRepository:
         usage_status: str | None = None,
         search_keyword: str | None = None,
         content_query: str | None = None,
+        manual_tag_id: str | None = None,
+        untagged: bool | None = None,
         sort_by: str = "selected_at",
         sort_order: str = "desc",
     ) -> tuple[list[dict], int]:
@@ -201,6 +206,21 @@ class ReferenceLibraryRepository:
         if query_keyword:
             conditions.append(
                 build_content_query_condition(query_keyword, include_reference_item_fields=True)
+            )
+        if manual_tag_id:
+            conditions.append(
+                exists(
+                    select(ContentManualTag.id).where(
+                        ContentManualTag.content_id == ReferenceLibraryItem.content_id,
+                        ContentManualTag.tag_id == manual_tag_id,
+                    )
+                )
+            )
+        if untagged:
+            conditions.append(
+                ~exists(
+                    select(ContentManualTag.id).where(ContentManualTag.content_id == ReferenceLibraryItem.content_id)
+                )
             )
 
         count_stmt = select(func.count(ReferenceLibraryItem.id)).join(ContentIdentity, ContentIdentity.id == ReferenceLibraryItem.content_id)
@@ -282,6 +302,7 @@ class ReferenceLibraryRepository:
 
         metadata = content.metadata_json or {}
         media = MediaService()
+        content_manual_tags = ManualTagRepository(self.db).list_content_tag_names(content.id)
         return {
             "id": item.id,
             "content_id": item.content_id,
@@ -295,7 +316,7 @@ class ReferenceLibraryRepository:
             "selection_sources": item.selection_sources_json or [],
             "matched_keywords": item.matched_keywords_json or [],
             "selected_at": item.selected_at,
-            "manual_tags": item.manual_tags_json or [],
+            "manual_tags": content_manual_tags or (item.manual_tags_json or []),
             "material_tags": item.material_tags_json or [],
             "usage_status": item.usage_status,
             "note": item.note,

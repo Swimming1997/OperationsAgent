@@ -780,3 +780,33 @@ class UserIntelligenceScenarioFilter(Base, TimestampMixin):
     scenario: Mapped[str] = mapped_column(String(32), nullable=False)
     filters_json: Mapped[dict] = mapped_column(JsonType, default=dict, nullable=False)
     rolling_json: Mapped[dict] = mapped_column(JsonType, default=dict, nullable=False)
+
+
+class ManualTag(Base, TimestampMixin):
+    __tablename__ = "manual_tags"
+    __table_args__ = (
+        UniqueConstraint("name", name="uq_manual_tags_name"),
+        Index("idx_manual_tags_status", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="active", nullable=False)
+    is_system: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_by_user_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("users.id"))
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    archived_by_user_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("users.id"))
+
+
+class ContentManualTag(Base):
+    __tablename__ = "content_manual_tags"
+    __table_args__ = (
+        UniqueConstraint("content_id", "tag_id", name="uq_content_manual_tags_content_tag"),
+        Index("idx_content_manual_tags_content_id", "content_id"),
+        Index("idx_content_manual_tags_tag_id", "tag_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    content_id: Mapped[str] = mapped_column(String(36), ForeignKey("content_identity.id"), nullable=False)
+    tag_id: Mapped[str] = mapped_column(String(36), ForeignKey("manual_tags.id"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)

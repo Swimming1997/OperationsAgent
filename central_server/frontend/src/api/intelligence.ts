@@ -4,6 +4,8 @@ import type {
   ContentWorkflow,
   DataQualityOverview,
   IntelligenceListResponse,
+  ManualTag,
+  ManualTagListResponse,
   ProductDetail,
   ReferenceLibraryBulkResponse,
   ReferenceLibraryEvent,
@@ -28,6 +30,8 @@ export type IntelligenceFilters = {
   tag?: string;
   platform_tag?: string;
   manual_tag?: string;
+  manual_tag_id?: string;
+  untagged?: string;
   search_sort?: string;
   note_type_filter?: string;
   publish_time_filter?: string;
@@ -52,6 +56,8 @@ export type ReferenceLibraryFilters = {
   usage_status?: string;
   search_keyword?: string;
   content_query?: string;
+  manual_tag_id?: string;
+  untagged?: string;
   sort_by?: string;
   sort_order?: string;
   page?: string;
@@ -138,6 +144,45 @@ export function updateManualTags(role: Role, contentId: string, manualTags: stri
     userId,
     body: { manual_tags: manualTags, user_id: userId || `${role}-user` },
   });
+}
+
+export function updateContentManualTagIds(role: Role, contentId: string, tagIds: string[], userId?: string) {
+  return apiRequest(`/api/intelligence/contents/${contentId}/manual-tags`, {
+    method: 'PATCH',
+    role,
+    userId,
+    body: { tag_ids: tagIds, user_id: userId || `${role}-user` },
+  });
+}
+
+export function fetchManualTags(role: Role, userId?: string, includeArchived = false) {
+  const qs = includeArchived ? '?include_archived=true' : '';
+  return apiRequest<ManualTagListResponse>(`/api/manual-tags${qs}`, { role, userId });
+}
+
+export function createManualTag(role: Role, name: string, userId?: string) {
+  return apiRequest<ManualTag>('/api/manual-tags', {
+    method: 'POST',
+    role,
+    userId,
+    body: { name },
+  });
+}
+
+export function deleteManualTag(role: Role, tagId: string, userId?: string) {
+  return apiRequest(`/api/manual-tags/${tagId}`, { method: 'DELETE', role, userId });
+}
+
+export function archiveManualTag(role: Role, tagId: string, userId?: string) {
+  return apiRequest<ManualTag>(`/api/manual-tags/${tagId}/archive`, { method: 'POST', role, userId });
+}
+
+export function restoreManualTag(role: Role, tagId: string, userId?: string) {
+  return apiRequest<ManualTag>(`/api/manual-tags/${tagId}/restore`, { method: 'POST', role, userId });
+}
+
+export function hardDeleteManualTag(role: Role, tagId: string, userId?: string) {
+  return apiRequest(`/api/manual-tags/${tagId}/hard`, { method: 'DELETE', role, userId });
 }
 
 export function enqueueDetailFetch(role: Role, contentId: string, userId?: string) {

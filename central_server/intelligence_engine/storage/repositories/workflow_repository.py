@@ -1,6 +1,6 @@
 ﻿from datetime import datetime
 
-from sqlalchemy import Text, and_, func, or_, select
+from sqlalchemy import Text, and_, func, or_, select, exists
 from sqlalchemy.orm import Session
 
 from intelligence_engine.services.content_query import build_content_query_condition, resolve_content_query
@@ -12,14 +12,17 @@ from intelligence_engine.db.models import (
     ContentAssignment,
     ContentDiscoveryEvent,
     ContentIdentity,
+    ContentManualTag,
     ContentOperatorNote,
     ContentSnapshot,
     ContentWorkflowState,
     Employee,
+    ManualTag,
     PlatformAccount,
     ReferenceLibraryItem,
     utcnow,
 )
+from intelligence_engine.storage.repositories.manual_tag_repository import ManualTagRepository
 from intelligence_engine.domain.enums import CandidateBucket, ContentDataStatus, ContentWorkflowStatus, ReferenceLibraryItemStatus
 from intelligence_engine.domain.intelligence_pool import (
     aggregate_search_context,
@@ -109,16 +112,23 @@ class WorkflowRepository:
         return row
 
     def update_manual_tags(self, *, content_id: str, manual_tags: list[str], user_id: str | None) -> ContentIdentity:
-        content = self.db.get(ContentIdentity, content_id)
-        if not content:
-            raise ValueError("content not found")
-        metadata = dict(content.metadata_json or {})
-        metadata["manual_tags"] = manual_tags
-        content.metadata_json = metadata
-        tag_text = ", ".join(manual_tags) if manual_tags else "（已清空）"
-        self.add_note(content_id=content_id, user_id=user_id, note=f"更新运营标签：{tag_text}")
-        self.db.flush()
-        return content
+        from intelligence_engine.security.auth import Principal
+        from intelligence_engine.services.manual_tag_service import ManualTagService
+
+        service = ManualTagService(self.db)
+        repo = ManualTagRepository(self.db)
+        service.ensure_bootstrap()
+        tag_ids: list[str] = []
+        for raw_name in manual_tags:
+            name = repo.normalize_name(raw_name)
+            if not name:
+                continue
+            tag = repo.get_by_name(name)
+            if not tag:
+                tag = repo.create_tag(name=name, created_by_user_id=user_id)
+            tag_ids.append(tag.id)
+        principal = Principal(user_id=user_id, role_names=frozenset({"operator"}))
+        return service.set_content_tags(content_id=content_id, tag_ids=tag_ids, principal=principal, user_id=user_id)
 
     def list_notes(self, *, content_id: str) -> list[ContentOperatorNote]:
         stmt = select(ContentOperatorNote).where(ContentOperatorNote.content_id == content_id).order_by(ContentOperatorNote.created_at.desc())
@@ -146,6 +156,8 @@ class WorkflowRepository:
         tag: str | None = None,
         platform_tag: str | None = None,
         manual_tag: str | None = None,
+        manual_tag_id: str | None = None,
+        untagged: bool | None = None,
         search_sort: str | None = None,
         note_type_filter: str | None = None,
         publish_time_filter: str | None = None,
@@ -208,8 +220,27 @@ class WorkflowRepository:
             base_conditions.append(func.coalesce(ContentSnapshot.comment_count, 0) >= min_comment_count)
         if min_collect_count is not None:
             base_conditions.append(func.coalesce(ContentSnapshot.collect_count, 0) >= min_collect_count)
-        if manual_tag:
-            base_conditions.append(func.lower(ContentIdentity.metadata_json.cast(Text)).contains(manual_tag.lower()))
+        if manual_tag_id:
+            base_conditions.append(
+                exists(
+                    select(ContentManualTag.id).where(
+                        ContentManualTag.content_id == ContentIdentity.id,
+                        ContentManualTag.tag_id == manual_tag_id,
+                    )
+                )
+            )
+        elif manual_tag:
+            base_conditions.append(
+                exists(
+                    select(ContentManualTag.id)
+                    .join(ManualTag, ManualTag.id == ContentManualTag.tag_id)
+                    .where(ContentManualTag.content_id == ContentIdentity.id, ManualTag.name == manual_tag)
+                )
+            )
+        if untagged:
+            base_conditions.append(
+                ~exists(select(ContentManualTag.id).where(ContentManualTag.content_id == ContentIdentity.id))
+            )
         if platform_tag:
             base_conditions.append(
                 or_(
@@ -359,7 +390,8 @@ class WorkflowRepository:
                 if status_value != data_status:
                     continue
             platform_tags = extract_platform_tags(metadata, snapshot.raw_payload_json if snapshot else None)
-            manual_tags = extract_manual_tags(metadata)
+            registry_tags = ManualTagRepository(self.db).list_content_tag_names(content.id)
+            manual_tags = registry_tags or extract_manual_tags(metadata)
             search_tags = extract_search_tags(metadata, discovery_meta_rows)
             reference_library_count = 1 if ref_item else 0
             items.append(

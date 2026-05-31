@@ -5,6 +5,7 @@ import { ListPaginationBar } from '../components/ListPaginationBar';
 import {
   archiveReferenceLibraryItem,
   revokeReferenceLibraryItem,
+  fetchManualTags,
   fetchProductDetail,
   fetchReferenceLibraryEvents,
   fetchReferenceLibraryItems,
@@ -30,7 +31,7 @@ import {
 import { SafeImage } from '../components/SafeImage';
 import { coverSrc } from '../utils/mediaUrl';
 import { EmptyState, ErrorState, LoadingState } from '../components/Status';
-import type { ProductDetail, ReferenceLibraryEvent, ReferenceLibraryItem, ReferenceLibraryReevaluateResult, Role } from '../types/api';
+import type { ManualTag, ProductDetail, ReferenceLibraryEvent, ReferenceLibraryItem, ReferenceLibraryReevaluateResult, Role } from '../types/api';
 import {
   formatTags,
   labelPlatform,
@@ -82,10 +83,13 @@ const SORT_OPTIONS = [
   { value: 'created_at', label: '创建时间' },
 ];
 
+const UNTAGGED_FILTER = '__untagged__';
+
 function filtersFromLayers(
   platform: string,
   selectionSource: string,
   libraryType: string,
+  manualTagFilter: string,
   extra: ReferenceLibraryFilters,
 ): ReferenceLibraryFilters {
   return {
@@ -93,6 +97,8 @@ function filtersFromLayers(
     platform: platform || undefined,
     selection_source: selectionSource || undefined,
     library_type: libraryType || undefined,
+    manual_tag_id: manualTagFilter && manualTagFilter !== UNTAGGED_FILTER ? manualTagFilter : undefined,
+    untagged: manualTagFilter === UNTAGGED_FILTER ? 'true' : undefined,
     sort_by: extra.sort_by || 'selected_at',
     sort_order: extra.sort_order || 'desc',
     page: extra.page || '1',
@@ -130,6 +136,10 @@ export function BenchmarkLibraryPage({ role, userId, onOpenIntelligencePool, onO
   const [sourceTab, setSourceTab] = useState(initial.selection_source || '');
   const [libraryTab, setLibraryTab] = useState(initial.library_type || '');
   const [rating, setRating] = useState(initial.rating || '');
+  const [manualTagFilter, setManualTagFilter] = useState(
+    initial.untagged === 'true' ? UNTAGGED_FILTER : initial.manual_tag_id || '',
+  );
+  const [registryTags, setRegistryTags] = useState<ManualTag[]>([]);
   const [sortBy, setSortBy] = useState(initial.sort_by || 'selected_at');
   const initialContentQuery = initial.content_query || initial.search_keyword || '';
   const [searchInput, setSearchInput] = useState(initialContentQuery);
@@ -172,7 +182,7 @@ export function BenchmarkLibraryPage({ role, userId, onOpenIntelligencePool, onO
 
   const activeFilters = useMemo(
     () =>
-      filtersFromLayers(platformTab, sourceTab, libraryTab, {
+      filtersFromLayers(platformTab, sourceTab, libraryTab, manualTagFilter, {
         rating,
         content_query: contentQuery || undefined,
         sort_by: sortBy,
@@ -180,7 +190,7 @@ export function BenchmarkLibraryPage({ role, userId, onOpenIntelligencePool, onO
         page: String(page),
         page_size: String(PAGE_SIZE),
       }),
-    [platformTab, sourceTab, libraryTab, rating, contentQuery, sortBy, page],
+    [platformTab, sourceTab, libraryTab, manualTagFilter, rating, contentQuery, sortBy, page],
   );
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
@@ -222,8 +232,14 @@ export function BenchmarkLibraryPage({ role, userId, onOpenIntelligencePool, onO
   const initialContentId = useMemo(() => initialParams.get('content_id'), [initialParams]);
 
   useEffect(() => {
+    void fetchManualTags(role, userId)
+      .then((response) => setRegistryTags(response.items.filter((item) => item.status === 'active')))
+      .catch(() => setRegistryTags([]));
+  }, [role, userId]);
+
+  useEffect(() => {
     void loadList(activeFilters, selectedId, initialContentId);
-  }, [platformTab, sourceTab, libraryTab, rating, sortBy, contentQuery, page]);
+  }, [platformTab, sourceTab, libraryTab, rating, manualTagFilter, sortBy, contentQuery, page]);
 
   useEffect(() => {
     if (!selected) return;
@@ -271,6 +287,7 @@ export function BenchmarkLibraryPage({ role, userId, onOpenIntelligencePool, onO
     setSourceTab('');
     setLibraryTab('');
     setRating('');
+    setManualTagFilter('');
     setSortBy('selected_at');
     setSearchInput('');
     setContentQuery('');
@@ -420,6 +437,18 @@ export function BenchmarkLibraryPage({ role, userId, onOpenIntelligencePool, onO
         <select value={rating} onChange={(event) => { setRating(event.target.value); setPage(1); }}>
           {RATING_FILTER_OPTIONS.map((item) => <option key={item.value || 'all'} value={item.value}>{item.label}</option>)}
         </select>
+        <label>运营标签</label>
+        <select
+          value={manualTagFilter}
+          data-testid="benchmark-manual-tag-filter"
+          onChange={(event) => { setManualTagFilter(event.target.value); setPage(1); }}
+        >
+          <option value="">全部标签</option>
+          <option value={UNTAGGED_FILTER}>未打标签</option>
+          {registryTags.map((tag) => (
+            <option key={tag.id} value={tag.id}>{tag.name}</option>
+          ))}
+        </select>
         <label>排序</label>
         <select value={sortBy} onChange={(event) => setSortBy(event.target.value)}>
           {SORT_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
@@ -508,7 +537,7 @@ export function BenchmarkLibraryPage({ role, userId, onOpenIntelligencePool, onO
         ) : (
           <>
             <div className="data-table" data-testid="benchmark-library-table">
-              <div className="table-row table-head content-row benchmark-library-head">
+              <div className={`table-row table-head content-row benchmark-library-head ${canEdit ? 'benchmark-library-row--with-check' : ''}`}>
                 {canEdit ? (
                 <span>
                   <input
@@ -519,13 +548,13 @@ export function BenchmarkLibraryPage({ role, userId, onOpenIntelligencePool, onO
                   />
                 </span>
                 ) : null}
-                <span>封面</span><span>标题</span><span>平台</span><span>分类</span><span>评级</span><span>来源</span><span>入库时间</span>
+                <span>封面</span><span>标题</span><span>平台</span><span>分类</span><span>评级</span><span>标签</span><span>来源</span><span>入库时间</span>
               </div>
               {items.map((item) => (
                 <button
                   key={item.id}
                   type="button"
-                  className={`table-row content-row benchmark-library-row ${item.id === selectedId ? 'selected' : ''}`}
+                  className={`table-row content-row benchmark-library-row ${canEdit ? 'benchmark-library-row--with-check' : ''} ${item.id === selectedId ? 'selected' : ''}`}
                   onClick={() => {
                     setSelectedId(item.id);
                     syncUrl(activeFilters, item.id);
@@ -550,6 +579,7 @@ export function BenchmarkLibraryPage({ role, userId, onOpenIntelligencePool, onO
                   <span>{labelPlatform(item.platform || '-')}</span>
                   <span>{labelReferenceLibraryType(item.library_type)}</span>
                   <span>{labelReferenceLibraryRating(item.rating)}</span>
+                  <span>{formatTags(item.manual_tags)}</span>
                   <span>{formatTags((item.selection_sources || []).map(labelSelectionSource))}</span>
                   <span>{item.selected_at ? new Date(item.selected_at).toLocaleString('zh-CN', { hour12: false }) : '-'}</span>
                 </button>

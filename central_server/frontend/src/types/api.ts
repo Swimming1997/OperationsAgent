@@ -1,3 +1,20 @@
+export type ManualTag = {
+  id: string;
+  name: string;
+  status: string;
+  is_system: boolean;
+  created_by_user_id: string | null;
+  usage_count: number;
+  created_at: string;
+  updated_at: string;
+  archived_at?: string | null;
+  can_delete: boolean;
+};
+
+export type ManualTagListResponse = {
+  items: ManualTag[];
+};
+
 export type Role = 'admin' | 'supervisor' | 'operator' | 'sales';
 
 export type OptionItem = {

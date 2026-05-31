@@ -42,4 +42,13 @@ describe('BenchmarkLibraryPage', () => {
     expect(await screen.findByText('求推荐，怎么联系？')).toBeInTheDocument();
     expect(screen.getByText('评论者A')).toBeInTheDocument();
   });
+
+  it('renders registered manual tag filter options', async () => {
+    installFetchMock();
+    render(<BenchmarkLibraryPage role="supervisor" userId="supervisor-user" />);
+    const filter = await screen.findByTestId('benchmark-manual-tag-filter');
+    expect(filter).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: '未打标签' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: '可仿写' })).toBeInTheDocument();
+  });
 });
