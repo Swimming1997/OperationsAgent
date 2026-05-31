@@ -27,9 +27,9 @@ import {
   canRevokeOwnReferenceLibraryItem,
   formatReferenceRevokeRemaining,
 } from '../../utils/intelligencePermissions';
-import { SafeImage } from '../../components/SafeImage';
+import { NoteImageCarousel } from '../../components/NoteImageCarousel';
 import { ManualTagPicker } from '../../components/ManualTagPicker';
-import { coverFallbackSrc, coverSrc } from '../../utils/mediaUrl';
+import { noteImageSlides } from '../../utils/mediaUrl';
 import { EmptyState, ErrorState, LoadingState } from '../../components/Status';
 import type {
   Employee,
@@ -174,6 +174,11 @@ export function IntelligenceDetailPanel({
   const badge = selected ? deriveContentStatusBadge(selected) : null;
   const hasSuccessfulDetailFetch = detail?.data_status === 'detail_ready' || detail?.data_status === 'comments_ready';
   const hasSuccessfulCommentFetch = detail?.data_status === 'comments_ready' || Boolean(detail?.comments.length);
+
+  const noteSlides = useMemo(
+    () => noteImageSlides(detail?.latest_snapshot ?? selected),
+    [detail?.latest_snapshot, selected],
+  );
 
   useEffect(() => {
     listEmployees(role, userId)
@@ -452,13 +457,7 @@ export function IntelligenceDetailPanel({
             {badge ? <b className={`tag status-badge status-${badge.tone}`}>{badge.label}</b> : null}
           </div>
 
-          <SafeImage
-            src={coverSrc(detail.latest_snapshot) ?? coverSrc(selected)}
-            fallbackSrc={coverFallbackSrc(detail.latest_snapshot) ?? coverFallbackSrc(selected)}
-            className="detail-cover"
-            frameClassName="cover-media-frame cover-media-frame-detail"
-            placeholderClassName="detail-cover-placeholder"
-          />
+          <NoteImageCarousel slides={noteSlides} alt={detail.latest_snapshot?.title || selected.title || '笔记图片'} />
 
           <div className="xhs-note-copy">
             <div className="detail-title">{detail.latest_snapshot?.title || selected.title || '未命名内容'}</div>

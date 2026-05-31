@@ -51,3 +51,53 @@ def get_cover_image(
         )
 
     raise HTTPException(status_code=404, detail="cover fetch failed")
+
+
+@router.get("/image/{content_id}")
+def get_note_image(
+    content_id: str,
+    i: int = Query(..., ge=1, description="1-based image index"),
+    e: int = Query(..., description="expiry unix timestamp"),
+    s: str = Query(..., description="HMAC signature"),
+    db: Session = Depends(get_db),
+):
+    media = MediaService()
+    if not media.verify_image_token(content_id, i, e, s):
+        raise HTTPException(status_code=403, detail="invalid or expired media signature")
+
+    content = db.get(ContentIdentity, content_id)
+    if not content or not content.latest_snapshot_id:
+        raise HTTPException(status_code=404, detail="content or snapshot not found")
+
+    snapshot = db.get(ContentSnapshot, content.latest_snapshot_id)
+    if not snapshot:
+        raise HTTPException(status_code=404, detail="snapshot not found")
+
+    metadata = content.metadata_json if isinstance(content.metadata_json, dict) else {}
+    image_urls = media.iter_note_image_urls(snapshot, metadata)
+    if i > len(image_urls):
+        raise HTTPException(status_code=404, detail="image index out of range")
+
+    if i == 1:
+        local_path = media.resolve_local_cover_path(snapshot.stored_cover_path)
+        if local_path:
+            return FileResponse(
+                local_path,
+                media_type=media.guess_media_type(local_path),
+                headers={"Cache-Control": "public, max-age=3600"},
+            )
+
+    target_url = image_urls[i - 1]
+    if not media.is_allowed_media_url(target_url):
+        raise HTTPException(status_code=404, detail="image url not allowed")
+
+    remote = media.fetch_remote_cover(target_url)
+    if not remote:
+        raise HTTPException(status_code=404, detail="image fetch failed")
+
+    data, content_type = remote
+    return Response(
+        content=data,
+        media_type=content_type,
+        headers={"Cache-Control": "public, max-age=3600"},
+    )

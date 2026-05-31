@@ -209,6 +209,8 @@ export type ProductDetail = {
     author_name: string | null;
     cover_url: string | null;
     cover_display_url: string | null;
+    image_urls?: string[];
+    image_display_urls?: string[];
     like_count: number | null;
     comment_count: number | null;
     collect_count: number | null;

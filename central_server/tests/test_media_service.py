@@ -102,6 +102,48 @@ def test_build_cover_display_url_falls_back_to_metadata_and_image_urls(media_set
     assert media.resolve_effective_cover_url(snapshot, {"cover_url": "https://sns-webpic-qc.xhscdn.com/meta.jpg"}) == "https://sns-webpic-qc.xhscdn.com/from-images.jpg"
 
 
+def test_iter_note_image_urls_prefers_image_urls_json(media_settings: Settings) -> None:
+    media = MediaService(media_settings)
+    snapshot = ContentSnapshot(
+        content_id="content-1",
+        cover_url="https://sns-webpic-qc.xhscdn.com/cover.jpg",
+        image_urls_json=[
+            "https://sns-webpic-qc.xhscdn.com/1.jpg",
+            "https://sns-webpic-qc.xhscdn.com/2.jpg",
+        ],
+        raw_payload_json={},
+        fetched_at=datetime.now(timezone.utc),
+    )
+    assert media.iter_note_image_urls(snapshot) == [
+        "https://sns-webpic-qc.xhscdn.com/1.jpg",
+        "https://sns-webpic-qc.xhscdn.com/2.jpg",
+    ]
+
+
+def test_build_image_display_urls_for_snapshot(media_settings: Settings) -> None:
+    media = MediaService(media_settings)
+    snapshot = ContentSnapshot(
+        content_id="content-1",
+        cover_url="https://sns-webpic-qc.xhscdn.com/1.jpg",
+        image_urls_json=[
+            "https://sns-webpic-qc.xhscdn.com/1.jpg",
+            "https://sns-webpic-qc.xhscdn.com/2.jpg",
+        ],
+        raw_payload_json={},
+        fetched_at=datetime.now(timezone.utc),
+    )
+    urls = media.build_image_display_urls_for_snapshot("content-1", snapshot)
+    assert len(urls) == 2
+    assert all(url.startswith("/api/media/image/content-1?i=") for url in urls)
+
+
+def test_sign_and_verify_image_token(media_settings: Settings) -> None:
+    media = MediaService(media_settings)
+    expires, signature = media.sign_image_token("content-1", 2, expires_at=9_999_999_999)
+    assert media.verify_image_token("content-1", 2, expires, signature)
+    assert not media.verify_image_token("content-1", 1, expires, signature)
+
+
 def test_resolve_after_detail_ingest_stores_on_probe_failure(media_settings: Settings) -> None:
     media = MediaService(media_settings)
     snapshot = ContentSnapshot(
@@ -193,3 +235,53 @@ def test_media_cover_route_rejects_invalid_signature(db_session, media_settings:
     client = TestClient(app)
     response = client.get("/api/media/cover/missing?e=9999999999&s=bad")
     assert response.status_code == 403
+
+
+def test_media_image_route_serves_remote_image(db_session, media_settings: Settings, tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("INTEL_ENGINE_MEDIA_ROOT", str(tmp_path / "media"))
+    monkeypatch.setenv("INTEL_ENGINE_MEDIA_SIGNING_SECRET", "test-media-secret")
+    from intelligence_engine.config import get_settings
+
+    get_settings.cache_clear()
+    app = create_app()
+
+    def override_get_db():
+        yield db_session
+
+    app.dependency_overrides[get_db] = override_get_db
+
+    content = ContentIdentity(
+        platform=Platform.XHS.value,
+        platform_content_id="note-media-2",
+        canonical_url="https://www.xiaohongshu.com/explore/note-media-2",
+        content_type=ContentType.IMAGE_TEXT.value,
+        first_seen_at=datetime.now(timezone.utc),
+        last_seen_at=datetime.now(timezone.utc),
+        metadata_json={},
+    )
+    db_session.add(content)
+    db_session.flush()
+
+    snapshot = ContentSnapshot(
+        content_id=content.id,
+        cover_url="https://sns-webpic-qc.xhscdn.com/1.jpg",
+        image_urls_json=[
+            "https://sns-webpic-qc.xhscdn.com/1.jpg",
+            "https://sns-webpic-qc.xhscdn.com/2.jpg",
+        ],
+        raw_payload_json={},
+        fetched_at=datetime.now(timezone.utc),
+    )
+    db_session.add(snapshot)
+    db_session.flush()
+    content.latest_snapshot_id = snapshot.id
+    db_session.commit()
+
+    media = MediaService()
+    expires, signature = media.sign_image_token(content.id, 2, expires_at=9_999_999_999)
+    client = TestClient(app)
+    with patch.object(MediaService, "fetch_remote_cover", return_value=(b"image-bytes", "image/jpeg")):
+        response = client.get(f"/api/media/image/{content.id}?i=2&e={expires}&s={signature}")
+    assert response.status_code == 200
+    assert response.content == b"image-bytes"
+    get_settings.cache_clear()

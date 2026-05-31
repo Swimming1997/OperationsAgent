@@ -900,6 +900,7 @@ class ContentSnapshotDetail(ApiModel):
     cover_url: str | None = None
     cover_display_url: str | None = None
     image_urls: list[str] = Field(default_factory=list)
+    image_display_urls: list[str] = Field(default_factory=list)
     video_url: str | None = None
     like_count: int | None = None
     comment_count: int | None = None

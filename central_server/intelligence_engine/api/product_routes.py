@@ -2549,6 +2549,7 @@ def get_intelligence_content_product_detail(content_id: str, db: Session = Depen
                 cover_url=snapshot.cover_url,
                 cover_display_url=media.build_cover_display_url_for_snapshot(content_id, snapshot, content.metadata_json or {}),
                 image_urls=snapshot.image_urls_json or [],
+                image_display_urls=media.build_image_display_urls_for_snapshot(content_id, snapshot, content.metadata_json or {}),
                 video_url=snapshot.video_url,
                 like_count=snapshot.like_count,
                 comment_count=snapshot.comment_count,
