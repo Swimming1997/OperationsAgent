@@ -7,7 +7,7 @@ import {
   labelDataStatus,
 } from '../../utils/intelligenceLabels';
 import { formatMetric } from '../../utils/formatMetric';
-import { coverSrc } from '../../utils/mediaUrl';
+import { coverFallbackSrc, coverSrc } from '../../utils/mediaUrl';
 
 type Props = {
   items: IntelligenceItem[];
@@ -77,7 +77,7 @@ export function IntelligenceContentList({
                   onClick={(event) => event.stopPropagation()}
                 />
               ) : null}
-              <SafeImage src={coverSrc(item)} className="thumb-image" placeholderClassName="cover-empty" />
+              <SafeImage src={coverSrc(item)} fallbackSrc={coverFallbackSrc(item)} className="thumb-image" placeholderClassName="cover-empty" />
             </span>
             <span className="content-title-cell">
               <span className="strong">{item.title || '未命名内容'}</span>

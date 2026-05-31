@@ -267,7 +267,7 @@ class TaskRun(Base, TimestampMixin):
     __tablename__ = "task_runs"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
-    task_template_id: Mapped[str] = mapped_column(String(36), ForeignKey("task_templates.id"), nullable=False)
+    task_template_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("task_templates.id"), nullable=True)
     trigger_type: Mapped[str] = mapped_column(String(32), nullable=False)
     requested_by_user_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("users.id"))
     executor_account_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("platform_accounts.id"))

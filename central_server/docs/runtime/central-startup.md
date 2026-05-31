@@ -2,20 +2,31 @@
 
 启动：
 
-```bat
-cd D:\AMiracle\central_server; .\scripts\start.ps1
+```powershell
+cd central_server
+.\scripts\start.ps1
 ```
 
 停止：
 
-```bat
-cd D:\AMiracle\central_server; .\scripts\stop.ps1
+```powershell
+cd central_server
+.\scripts\stop.ps1
+```
+
+重启：
+
+```powershell
+cd central_server
+.\scripts\restart.ps1
 ```
 
 脚本只管理：
 
 - FastAPI `127.0.0.1:8000`
 - Vite `127.0.0.1:5173`
+
+不启动 Local Agent 或 Chrome。Local Agent 见 `local_agent/docs/runtime/local-agent-runtime-v1.md`。
 
 PID 文件写入 `central_server\logs\runtime\`，日志写入 `central_server\logs\`。
 
@@ -44,3 +55,8 @@ INTEL_ENGINE_MEDIA_ROOT=./data/media
 部署到服务器时请与数据库一并做**持久化卷挂载与备份**（至少包含 `data/intelligence_engine.db` 与 `data/media/`）。多实例负载均衡前需共享 `media_root` 或迁移到对象存储。
 
 前端通过签名 URL 访问封面：`GET /api/media/cover/{content_id}?e=...&s=...`（不依赖 Bearer，供 `<img>` 使用）。
+
+## 相关文档
+
+- 客户首跑手册：`docs/demo/clean-start-customer-test-playbook.md`
+- Local Agent 运行时：`docs/runtime/local-agent-runtime-v1.md`

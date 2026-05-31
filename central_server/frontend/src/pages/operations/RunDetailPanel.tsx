@@ -4,6 +4,7 @@ import {
   formatDateTime,
   formatRunJobStats,
   jobTimeoutLabel,
+  getTaskRunDisplayName,
   labelJobType,
   labelStatus,
   labelTrigger,
@@ -42,7 +43,7 @@ export function RunDetailPanel({
         <p>{recommendation}</p>
       </section>
       <dl className="detail-dl">
-        <div><dt>任务名称</dt><dd>{run.task_template_name || '未命名任务'}</dd></div>
+        <div><dt>任务名称</dt><dd>{getTaskRunDisplayName(run, jobs)}</dd></div>
         <div><dt>执行账号</dt><dd>{run.executor_account_name || '—'}</dd></div>
         <div><dt>运行状态</dt><dd>{labelStatus(run.status)}</dd></div>
         <div><dt>触发方式</dt><dd>{labelTrigger(run.trigger_type)}</dd></div>

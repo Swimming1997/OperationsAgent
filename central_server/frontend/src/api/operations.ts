@@ -21,7 +21,7 @@ export type JobQueueSummary = {
 
 export type OpsTaskRunItem = {
   id: string;
-  task_template_id: string;
+  task_template_id: string | null;
   task_template_name: string | null;
   trigger_type: string;
   status: string;

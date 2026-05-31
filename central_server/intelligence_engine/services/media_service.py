@@ -102,8 +102,45 @@ class MediaService:
             return None
         return candidate if candidate.is_file() else None
 
+    @staticmethod
+    def resolve_effective_cover_url(
+        snapshot: ContentSnapshot | None,
+        metadata: dict | None = None,
+    ) -> str | None:
+        metadata = metadata or {}
+        if snapshot:
+            cover_url = (snapshot.cover_url or "").strip()
+            if cover_url:
+                return cover_url
+            for url in snapshot.image_urls_json or []:
+                candidate = str(url or "").strip()
+                if candidate:
+                    return candidate
+        meta_cover = str(metadata.get("cover_url") or "").strip()
+        return meta_cover or None
+
+    @classmethod
+    def iter_cover_candidate_urls(
+        cls,
+        snapshot: ContentSnapshot | None,
+        metadata: dict | None = None,
+    ) -> list[str]:
+        seen: set[str] = set()
+        ordered: list[str] = []
+        if snapshot:
+            for url in [snapshot.cover_url, *(snapshot.image_urls_json or [])]:
+                candidate = str(url or "").strip()
+                if candidate and candidate not in seen:
+                    seen.add(candidate)
+                    ordered.append(candidate)
+        metadata = metadata or {}
+        meta_cover = str(metadata.get("cover_url") or "").strip()
+        if meta_cover and meta_cover not in seen:
+            ordered.append(meta_cover)
+        return ordered
+
     def resolve_after_detail_ingest(self, snapshot: ContentSnapshot) -> None:
-        cover_url = (snapshot.cover_url or "").strip()
+        cover_url = self.resolve_effective_cover_url(snapshot)
         if not cover_url:
             snapshot.cover_media_status = COVER_MEDIA_UNAVAILABLE
             snapshot.stored_cover_path = None
@@ -112,15 +149,19 @@ class MediaService:
             snapshot.cover_media_status = COVER_MEDIA_UNAVAILABLE
             snapshot.stored_cover_path = None
             return
-        if self.probe_cover_url(cover_url):
-            snapshot.cover_media_status = COVER_MEDIA_PROXY_OK
-            snapshot.stored_cover_path = None
-            return
         downloaded = self.download_cover(cover_url)
         if downloaded:
             data, content_type = downloaded
             snapshot.stored_cover_path = self.persist_cover(snapshot.content_id, data, content_type)
             snapshot.cover_media_status = COVER_MEDIA_STORED
+            if not (snapshot.cover_url or "").strip():
+                snapshot.cover_url = cover_url
+            return
+        if self.probe_cover_url(cover_url):
+            snapshot.cover_media_status = COVER_MEDIA_PROXY_OK
+            snapshot.stored_cover_path = None
+            if not (snapshot.cover_url or "").strip():
+                snapshot.cover_url = cover_url
             return
         snapshot.cover_media_status = COVER_MEDIA_UNAVAILABLE
         snapshot.stored_cover_path = None
@@ -152,12 +193,12 @@ class MediaService:
         metadata: dict | None = None,
     ) -> str | None:
         metadata = metadata or {}
-        cover_url = snapshot.cover_url if snapshot else metadata.get("cover_url")
+        cover_url = self.resolve_effective_cover_url(snapshot, metadata)
         stored_cover_path = snapshot.stored_cover_path if snapshot else None
         return self.build_cover_display_url(
             content_id,
             stored_cover_path=stored_cover_path,
-            cover_url=cover_url if cover_url else None,
+            cover_url=cover_url,
         )
 
     def build_cover_display_url(

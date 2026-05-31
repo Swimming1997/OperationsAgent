@@ -296,7 +296,7 @@ export type TaskSchedule = {
 
 export type TaskRunResponse = {
   task_run_id: string;
-  task_template_id: string;
+  task_template_id: string | null;
   jobs_created: number;
   jobs: Array<{
     job_id: string;
@@ -343,7 +343,7 @@ export type TaskRunQueueContext = {
 
 export type TaskRun = {
   id: string;
-  task_template_id: string;
+  task_template_id: string | null;
   trigger_type: string;
   requested_by_user_id: string | null;
   task_schedule_id: string | null;

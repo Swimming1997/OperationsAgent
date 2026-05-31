@@ -43,7 +43,7 @@ def test_build_cover_display_url_requires_cover(media_settings: Settings) -> Non
     assert media.build_cover_display_url("content-1") is None
 
 
-def test_resolve_after_detail_ingest_proxy_ok(media_settings: Settings) -> None:
+def test_resolve_after_detail_ingest_prefers_local_store(media_settings: Settings) -> None:
     media = MediaService(media_settings)
     snapshot = ContentSnapshot(
         content_id="content-1",
@@ -52,10 +52,54 @@ def test_resolve_after_detail_ingest_proxy_ok(media_settings: Settings) -> None:
         raw_payload_json={},
         fetched_at=datetime.now(timezone.utc),
     )
-    with patch.object(media, "probe_cover_url", return_value=True):
+    with patch.object(media, "download_cover", return_value=(b"image-bytes", "image/jpeg")):
+        media.resolve_after_detail_ingest(snapshot)
+    assert snapshot.cover_media_status == COVER_MEDIA_STORED
+    assert snapshot.stored_cover_path == "content-1/cover.jpg"
+
+
+def test_resolve_after_detail_ingest_proxy_ok_when_download_fails(media_settings: Settings) -> None:
+    media = MediaService(media_settings)
+    snapshot = ContentSnapshot(
+        content_id="content-1",
+        cover_url="https://sns-webpic-qc.xhscdn.com/a.jpg",
+        image_urls_json=[],
+        raw_payload_json={},
+        fetched_at=datetime.now(timezone.utc),
+    )
+    with patch.object(media, "download_cover", return_value=None), patch.object(media, "probe_cover_url", return_value=True):
         media.resolve_after_detail_ingest(snapshot)
     assert snapshot.cover_media_status == COVER_MEDIA_PROXY_OK
     assert snapshot.stored_cover_path is None
+
+
+def test_resolve_after_detail_ingest_uses_image_urls_when_cover_missing(media_settings: Settings) -> None:
+    media = MediaService(media_settings)
+    snapshot = ContentSnapshot(
+        content_id="content-1",
+        cover_url=None,
+        image_urls_json=["https://sns-webpic-qc.xhscdn.com/fallback.jpg"],
+        raw_payload_json={},
+        fetched_at=datetime.now(timezone.utc),
+    )
+    with patch.object(media, "download_cover", return_value=(b"image-bytes", "image/jpeg")) as download:
+        media.resolve_after_detail_ingest(snapshot)
+    download.assert_called_once_with("https://sns-webpic-qc.xhscdn.com/fallback.jpg")
+    assert snapshot.cover_url == "https://sns-webpic-qc.xhscdn.com/fallback.jpg"
+    assert snapshot.cover_media_status == COVER_MEDIA_STORED
+
+
+def test_build_cover_display_url_falls_back_to_metadata_and_image_urls(media_settings: Settings) -> None:
+    media = MediaService(media_settings)
+    snapshot = ContentSnapshot(
+        content_id="content-1",
+        cover_url=None,
+        image_urls_json=["https://sns-webpic-qc.xhscdn.com/from-images.jpg"],
+        raw_payload_json={},
+        fetched_at=datetime.now(timezone.utc),
+    )
+    assert media.build_cover_display_url_for_snapshot("content-1", snapshot, {"cover_url": "https://sns-webpic-qc.xhscdn.com/meta.jpg"}) is not None
+    assert media.resolve_effective_cover_url(snapshot, {"cover_url": "https://sns-webpic-qc.xhscdn.com/meta.jpg"}) == "https://sns-webpic-qc.xhscdn.com/from-images.jpg"
 
 
 def test_resolve_after_detail_ingest_stores_on_probe_failure(media_settings: Settings) -> None:

@@ -1,11 +1,19 @@
 import { vi } from 'vitest';
 import { agents, behaviorProfiles, benchmarkGroups, businessTypes, intelligenceList, networkProfiles, options, platformAccounts, productDetail, readinessBlocked, readinessReady, referenceLibraryItems, riskPolicies, ruleSets, taskDetail, taskList, taskRun } from './mockData';
-import { operationsJobDetail, operationsJobs, operationsSummary, operationsTaskRunDetail, operationsTaskRuns } from './operationsMockData';
+import {
+  operationsJobDetail,
+  operationsJobs,
+  operationsManualFetchRunDetail,
+  operationsSummary,
+  operationsTaskRunDetail,
+  operationsTaskRuns,
+} from './operationsMockData';
 
 type FetchMockConfig = {
   blockedReadiness?: boolean;
   failRun?: boolean;
   taskDetail?: typeof taskDetail;
+  operationsSummary?: typeof operationsSummary;
   orgUsers?: Array<Record<string, unknown>>;
   orgEmployees?: Array<Record<string, unknown>>;
   authUserId?: string;
@@ -362,8 +370,9 @@ export function installFetchMock(config: FetchMockConfig = {}) {
     if (url.includes('/api/task-templates/recommendation-feed')) return json(activeTaskDetail);
     if (url.includes('/api/task-templates/creator-monitor')) return json({ ...activeTaskDetail, id: 'task-2', template_type: 'creator_monitor_task', typed_payload: { benchmark_group_id: 'group-1', auto_detail_fetch: true } });
     if (url.includes('/api/task-templates/keyword-search')) return json({ ...activeTaskDetail, id: 'task-3', template_type: 'keyword_search_task', typed_payload: { platform: 'xhs', keywords: ['论文'], max_items: 50 } });
-    if (url.includes('/api/operations/queue-summary')) return json(operationsSummary);
+    if (url.includes('/api/operations/queue-summary')) return json(config.operationsSummary ?? operationsSummary);
     if (url.includes('/api/operations/task-runs/run-1')) return json(operationsTaskRunDetail);
+    if (url.includes('/api/operations/task-runs/run-2')) return json(operationsManualFetchRunDetail);
     if (url.includes('/api/operations/task-runs')) return json({ items: operationsTaskRuns, total: operationsTaskRuns.length, page: 1, page_size: 30 });
     if (url.includes('/api/operations/jobs/job-comment-1')) return json(operationsJobDetail);
     if (url.includes('/api/operations/jobs')) return json({ items: operationsJobs, total: operationsJobs.length, page: 1, page_size: 80 });

@@ -184,7 +184,7 @@ from intelligence_engine.services.benchmark_selection import BenchmarkSelectionS
 from intelligence_engine.services.rule_profile import RuleProfileService
 from intelligence_engine.storage.repositories.operation_rule_repository import OperationRuleRepository
 from intelligence_engine.storage.repositories.workflow_repository import WorkflowRepository
-from intelligence_engine.domain.enums import ContentWorkflowStatus, CandidateBucket, SourceSurface, TaskRunTriggerType
+from intelligence_engine.domain.enums import ContentWorkflowStatus, CandidateBucket, SourceSurface, TaskRunStatus, TaskRunTriggerType
 from intelligence_engine.api.account_access import (
     ensure_account_readable,
     ensure_account_writable,
@@ -693,6 +693,26 @@ def _task_run_read(service: TaskMaterializationService, run: TaskRun, *, include
         updated_at=run.updated_at,
         finished_at=run.finished_at,
     )
+
+
+def _create_manual_fetch_task_run(
+    db: Session,
+    *,
+    account_id: str | None,
+    requested_by_user_id: str | None,
+) -> TaskRun:
+    run = TaskRun(
+        task_template_id=None,
+        trigger_type=TaskRunTriggerType.MANUAL.value,
+        requested_by_user_id=requested_by_user_id,
+        executor_account_id=account_id,
+        status=TaskRunStatus.MATERIALIZED.value,
+        result_summary_json={},
+        error_summary_json={},
+    )
+    db.add(run)
+    db.flush()
+    return run
 
 
 def _create_typed_task_template(
@@ -1925,7 +1945,7 @@ def get_task_run(
     run = db.get(TaskRun, task_run_id)
     if not run:
         raise HTTPException(status_code=404, detail="task run not found")
-    template = db.get(TaskTemplate, run.task_template_id)
+    template = db.get(TaskTemplate, run.task_template_id) if run.task_template_id else None
     if template:
         ensure_template_readable(db, principal, template)
     service = TaskMaterializationService(db)
@@ -2710,7 +2730,9 @@ def enqueue_intelligence_detail_fetch(content_id: str, db: Session = Depends(get
     repo = ContentRepository(db)
     try:
         account_id = _manual_fetch_account_id(db, repo, content_id=content_id, principal=principal)
-        job = repo.enqueue_detail_fetch(content_id=content_id, account_id=account_id)
+        run = _create_manual_fetch_task_run(db, account_id=account_id, requested_by_user_id=principal.user_id)
+        job = repo.enqueue_detail_fetch(content_id=content_id, account_id=account_id, task_run_id=run.id)
+        TaskMaterializationService(db).refresh_task_run(run)
     except ValueError:
         raise HTTPException(status_code=404, detail="content not found")
     db.commit()
@@ -2722,7 +2744,9 @@ def enqueue_intelligence_comment_fetch(content_id: str, db: Session = Depends(ge
     repo = ContentRepository(db)
     try:
         account_id = _manual_fetch_account_id(db, repo, content_id=content_id, principal=principal)
-        job = repo.enqueue_comment_fetch(content_id=content_id, account_id=account_id)
+        run = _create_manual_fetch_task_run(db, account_id=account_id, requested_by_user_id=principal.user_id)
+        job = repo.enqueue_comment_fetch(content_id=content_id, account_id=account_id, task_run_id=run.id)
+        TaskMaterializationService(db).refresh_task_run(run)
     except ValueError:
         raise HTTPException(status_code=404, detail="content not found")
     db.commit()

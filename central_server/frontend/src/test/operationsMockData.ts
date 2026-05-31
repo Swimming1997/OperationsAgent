@@ -62,6 +62,31 @@ export const operationsTaskRuns: OpsTaskRunItem[] = [{
   finished_at: '2026-05-19T01:01:00Z',
   has_active_jobs: false,
   has_stuck_jobs: false,
+}, {
+  id: 'run-2',
+  task_template_id: null,
+  task_template_name: '内容详情补采',
+  trigger_type: 'manual',
+  status: 'materialized',
+  requested_by_user_id: 'supervisor-user',
+  requested_by_display_name: '演示主管',
+  owner_employee_id: 'employee-operator',
+  owner_employee_name: '运营小王',
+  executor_account_id: 'account-1',
+  executor_account_name: '小红书采集号',
+  task_schedule_id: null,
+  jobs_total: 1,
+  jobs_pending: 1,
+  jobs_running: 0,
+  jobs_success: 0,
+  jobs_failed: 0,
+  result_summary: {},
+  error_summary: {},
+  created_at: '2026-05-18T02:00:00Z',
+  updated_at: '2026-05-18T02:00:00Z',
+  finished_at: null,
+  has_active_jobs: true,
+  has_stuck_jobs: false,
 }];
 
 export const operationsJobs: OpsJobItem[] = [{
@@ -87,13 +112,13 @@ export const operationsJobs: OpsJobItem[] = [{
   payload_json: { content_id: 'content-1' },
   result_summary_json: {},
 }, {
-  id: 'job-standalone-1',
-  task_run_id: null,
+  id: 'job-manual-detail-1',
+  task_run_id: 'run-2',
   task_template_name: null,
   job_type: 'detail_fetch',
   status: 'pending',
   priority: 50,
-  account_id: 'account-legacy',
+  account_id: 'account-1',
   local_agent_id: null,
   claimed_by_agent_id: null,
   claimed_by_agent_name: null,
@@ -114,6 +139,12 @@ export const operationsTaskRunDetail: OpsTaskRunDetail = {
   ...operationsTaskRuns[0],
   jobs: operationsJobs.filter((job) => job.task_run_id === operationsTaskRuns[0].id),
   queue_context: { message: '当前 Agent 正在执行其他任务，本次运行等待调度', pending_jobs_ahead: 3 },
+};
+
+export const operationsManualFetchRunDetail: OpsTaskRunDetail = {
+  ...operationsTaskRuns[1],
+  jobs: operationsJobs.filter((job) => job.task_run_id === operationsTaskRuns[1].id),
+  queue_context: null,
 };
 
 export const operationsJobDetail: OpsJobDetail = {

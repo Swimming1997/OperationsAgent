@@ -11,6 +11,7 @@ import httpx
 
 from local_agent_runtime.connectors.xhs.comment_probe import XhsCommentProbe
 from local_agent_runtime.connectors.xhs.creator import XhsCreatorConnector, XhsCreatorFetchError
+from local_agent_runtime.connectors.xhs.cover_capture import attach_cover_bytes
 from local_agent_runtime.connectors.xhs.detail_probe import XhsDetailProbe
 from local_agent_runtime.connectors.xhs.homefeed_probe import XhsHomeFeedProbe
 from local_agent_runtime.connectors.xhs.search_suggest_probe import XhsSearchSuggestProbe
@@ -472,6 +473,7 @@ class XhsJobExecutor:
             platform_content_id=payload.get("platform_content_id"),
             platform_context=payload.get("platform_context") or {},
         )
+        snapshot = await attach_cover_bytes(page, snapshot)
         ingestion = await self.client.ingest_detail(DetailIngestionRequest(job_id=job.job_id, content_id=payload["content_id"], snapshot=snapshot))
         return JobExecutionResult(
             status=JobStatus.SUCCESS.value,

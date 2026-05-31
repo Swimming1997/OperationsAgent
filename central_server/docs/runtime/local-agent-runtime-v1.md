@@ -1,5 +1,7 @@
 ﻿# Local Agent Runtime V1
 
+> 员工侧精简版见：`local_agent/docs/runtime/local-agent-runtime-v1.md`。本文档为中央侧完整说明。
+
 ## 架构
 
 Local Agent Runtime 是员工电脑上的常驻执行端。它只保存本机浏览器连接信息，不上传真实 Cookie。
@@ -18,36 +20,47 @@ Task Template / Scheduler
 
 ## 启动
 
-使用项目虚拟环境：
+在 `local_agent` 目录下，使用项目虚拟环境：
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\run_local_agent.py --config configs\local_agent.example.toml
+cd local_agent
+..\.venv\Scripts\python.exe scripts\run_local_agent.py --config configs\local_agent.employee.example.toml
 ```
 
 只执行一轮 claim 后退出：
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\run_local_agent.py --config configs\local_agent.example.toml --once
+..\.venv\Scripts\python.exe scripts\run_local_agent.py --config configs\local_agent.employee.example.toml --once
 ```
 
-覆盖 CDP 地址：
+一键脚本（推荐）：
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\run_local_agent.py --config configs\local_agent.example.toml --cdp-url http://127.0.0.1:9222
+cd local_agent
+.\scripts\start.ps1
 ```
 
 日志默认写入：
 
 ```text
-logs/local_agent/local_agent.log
+local_agent/logs/local_agent/local_agent.log
 ```
+
+## Local Bridge
+
+Local Agent 默认启动 Local Bridge HTTP 服务，供运营端「登记本地 Agent」发现本机设备。
+
+- 默认端口：`18765`（占用时自动递增至 `18774`）
+- 健康检查：`GET http://127.0.0.1:18765/healthz`
+- CLI 覆盖：`--bridge-port`、`--bridge-token`、`--disable-bridge`
 
 ## 本地配置文件
 
 示例文件：
 
 ```text
-configs/local_agent.example.toml
+local_agent/configs/local_agent.employee.example.toml
+local_agent/configs/local_agent.example.toml
 ```
 
 核心字段：
@@ -55,31 +68,43 @@ configs/local_agent.example.toml
 ```toml
 center_url = "http://127.0.0.1:8000"
 agent_id = ""
-machine_fingerprint = "amiracle-local-agent-001"
+device_name = "WIN-1"
+machine_fingerprint = "win-1-demo-fingerprint"
+project_root = "."
 claim_interval_seconds = 5
 heartbeat_interval_seconds = 30
 max_concurrent_jobs = 1
-cdp_url = "http://127.0.0.1:9222"
-supported_job_types = ["feed_collect", "creator_monitor", "detail_fetch", "comment_fetch", "search_collect"]
-
-[accounts]
-"<platform_account_id>" = { platform = "xhs", session_mode = "cdp", cdp_url = "http://127.0.0.1:9222" }
+cdp_url = "http://127.0.0.1:9222"  # 可选；账号登录使用 per-account Chrome
+supported_job_types = [
+  "feed_collect", "creator_monitor", "detail_fetch",
+  "comment_fetch", "search_collect",
+]
 ```
 
 `agent_id` 为空时 Runtime 会调用 `/api/agents/register` 自动注册。注册后可以把返回的 agent id 固定写入配置。
 
-## XHS 账号绑定
+## Chrome Profile 与账号登录
 
-1. 在员工电脑启动独立 Chrome，并开启 CDP，例如 `9222`。
-2. 在该 Chrome Profile 中登录小红书。
-3. 在后台创建或确认一个 `platform_accounts.id`。
-4. 在本地配置 `[accounts]` 下添加：
+Profile 路径：
 
-```toml
-"<platform_accounts.id>" = { platform = "xhs", session_mode = "cdp", cdp_url = "http://127.0.0.1:9222" }
+```text
+local_agent/profiles/accounts/{profile_key}/
 ```
 
-中心可以保存 `account_sessions.session_meta_json`，但真实 Cookie 不上传。Runtime 优先使用本地配置中的 `account_id -> cdp_url` 映射；没有本地映射时再查询中心 ready session metadata；最后才使用全局 `cdp_url` 兜底。
+Stage 3F 账号登录流程（推荐）：
+
+1. 管理员 `/agents` 绑定设备到运营员工
+2. 运营 `/accounts` 登记本地 Agent
+3. 运营创建小红书账号 → 发起登录
+4. Agent claim 登录会话 → 自动启动独立 Chrome → 员工在浏览器内登录
+
+Legacy 手动 CDP 映射（可选，在 `[accounts]` 中配置）：
+
+```toml
+"<platform_account_id>" = { platform = "xhs", session_mode = "cdp", cdp_url = "http://127.0.0.1:9222" }
+```
+
+中心可以保存 `account_sessions.session_meta_json`，但真实 Cookie 不上传。Runtime 优先使用登录会话 claim 拉起的 per-account Chrome；legacy 映射作兜底。
 
 ## 通信协议
 
@@ -92,27 +117,24 @@ Runtime 调用：
 - `POST /api/jobs/{job_id}/progress`
 - `POST /api/jobs/{job_id}/complete`
 - `POST /api/jobs/{job_id}/fail`
-- `GET /api/accounts/{account_id}/sessions/ready`
+- `POST /api/agents/{agent_id}/login-sessions/claim`（账号登录）
+- `GET /api/accounts/{account_id}/sessions/ready`（legacy 兜底）
 - `POST /api/ingestion/feed-candidates`
 - `POST /api/ingestion/creator-monitor-items`
 - `POST /api/ingestion/content-detail`
 - `POST /api/ingestion/comments`
+- `POST /api/ingestion/xhs-search-suggestions`（搜索联想词）
 
 ## 支持的 JobType
 
-V1 重点支持：
-
-- `feed_collect`
-- `creator_monitor`
-
-已纳入自动消费：
-
-- `detail_fetch`
-- `comment_fetch`
-
-占位支持：
-
-- `search_collect`：当前返回 `partial_success`，不执行真实搜索。
+| JobType | 状态 | 说明 |
+|---------|------|------|
+| `feed_collect` | 已支持 | 推荐页采集 |
+| `creator_monitor` | 已支持 | 对标监控 |
+| `detail_fetch` | 已支持 | 详情补采 |
+| `comment_fetch` | 已支持 | 评论补采 |
+| `search_collect` | 已支持 | 关键词搜索采集（`XhsSearchProbe`） |
+| `xhs_search_suggest` | 已支持 | 搜索联想词（`XhsSearchSuggestProbe`） |
 
 ## 任务到真实采集
 
@@ -125,6 +147,17 @@ recommendation_feed_task
 -> XhsHomeFeedProbe
 -> /api/ingestion/feed-candidates
 -> detail_fetch job enqueue
+-> complete
+```
+
+关键词搜索任务：
+
+```text
+keyword_search_task
+-> search_collect job
+-> Runtime claim
+-> XhsSearchProbe
+-> /api/ingestion/feed-candidates
 -> complete
 ```
 
@@ -155,7 +188,12 @@ Runtime 将以下失败回传到 `/api/jobs/{job_id}/fail`：
 ## 当前未支持
 
 - 不支持抖音。
-- 不支持真实 keyword search connector。
 - 不支持复杂多并发调度，V1 默认 `max_concurrent_jobs = 1`。
 - 不上传或托管 Cookie。
-- 不做任务运行记录大页面。
+- 不做任务运行记录大页面（运营用 `/my-runs`，管理员用 `/operations`）。
+
+## 相关文档
+
+- 客户首跑手册：`docs/demo/clean-start-customer-test-playbook.md`
+- Stage 3F 启动：`docs/demo/stage-3f-local-agent-startup.md`
+- Agent 池化调度：`docs/guidance/account-agent-pool-rollout.md`

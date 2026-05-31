@@ -41,6 +41,8 @@ class DetailSnapshotInput(ApiModel):
     author_name: str | None = None
     author_avatar_url: str | None = None
     cover_url: str | None = None
+    cover_image_base64: str | None = None
+    cover_content_type: str | None = None
     image_urls: list[str] = Field(default_factory=list)
     video_url: str | None = None
     like_count: int | None = None

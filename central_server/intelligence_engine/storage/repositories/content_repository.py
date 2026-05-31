@@ -386,7 +386,7 @@ class ContentRepository:
             )
         return items, total
 
-    def enqueue_detail_fetch(self, *, content_id: str, account_id: str | None = None) -> Job:
+    def enqueue_detail_fetch(self, *, content_id: str, account_id: str | None = None, task_run_id: str | None = None) -> Job:
         content = self.db.get(ContentIdentity, content_id)
         if not content:
             raise ValueError("content not found")
@@ -397,6 +397,7 @@ class ContentRepository:
         job = JobRepository(self.db).create_job(
             job_type=JobType.DETAIL_FETCH,
             account_id=effective_account_id,
+            task_run_id=task_run_id,
             payload={
                 "content_id": content.id,
                 "platform": content.platform,
@@ -410,7 +411,7 @@ class ContentRepository:
         )
         return job
 
-    def enqueue_comment_fetch(self, *, content_id: str, account_id: str | None = None) -> Job:
+    def enqueue_comment_fetch(self, *, content_id: str, account_id: str | None = None, task_run_id: str | None = None) -> Job:
         content = self.db.get(ContentIdentity, content_id)
         if not content:
             raise ValueError("content not found")
@@ -420,6 +421,7 @@ class ContentRepository:
         job = JobRepository(self.db).create_job(
             job_type=JobType.COMMENT_FETCH,
             account_id=effective_account_id,
+            task_run_id=task_run_id,
             payload={
                 "content_id": content.id,
                 "platform": content.platform,

@@ -2,6 +2,7 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it } from 'vitest';
 import { installFetchMock } from '../test/serverMock';
+import { operationsSummary } from '../test/operationsMockData';
 import { OperationsPage } from './OperationsPage';
 
 describe('OperationsPage', () => {
@@ -35,6 +36,7 @@ describe('OperationsPage', () => {
     expect(screen.getByRole('option', { name: '待处理' })).toBeInTheDocument();
     expect(screen.getByRole('option', { name: '进行中' })).toBeInTheDocument();
     expect(screen.getByRole('option', { name: '已完成' })).toBeInTheDocument();
+    expect(screen.getByLabelText('仅看执行超时')).toBeInTheDocument();
     expect((await screen.findAllByText('任务运行记录')).length).toBeGreaterThan(0);
     expect(await screen.findByText('运行详情')).toBeInTheDocument();
     expect(screen.getByText('任务结论')).toBeInTheDocument();
@@ -42,27 +44,40 @@ describe('OperationsPage', () => {
     expect(screen.getByText('第 1 / 1 页')).toBeInTheDocument();
     expect(screen.queryByText('如何使用运行中心？')).not.toBeInTheDocument();
     expect(screen.queryByText('返回任务模板')).not.toBeInTheDocument();
+    expect(screen.queryByText('高级排障筛选')).not.toBeInTheDocument();
+    expect(screen.queryByText('仅独立补采')).not.toBeInTheDocument();
 
     const user = userEvent.setup();
     await user.selectOptions(screen.getByLabelText('负责人筛选'), 'employee-operator');
     expect((await screen.findAllByText('推荐页巡检')).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText('手动补采')).length).toBeGreaterThan(0);
 
     await user.selectOptions(screen.getByLabelText('负责人筛选'), 'employee-supervisor');
     expect(await screen.findByText('暂无符合条件的任务运行记录')).toBeInTheDocument();
   });
 
-  it('applies advanced troubleshooting filters to the main list', async () => {
+  it('applies stale-only filter from the main filter panel', async () => {
     installFetchMock();
     render(<OperationsPage role="supervisor" userId="supervisor-user" />);
     const user = userEvent.setup();
     await screen.findByTestId('ops-filter-panel');
 
-    await user.click(screen.getByText('高级排障筛选'));
-    await user.click(screen.getByLabelText('仅执行超时'));
+    await user.click(screen.getByLabelText('仅看执行超时'));
     expect(await screen.findByText('采集步骤执行超时，可能需要释放后重试')).toBeInTheDocument();
+    expect(screen.getByLabelText('任务状态筛选')).toHaveDisplayValue('待处理');
+  });
 
-    await user.click(screen.getByLabelText('仅独立补采'));
-    expect(await screen.findByText('独立补采详情')).toBeInTheDocument();
-    expect(screen.getByText('从情报中心手动发起，正在等待执行')).toBeInTheDocument();
+  it('shows orphan warning card without navigation action', async () => {
+    installFetchMock({
+      operationsSummary: {
+        ...operationsSummary,
+        orphan_active_job_count: 2,
+      },
+    });
+    render(<OperationsPage role="supervisor" userId="supervisor-user" />);
+
+    expect(await screen.findByTestId('ops-orphan-warning-card')).toBeInTheDocument();
+    expect(screen.getByText('异常残留任务')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /异常残留任务/ })).not.toBeInTheDocument();
   });
 });

@@ -1,6 +1,6 @@
 ﻿# AGENTS.md
 
-1. 使用仓库根目录的 `.venv`，Python 路径为 `D:\AMiracle\.venv\Scripts\python.exe`。
+1. 使用仓库根目录的 `.venv`，Python 路径为 `..\.venv\Scripts\python.exe`（或仓库根 `.venv\Scripts\python.exe`）。
 2. 读写文件统一使用 UTF-8；PowerShell / bat 脚本必须设置 UTF-8 输出，避免中文乱码。
 3. 本目录只实现员工电脑 Local Agent 职责：注册、心跳、claim job、Chrome/CDP/Profile 管理、XHS 采集、normalize、HTTP JSON 上报。
 4. 不 import `central_server.intelligence_engine.db`、`central_server.intelligence_engine.storage`、`central_server.intelligence_engine.services`、`central_server.intelligence_engine.main`，不直接访问中央数据库。

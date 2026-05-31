@@ -22,10 +22,8 @@ import { useTaskRunRefreshEffect } from '../context/TaskRunRefreshContext';
 import { CollectionQualityPanel } from './operations/CollectionQualityPanel';
 import { getRunOverviewText, RunDetailPanel } from './operations/RunDetailPanel';
 import {
-  JOB_BUCKET_FILTER_OPTIONS,
+  getTaskRunDisplayName,
   JOB_TYPE_FILTER_OPTIONS,
-  formatDateTime,
-  jobTimeoutLabel,
   labelJobType,
   labelStatus,
   labelTrigger,
@@ -57,6 +55,8 @@ const TRIGGER_FILTER_OPTIONS = [
   { value: 'scheduled', label: '定时触发' },
 ];
 
+const ORPHAN_JOB_TOOLTIP = '未关联运行批次的执行项（多为测试或历史脏数据），不会在下方列表出现，需技术排查。';
+
 export function OperationsPage({ role, userId, initialTaskRunId }: Props) {
   const readonly = role === 'operator';
   const canWrite = !readonly;
@@ -66,14 +66,12 @@ export function OperationsPage({ role, userId, initialTaskRunId }: Props) {
   const [jobs, setJobs] = useState<OpsJobItem[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(initialTaskRunId || null);
   const [selectedRun, setSelectedRun] = useState<OpsTaskRunDetail | null>(null);
-  const [selectedResidualJobId, setSelectedResidualJobId] = useState<string | null>(null);
   const [employees, setEmployees] = useState<OrgEmployee[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [toast, setToast] = useState('');
   const [confirm, setConfirm] = useState<ConfirmAction | null>(null);
   const [runStatus, setRunStatus] = useState('');
-  const [jobStatus, setJobStatus] = useState('');
   const [jobType, setJobType] = useState('');
   const [ownerEmployeeId, setOwnerEmployeeId] = useState('');
   const [triggerType, setTriggerType] = useState('');
@@ -81,7 +79,6 @@ export function OperationsPage({ role, userId, initialTaskRunId }: Props) {
   const [runPage, setRunPage] = useState(1);
   const runPageSize = 30;
   const runTotalPages = Math.max(1, Math.ceil(taskRunsTotal / runPageSize));
-  const [legacyOnly, setLegacyOnly] = useState(false);
   const [staleOnly, setStaleOnly] = useState(false);
 
   const reload = useCallback(async () => {
@@ -106,7 +103,6 @@ export function OperationsPage({ role, userId, initialTaskRunId }: Props) {
           {
             page: 1,
             page_size: 200,
-            status_group: jobStatus || undefined,
             job_type: jobType || undefined,
             stale_running_only: staleOnly || undefined,
           },
@@ -123,7 +119,7 @@ export function OperationsPage({ role, userId, initialTaskRunId }: Props) {
     } finally {
       setLoading(false);
     }
-  }, [role, userId, runStatus, triggerType, jobStatus, jobType, staleOnly, runPage]);
+  }, [role, userId, runStatus, triggerType, jobType, staleOnly, runPage]);
 
   useEffect(() => {
     void reload();
@@ -131,7 +127,7 @@ export function OperationsPage({ role, userId, initialTaskRunId }: Props) {
 
   useEffect(() => {
     setRunPage(1);
-  }, [runStatus, triggerType, ownerEmployeeId, jobType, runSearch, legacyOnly, staleOnly]);
+  }, [runStatus, triggerType, ownerEmployeeId, jobType, runSearch, staleOnly]);
 
   useEffect(() => {
     listEmployees(role, userId)
@@ -205,6 +201,7 @@ export function OperationsPage({ role, userId, initialTaskRunId }: Props) {
           typeLabel,
           run.id,
           run.requested_by_user_id || '',
+          isManualFetchRun(run, runJobs) ? '手动补采' : '',
         ].join(' ').toLowerCase();
         if (!haystack.includes(query)) return false;
       }
@@ -213,32 +210,7 @@ export function OperationsPage({ role, userId, initialTaskRunId }: Props) {
     return sortTaskRunsForBucket(matched, runStatus);
   }, [taskRuns, jobsByRunId, runStatus, ownerEmployeeId, jobType, runSearch]);
 
-  const residualJobs = useMemo(() => {
-    const query = runSearch.trim().toLowerCase();
-    return jobs.filter((job) => {
-      if (job.task_run_id) return false;
-      if (jobType && job.job_type !== jobType) return false;
-      if (query) {
-        const haystack = [
-          job.task_template_name || '',
-          job.id,
-          job.account_id || '',
-          job.claimed_by_agent_name || '',
-          labelJobType(job.job_type),
-        ].join(' ').toLowerCase();
-        if (!haystack.includes(query)) return false;
-      }
-      return true;
-    });
-  }, [jobs, jobType, runSearch]);
-
-  const selectedResidualJob = useMemo(
-    () => residualJobs.find((job) => job.id === selectedResidualJobId) || null,
-    [residualJobs, selectedResidualJobId],
-  );
-
   useEffect(() => {
-    if (legacyOnly) return;
     if (filteredTaskRuns.length === 0) {
       setSelectedRunId(null);
       return;
@@ -246,22 +218,28 @@ export function OperationsPage({ role, userId, initialTaskRunId }: Props) {
     if (!selectedRunId || !filteredTaskRuns.some((run) => run.id === selectedRunId)) {
       setSelectedRunId(filteredTaskRuns[0].id);
     }
-  }, [filteredTaskRuns, legacyOnly, selectedRunId]);
+  }, [filteredTaskRuns, selectedRunId]);
 
-  useEffect(() => {
-    if (!legacyOnly) {
-      setSelectedResidualJobId(null);
-      return;
+  function handleRunStatusFilterChange(value: string) {
+    setRunStatus(value);
+    if (staleOnly && value && value !== 'needs_action') {
+      setStaleOnly(false);
     }
-    setSelectedRunId(null);
-    if (residualJobs.length === 0) {
-      setSelectedResidualJobId(null);
-      return;
+  }
+
+  function handleOverviewStatusClick(status: string) {
+    setRunStatus(status);
+    if (staleOnly && status !== 'needs_action') {
+      setStaleOnly(false);
     }
-    if (!selectedResidualJobId || !residualJobs.some((job) => job.id === selectedResidualJobId)) {
-      setSelectedResidualJobId(residualJobs[0].id);
+  }
+
+  function handleStaleOnlyChange(checked: boolean) {
+    setStaleOnly(checked);
+    if (checked && !runStatus) {
+      setRunStatus('needs_action');
     }
-  }, [legacyOnly, residualJobs, selectedResidualJobId]);
+  }
 
   async function executeConfirm() {
     if (!confirm) return;
@@ -299,25 +277,26 @@ export function OperationsPage({ role, userId, initialTaskRunId }: Props) {
             <OverviewCard
               label="进行中"
               count={summary.task_run_bucket_counts?.active ?? 0}
-              onClick={() => setRunStatus('active')}
+              onClick={() => handleOverviewStatusClick('active')}
             />
             <OverviewCard
               label="待处理"
               count={summary.task_run_bucket_counts?.needs_action ?? 0}
               hint={summary.stuck_task_run_count > 0 ? `其中 ${summary.stuck_task_run_count} 个卡住` : undefined}
               tooltip="包含执行失败、部分完成或存在卡住采集步骤的任务。"
-              onClick={() => setRunStatus('needs_action')}
+              onClick={() => handleOverviewStatusClick('needs_action')}
             />
             <OverviewCard
               label="已完成"
               count={summary.task_run_bucket_counts?.done ?? 0}
-              onClick={() => setRunStatus('done')}
+              onClick={() => handleOverviewStatusClick('done')}
             />
             {summary.orphan_active_job_count > 0 ? (
               <OverviewCard
                 label="异常残留任务"
                 count={summary.orphan_active_job_count}
-                tooltip="这些执行项未关联运行批次（多为测试遗留），左侧运行批次列表不会出现。"
+                tooltip={ORPHAN_JOB_TOOLTIP}
+                variant="warning"
               />
             ) : null}
           </div>
@@ -329,7 +308,11 @@ export function OperationsPage({ role, userId, initialTaskRunId }: Props) {
           <h2 className="ops-section-title">筛选任务</h2>
           <div className="filter-grid">
             <label>状态</label>
-            <select value={runStatus} onChange={(event) => setRunStatus(event.target.value)} aria-label="任务状态筛选">
+            <select
+              value={runStatus}
+              onChange={(event) => handleRunStatusFilterChange(event.target.value)}
+              aria-label="任务状态筛选"
+            >
               {RUN_BUCKET_FILTER_OPTIONS.map((item) => (
                 <option key={item.value || 'all'} value={item.value}>{item.label}</option>
               ))}
@@ -356,67 +339,25 @@ export function OperationsPage({ role, userId, initialTaskRunId }: Props) {
             </select>
             <label>搜索</label>
             <input value={runSearch} onChange={(event) => setRunSearch(event.target.value)} placeholder="任务名、负责人、编号" />
+            <span aria-hidden />
+            <label className="check-line">
+              <input
+                type="checkbox"
+                checked={staleOnly}
+                onChange={(event) => handleStaleOnlyChange(event.target.checked)}
+                aria-label="仅看执行超时"
+              />
+              仅看执行超时
+            </label>
           </div>
-          <details className="tech-details">
-            <summary>高级排障筛选</summary>
-            <div className="filter-grid ops-advanced-filters">
-              <label>采集步骤状态</label>
-              <select value={jobStatus} onChange={(event) => setJobStatus(event.target.value)} aria-label="采集步骤状态筛选">
-                {JOB_BUCKET_FILTER_OPTIONS.map((item) => (
-                  <option key={item.value || 'all'} value={item.value}>{item.label}</option>
-                ))}
-              </select>
-              <label className="check-line">
-                <input type="checkbox" checked={legacyOnly} onChange={(event) => setLegacyOnly(event.target.checked)} />
-                仅独立补采
-              </label>
-              <label className="check-line">
-                <input type="checkbox" checked={staleOnly} onChange={(event) => setStaleOnly(event.target.checked)} />
-                仅执行超时
-              </label>
-            </div>
-          </details>
         </aside>
 
         <section className="list-panel ops-run-list-panel" data-testid="run-batch-list">
           <div className="ops-list-head">
-            <h2 className="ops-section-title">{legacyOnly ? '独立补采' : '任务运行记录'}</h2>
-            <span className="muted">
-              {legacyOnly
-                ? `${residualJobs.length} 条`
-                : `共 ${taskRunsTotal} 条 · 第 ${runPage}/${runTotalPages} 页`}
-            </span>
+            <h2 className="ops-section-title">任务运行记录</h2>
+            <span className="muted">共 {taskRunsTotal} 条 · 第 {runPage}/{runTotalPages} 页</span>
           </div>
-          {legacyOnly ? (
-            residualJobs.length === 0 ? <EmptyState text="暂无符合条件的独立补采" /> : (
-              <div className="ops-run-list">
-                <div className="ops-run-list-header" aria-hidden>
-                  <span>补采项</span>
-                  <span>概览</span>
-                  <span>标签</span>
-                  <span>状态</span>
-                </div>
-                {residualJobs.map((job) => (
-                  <button
-                    type="button"
-                    key={job.id}
-                    className={`ops-run-row ${selectedResidualJobId === job.id ? 'selected' : ''}`}
-                    onClick={() => setSelectedResidualJobId(job.id)}
-                  >
-                    <b>{labelJobType(job.job_type)}</b>
-                    <span className="ops-run-overview">{getResidualJobOverviewText(job)}</span>
-                    <span className="ops-run-tags">
-                      <span className="tag muted-tag">独立补采</span>
-                      <span className="tag muted-tag">{job.claimed_by_agent_name || '未分配 Agent'}</span>
-                    </span>
-                    <span className={`tag ${job.is_stale_running || job.is_stale_claimed ? 'warning-tag' : ''}`}>
-                      {job.is_stale_running || job.is_stale_claimed ? '执行超时' : labelStatus(job.status)}
-                    </span>
-                  </button>
-                ))}
-              </div>
-            )
-          ) : filteredTaskRuns.length === 0 ? <EmptyState text="暂无符合条件的任务运行记录" /> : (
+          {filteredTaskRuns.length === 0 ? <EmptyState text="暂无符合条件的任务运行记录" /> : (
             <div className="ops-run-list">
               <div className="ops-run-list-header" aria-hidden>
                 <span>任务</span>
@@ -427,6 +368,7 @@ export function OperationsPage({ role, userId, initialTaskRunId }: Props) {
               {filteredTaskRuns.map((run) => {
                 const runJobs = jobsByRunId.get(run.id) || [];
                 const attention = isRunNeedsAttention(run, runJobs);
+                const manualFetch = isManualFetchRun(run, runJobs);
                 return (
                   <button
                     type="button"
@@ -436,12 +378,13 @@ export function OperationsPage({ role, userId, initialTaskRunId }: Props) {
                       setSelectedRunId(run.id);
                     }}
                   >
-                    <b>{run.task_template_name || '未命名任务'}</b>
+                    <b>{getTaskRunDisplayName(run, runJobs)}</b>
                     <span className="ops-run-overview">
                       {getRunOverviewText(run, runJobs)}
                     </span>
                     <span className="ops-run-tags">
                       <span className="tag muted-tag">{getRunOwnerLabel(run)}</span>
+                      {manualFetch ? <span className="tag muted-tag">手动补采</span> : null}
                       <span className="tag muted-tag">{getRunTypeLabel(runJobs)}</span>
                       <span className="tag muted-tag">{labelTrigger(run.trigger_type)}</span>
                     </span>
@@ -451,7 +394,7 @@ export function OperationsPage({ role, userId, initialTaskRunId }: Props) {
               })}
             </div>
           )}
-          {!legacyOnly && taskRunsTotal > 0 ? (
+          {taskRunsTotal > 0 ? (
             <ListPaginationBar
               testId="ops-pagination"
               page={runPage}
@@ -464,27 +407,23 @@ export function OperationsPage({ role, userId, initialTaskRunId }: Props) {
         </section>
 
         <aside className="detail-panel" data-testid="ops-detail-panel">
-          {legacyOnly ? (
-            <StandaloneJobDetailPanel job={selectedResidualJob} />
-          ) : (
-            <RunDetailPanel
-              run={selectedRun}
-              jobs={selectedRun?.jobs || []}
-              canWrite={canWrite}
-              onCancelPending={(id) => setConfirm({
-                title: '取消本批次尚未执行的项',
-                message: '将取消该任务运行记录下所有仍处于「等待执行」状态的采集步骤。已开始或已完成的步骤不受影响。',
-                confirmLabel: '确定取消',
-                onConfirm: () => cancelTaskRunPending(role, id, 'operations_cancel_task_run_pending', userId),
-              })}
-              onRetry={(id) => setConfirm({
-                title: '重试失败采集步骤',
-                message: '将把该任务运行记录下所有「执行失败」的采集步骤重新加入队列，不会删除历史记录。',
-                confirmLabel: '确定重新排队',
-                onConfirm: () => retryTaskRun(role, id, 'operations_retry_task_run', userId),
-              })}
-            />
-          )}
+          <RunDetailPanel
+            run={selectedRun}
+            jobs={selectedRun?.jobs || []}
+            canWrite={canWrite}
+            onCancelPending={(id) => setConfirm({
+              title: '取消本批次尚未执行的项',
+              message: '将取消该任务运行记录下所有仍处于「等待执行」状态的采集步骤。已开始或已完成的步骤不受影响。',
+              confirmLabel: '确定取消',
+              onConfirm: () => cancelTaskRunPending(role, id, 'operations_cancel_task_run_pending', userId),
+            })}
+            onRetry={(id) => setConfirm({
+              title: '重试失败采集步骤',
+              message: '将把该任务运行记录下所有「执行失败」的采集步骤重新加入队列，不会删除历史记录。',
+              confirmLabel: '确定重新排队',
+              onConfirm: () => retryTaskRun(role, id, 'operations_retry_task_run', userId),
+            })}
+          />
         </aside>
       </div>
 
@@ -520,12 +459,14 @@ function OverviewCard({
   hint,
   tooltip,
   onClick,
+  variant,
 }: {
   label: string;
   count: number;
   hint?: string;
   tooltip?: string;
   onClick?: () => void;
+  variant?: 'warning';
 }) {
   const body = (
     <>
@@ -534,15 +475,16 @@ function OverviewCard({
       {hint ? <span className="summary-card-hint">{hint}</span> : null}
     </>
   );
+  const className = variant === 'warning' ? 'summary-card summary-card-warning' : 'summary-card';
   if (onClick) {
     return (
-      <button type="button" className="summary-card" title={tooltip} onClick={onClick}>
+      <button type="button" className={className} title={tooltip} onClick={onClick}>
         {body}
       </button>
     );
   }
   return (
-    <div className="summary-card" title={tooltip}>
+    <div className={className} title={tooltip} data-testid={variant === 'warning' ? 'ops-orphan-warning-card' : undefined}>
       {body}
     </div>
   );
@@ -565,45 +507,6 @@ function ConfirmActions({
   );
 }
 
-function StandaloneJobDetailPanel({ job }: { job: OpsJobItem | null }) {
-  if (!job) return <EmptyState text="请在中间选择一条独立补采" />;
-  return (
-    <div className="detail-body" data-testid="residual-job-detail-panel">
-      <h3 className="panel-title">独立补采详情</h3>
-      <section className={`ops-diagnosis ${job.is_stale_running || job.is_stale_claimed || job.status === 'failed' ? 'needs-action' : ''}`}>
-        <b>说明</b>
-        <p>这是从情报中心内容卡片手动发起的详情或评论补采，不属于某一次任务模板运行。</p>
-        <b>建议操作</b>
-        <p>{job.status === 'pending' ? '等待 Agent 执行即可；如果长时间不动，再检查账号和 Agent 状态。' : '可用于确认这次手动补采是否完成或失败。'}</p>
-      </section>
-      <dl className="detail-dl">
-        <div><dt>补采类型</dt><dd>{labelJobType(job.job_type)}</dd></div>
-        <div><dt>当前状态</dt><dd>{labelStatus(job.status)}</dd></div>
-        <div><dt>所属 Agent</dt><dd>{job.claimed_by_agent_name || '—'}</dd></div>
-        <div><dt>是否超时</dt><dd>{jobTimeoutLabel(job)}</dd></div>
-        <div><dt>创建时间</dt><dd>{formatDateTime(job.created_at)}</dd></div>
-        <div><dt>开始时间</dt><dd>{formatDateTime(job.started_at)}</dd></div>
-        {job.last_error_message ? (
-          <div className="full-row"><dt>错误原因</dt><dd className="inline-error">{job.last_error_message}</dd></div>
-        ) : null}
-      </dl>
-      <TechnicalDetails
-        data={{ payload: job.payload_json, result: job.result_summary_json, id: job.id }}
-        testId="residual-job-tech-details"
-      />
-    </div>
-  );
-}
-
-function TechnicalDetails({ data, testId }: { data: unknown; testId?: string }) {
-  return (
-    <details className="tech-details" data-testid={testId}>
-      <summary>查看技术详情</summary>
-      <pre className="json-block">{JSON.stringify(data, null, 2)}</pre>
-    </details>
-  );
-}
-
 function getRunOwnerLabel(run: OpsTaskRunItem): string {
   if (run.owner_employee_name) return run.owner_employee_name;
   if (run.requested_by_display_name) return `发起人：${run.requested_by_display_name}`;
@@ -615,11 +518,7 @@ function getRunTypeLabel(jobs: OpsJobItem[]): string {
   return firstJob ? labelJobType(firstJob.job_type) : '任务运行';
 }
 
-function getResidualJobOverviewText(job: OpsJobItem): string {
-  if (job.is_stale_running || job.is_stale_claimed) return '执行超时，可能需要检查 Agent 或账号状态';
-  if (job.last_error_message) return job.last_error_message;
-  if (job.status === 'pending') return '从情报中心手动发起，正在等待执行';
-  return `创建于 ${formatDateTime(job.created_at)}`;
+function isManualFetchRun(run: OpsTaskRunItem, jobs: OpsJobItem[]): boolean {
+  if (!run.task_template_id) return true;
+  return jobs.some((job) => job.payload_json?.manual_enqueue === true);
 }
-
-

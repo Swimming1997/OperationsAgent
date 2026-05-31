@@ -590,7 +590,7 @@ class TaskRunQueueContext(ApiModel):
 
 class TaskRunRead(ApiModel):
     id: str
-    task_template_id: str
+    task_template_id: str | None = None
     trigger_type: str
     requested_by_user_id: str | None = None
     task_schedule_id: str | None = None
@@ -621,7 +621,7 @@ class TaskRunCreatedJob(ApiModel):
 
 class TaskRunResponse(ApiModel):
     task_run_id: str
-    task_template_id: str
+    task_template_id: str | None = None
     jobs_created: int
     jobs: list[TaskRunCreatedJob]
     readiness: TaskTemplateReadiness

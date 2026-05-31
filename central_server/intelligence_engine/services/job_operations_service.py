@@ -36,6 +36,11 @@ from intelligence_engine.services.job_queue_diagnostics import build_task_run_qu
 from intelligence_engine.services.task_materialization import TaskMaterializationService
 from intelligence_engine.storage.repositories.job_repository import JobRepository
 
+MANUAL_FETCH_RUN_LABELS = {
+    JobType.DETAIL_FETCH.value: "内容详情补采",
+    JobType.COMMENT_FETCH.value: "评论补采",
+}
+
 
 class JobOperationsService:
     def __init__(self, db: Session):
@@ -314,8 +319,25 @@ class JobOperationsService:
             TaskMaterializationService(self.db).refresh_task_run(run)
         return BulkOperationResult(affected_count=len(job_ids), job_ids=job_ids, message=f"已重试排队 {len(job_ids)} 个 failed job")
 
+    def _resolve_task_run_display_name(self, run: TaskRun, template: TaskTemplate | None) -> str | None:
+        if template:
+            return template.name
+        if run.task_template_id:
+            return None
+        job = self.db.scalar(
+            select(Job).where(Job.task_run_id == run.id).order_by(Job.created_at.asc()).limit(1)
+        )
+        if not job:
+            return "手动补采"
+        label = MANUAL_FETCH_RUN_LABELS.get(job.job_type)
+        if label:
+            return label
+        if (job.payload_json or {}).get("manual_enqueue"):
+            return "手动补采"
+        return None
+
     def _task_run_item(self, run: TaskRun, *, stuck_run_ids: set[str] | None = None) -> TaskRunListItem:
-        template = self.db.get(TaskTemplate, run.task_template_id)
+        template = self.db.get(TaskTemplate, run.task_template_id) if run.task_template_id else None
         requested_by = self.db.get(User, run.requested_by_user_id) if run.requested_by_user_id else None
         executor_account = self.db.get(PlatformAccount, run.executor_account_id) if run.executor_account_id else None
         owner_employee = self.db.get(Employee, executor_account.employee_id) if executor_account and executor_account.employee_id else None
@@ -324,7 +346,7 @@ class JobOperationsService:
         return TaskRunListItem(
             id=run.id,
             task_template_id=run.task_template_id,
-            task_template_name=template.name if template else None,
+            task_template_name=self._resolve_task_run_display_name(run, template),
             trigger_type=run.trigger_type,
             status=run.status,
             requested_by_user_id=run.requested_by_user_id,
@@ -355,7 +377,7 @@ class JobOperationsService:
         template_name = None
         if job.task_run_id:
             run = self.db.get(TaskRun, job.task_run_id)
-            if run:
+            if run and run.task_template_id:
                 template = self.db.get(TaskTemplate, run.task_template_id)
                 template_name = template.name if template else None
         agent_name = None

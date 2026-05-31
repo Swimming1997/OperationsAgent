@@ -90,6 +90,28 @@ export function labelJobType(jobType: string): string {
   return JOB_TYPE_LABELS[jobType] || jobType;
 }
 
+type TaskRunNameSource = {
+  task_template_name?: string | null;
+  task_template_id?: string | null;
+};
+
+type TaskRunJobNameSource = {
+  job_type?: string;
+  payload_json?: Record<string, unknown> | null;
+};
+
+export function getTaskRunDisplayName(
+  run: TaskRunNameSource,
+  jobs: TaskRunJobNameSource[] = [],
+): string {
+  if (run.task_template_name) return run.task_template_name;
+  const firstJob = jobs[0];
+  if (firstJob?.job_type && (firstJob.payload_json?.manual_enqueue || !run.task_template_id)) {
+    return labelJobType(firstJob.job_type);
+  }
+  return '未命名任务';
+}
+
 export function labelStatus(status: string): string {
   return STATUS_LABELS[status] || status;
 }

@@ -54,7 +54,7 @@ class JobListResponse(ApiModel):
 
 class TaskRunListItem(ApiModel):
     id: str
-    task_template_id: str
+    task_template_id: str | None = None
     task_template_name: str | None = None
     trigger_type: str
     status: str

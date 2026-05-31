@@ -28,7 +28,7 @@ import {
   formatReferenceRevokeRemaining,
 } from '../../utils/intelligencePermissions';
 import { SafeImage } from '../../components/SafeImage';
-import { coverSrc } from '../../utils/mediaUrl';
+import { coverFallbackSrc, coverSrc } from '../../utils/mediaUrl';
 import { EmptyState, ErrorState, LoadingState } from '../../components/Status';
 import type {
   Employee,
@@ -483,6 +483,7 @@ export function IntelligenceDetailPanel({
 
           <SafeImage
             src={coverSrc(detail.latest_snapshot) ?? coverSrc(selected)}
+            fallbackSrc={coverFallbackSrc(detail.latest_snapshot) ?? coverFallbackSrc(selected)}
             className="detail-cover"
             frameClassName="cover-media-frame cover-media-frame-detail"
             placeholderClassName="detail-cover-placeholder"

@@ -14,7 +14,7 @@ import { ListPaginationBar } from '../components/ListPaginationBar';
 import { EmptyState, ErrorState, LoadingState } from '../components/Status';
 import { useTaskRunRefreshEffect } from '../context/TaskRunRefreshContext';
 import type { PlatformAccount, Role } from '../types/api';
-import { labelStatus, labelTrigger } from '../utils/operationsLabels';
+import { getTaskRunDisplayName, labelStatus, labelTrigger } from '../utils/operationsLabels';
 import { RUN_BUCKET_FILTER_OPTIONS } from '../utils/operationsRunBuckets';
 import { myRunsCreatedAfterIso, sortMyRuns } from '../utils/myRunsSort';
 import { getRunOverviewText, RunDetailPanel } from './operations/RunDetailPanel';
@@ -252,7 +252,7 @@ export function MyRunsPage({ role, userId, initialTaskRunId }: Props) {
                     className={`ops-run-row ${selectedRunId === run.id ? 'selected' : ''}`}
                     onClick={() => setSelectedRunId(run.id)}
                   >
-                    <b>{run.task_template_name || '未命名任务'}</b>
+                    <b>{getTaskRunDisplayName(run)}</b>
                     <span className="ops-run-overview">{getRunOverviewText(run, [])}</span>
                     <span className="ops-run-tags">
                       <span className="tag muted-tag">{run.executor_account_name || '未记录账号'}</span>

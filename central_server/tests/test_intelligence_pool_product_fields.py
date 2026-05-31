@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 
-from intelligence_engine.db.models import CandidateDecision, CommentSnapshot, ContentIdentity, ContentSnapshot, Employee, Job, PlatformAccount, User, utcnow
+from intelligence_engine.db.models import CandidateDecision, CommentSnapshot, ContentIdentity, ContentSnapshot, Employee, Job, PlatformAccount, TaskRun, User, utcnow
 from intelligence_engine.db.session import get_db
 from intelligence_engine.domain.enums import AccountRole, AccountStatus, AuthStatus, CandidateBucket, ContentType, ContentWorkflowStatus, JobType, Platform, SourceSurface
 from intelligence_engine.domain.schemas import FeedCandidateInput
@@ -303,6 +303,27 @@ def test_manual_enqueue_fetch_sets_pending_job_on_detail(db_session):
     payload = detail.json()
     assert payload["pending_detail_job_id"] == detail_response.json()["job_id"]
     assert payload["pending_comment_job_id"] == comment_response.json()["job_id"]
+
+
+def test_manual_enqueue_fetch_creates_task_run_for_operations(db_session):
+    content = _seed_content(db_session)
+    client = _client(db_session)
+
+    response = client.post(f"/api/intelligence/contents/{content.id}/enqueue-detail-fetch")
+
+    assert response.status_code == 200
+    job = db_session.get(Job, response.json()["job_id"])
+    run = db_session.get(TaskRun, job.task_run_id)
+    assert run is not None
+    assert run.task_template_id is None
+    assert run.jobs_total == 1
+    ops_response = client.get("/api/operations/task-runs")
+    assert ops_response.status_code == 200
+    payload = ops_response.json()
+    item = next(item for item in payload["items"] if item["id"] == run.id)
+    assert item["task_template_id"] is None
+    assert item["task_template_name"] == "内容详情补采"
+    assert item["jobs_total"] == 1
 
 
 def test_admin_manual_enqueue_uses_latest_discovery_account(db_session):

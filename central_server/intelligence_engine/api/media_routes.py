@@ -36,17 +36,18 @@ def get_cover_image(
             headers={"Cache-Control": "public, max-age=3600"},
         )
 
-    cover_url = (snapshot.cover_url or "").strip()
-    if not cover_url or not media.is_allowed_media_url(cover_url):
-        raise HTTPException(status_code=404, detail="cover not available")
+    metadata = content.metadata_json if isinstance(content.metadata_json, dict) else {}
+    for cover_url in media.iter_cover_candidate_urls(snapshot, metadata):
+        if not media.is_allowed_media_url(cover_url):
+            continue
+        remote = media.fetch_remote_cover(cover_url)
+        if not remote:
+            continue
+        data, content_type = remote
+        return Response(
+            content=data,
+            media_type=content_type,
+            headers={"Cache-Control": "public, max-age=3600"},
+        )
 
-    remote = media.fetch_remote_cover(cover_url)
-    if not remote:
-        raise HTTPException(status_code=404, detail="cover fetch failed")
-
-    data, content_type = remote
-    return Response(
-        content=data,
-        media_type=content_type,
-        headers={"Cache-Control": "public, max-age=3600"},
-    )
+    raise HTTPException(status_code=404, detail="cover fetch failed")

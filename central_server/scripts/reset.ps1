@@ -36,7 +36,7 @@ try {
     $StopCentral = Join-Path $CentralRoot "scripts\stop.ps1"
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $StopCentral
     if ($LASTEXITCODE -ne 0) {
-        Write-ResetStep "WARN: stop incomplete; run 分别运行 local_agent\scripts\stop.ps1 和 central_server\scripts\stop.ps1 first if reset fails"
+        Write-ResetStep "WARN: stop incomplete; run local_agent\scripts\stop.ps1 and central_server\scripts\stop.ps1 first if reset fails"
     }
     Write-Host ""
 
@@ -62,7 +62,7 @@ try {
         Write-ResetStep "[OK] Reset done. Run cd central_server; .\scripts\start.ps1, then cd local_agent; .\scripts\start.ps1 if needed."
     }
     elseif ($exitCode -eq 3) {
-        Write-ResetStep "[FAIL] Logs locked. Run 分别运行 local_agent\scripts\stop.ps1 和 central_server\scripts\stop.ps1 then cd central_server; .\scripts\reset.ps1."
+        Write-ResetStep "[FAIL] Logs locked. Run local_agent\scripts\stop.ps1 and central_server\scripts\stop.ps1, then cd central_server; .\scripts\reset.ps1."
     }
     else {
         Write-ResetStep "[FAIL] Exit code: $exitCode"

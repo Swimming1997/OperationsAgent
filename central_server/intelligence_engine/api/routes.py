@@ -1,5 +1,7 @@
 ﻿from datetime import datetime, timezone
 
+import base64
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -8,7 +10,7 @@ from intelligence_engine.config import get_settings
 from intelligence_engine.domain.enums import ContentWorkflowStatus
 from intelligence_engine.services.enrichment_policy import should_enqueue_comment_fetch
 from intelligence_engine.services.benchmark_selection import BenchmarkSelectionService
-from intelligence_engine.services.media_service import MediaService
+from intelligence_engine.services.media_service import COVER_MEDIA_STORED, MediaService
 from intelligence_engine.storage.repositories.content_repository import ContentRepository
 from intelligence_engine.storage.repositories.job_repository import JobRepository
 from intelligence_engine.storage.repositories.reference_library_repository import ReferenceLibraryRepository
@@ -433,7 +435,21 @@ def ingest_detail(request: DetailIngestionRequest, db: Session = Depends(get_db)
     rule_set_id = (job.payload_json or {}).get("rule_set_id") if job else None
     repo = ContentRepository(db)
     snapshot = repo.create_snapshot(content_id=request.content_id, account_id=job.account_id if job else None, snapshot=request.snapshot)
-    MediaService().resolve_after_detail_ingest(snapshot)
+    media = MediaService()
+    if request.snapshot.cover_image_base64:
+        try:
+            cover_bytes = base64.b64decode(request.snapshot.cover_image_base64)
+            content_type = request.snapshot.cover_content_type or "image/jpeg"
+            snapshot.stored_cover_path = media.persist_cover(request.content_id, cover_bytes, content_type)
+            snapshot.cover_media_status = COVER_MEDIA_STORED
+            if not (snapshot.cover_url or "").strip():
+                cover_url = media.resolve_effective_cover_url(snapshot)
+                if cover_url:
+                    snapshot.cover_url = cover_url
+        except (ValueError, OSError):
+            media.resolve_after_detail_ingest(snapshot)
+    else:
+        media.resolve_after_detail_ingest(snapshot)
     repo.evaluate_candidate(
         content_id=request.content_id,
         snapshot_id=snapshot.id,
