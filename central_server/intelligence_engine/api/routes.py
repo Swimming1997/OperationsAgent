@@ -559,15 +559,22 @@ def list_creator_monitors(db: Session = Depends(get_db)):
     ]
 
 
-@router.post("/ingestion/xhs-search-suggestions")
-def ingest_xhs_search_suggestions(request: dict, db: Session = Depends(get_db)):
+def _ingest_search_suggestion_rows(request: dict, db: Session, *, default_platform: str = "xhs") -> dict:
+    """Persist long-tail keyword suggestions for any platform.
+
+    The suggestion table carries a ``platform`` column, so XHS and Douyin share
+    one store. Platform resolves from the item, then the request, then the
+    endpoint default — keeping both the legacy XHS endpoint and the unified one
+    on a single code path.
+    """
     items = request.get("items") or []
+    request_platform = str(request.get("platform") or default_platform)
     inserted = 0
     for item in items:
         fetched_at_raw = item.get("fetched_at")
         fetched_at = datetime.fromisoformat(str(fetched_at_raw).replace("Z", "+00:00")) if fetched_at_raw else utcnow()
         row = XhsSearchSuggestion(
-            platform="xhs",
+            platform=str(item.get("platform") or request_platform),
             core_keyword=str(item.get("core_keyword") or request.get("core_keyword") or ""),
             suggested_keyword=str(item.get("suggested_keyword") or ""),
             suggestion_rank=item.get("suggestion_rank"),
@@ -579,6 +586,17 @@ def ingest_xhs_search_suggestions(request: dict, db: Session = Depends(get_db)):
         inserted += 1
     db.commit()
     return {"inserted": inserted}
+
+
+@router.post("/ingestion/search-suggestions")
+def ingest_search_suggestions(request: dict, db: Session = Depends(get_db)):
+    """Platform-agnostic long-tail keyword ingestion (payload carries platform)."""
+    return _ingest_search_suggestion_rows(request, db)
+
+
+@router.post("/ingestion/xhs-search-suggestions")
+def ingest_xhs_search_suggestions(request: dict, db: Session = Depends(get_db)):
+    return _ingest_search_suggestion_rows(request, db, default_platform="xhs")
 
 
 @router.get("/intelligence/contents", response_model=IntelligenceContentList)

@@ -3162,6 +3162,7 @@ def create_xhs_search_suggestion_task(request: XhsSearchSuggestionTaskRequest, d
 @router.get("/xhs/search-suggestions", response_model=list[XhsSearchSuggestionRead])
 def list_xhs_search_suggestions(
     core_keyword: str | None = None,
+    platform: str | None = None,
     limit: int = 100,
     db: Session = Depends(get_db),
     _principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
@@ -3169,6 +3170,8 @@ def list_xhs_search_suggestions(
     stmt = select(XhsSearchSuggestion).order_by(XhsSearchSuggestion.fetched_at.desc()).limit(limit)
     if core_keyword:
         stmt = stmt.where(XhsSearchSuggestion.core_keyword == core_keyword)
+    if platform:
+        stmt = stmt.where(XhsSearchSuggestion.platform == platform)
     rows = list(db.scalars(stmt))
     return [
         XhsSearchSuggestionRead(

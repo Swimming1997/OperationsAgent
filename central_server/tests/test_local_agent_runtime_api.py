@@ -1,7 +1,7 @@
 ﻿from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from intelligence_engine.db.models import CandidateDecision, ContentIdentity, CreatorMonitorEvent, Job, KeywordRule, KeywordRuleSet
+from intelligence_engine.db.models import CandidateDecision, ContentIdentity, CreatorMonitorEvent, Job, KeywordRule, KeywordRuleSet, XhsSearchSuggestion
 from intelligence_engine.db.session import get_db
 from intelligence_engine.domain.enums import ContentType, FeedType, JobType, Platform, SessionStatus, SourceSurface
 from intelligence_engine.domain.schemas import DetailSnapshotInput, FeedCandidateInput
@@ -42,6 +42,47 @@ def test_ready_account_session_query_for_local_agent(db_session):
 
     assert response.status_code == 200
     assert response.json()["session_meta"]["cdp_url"] == "http://127.0.0.1:9222"
+
+
+def test_unified_search_suggestions_ingestion_persists_platform(db_session):
+    client = _client(db_session)
+    payload = {
+        "job_id": "job-dy-sug",
+        "account_id": None,
+        "platform": "douyin",
+        "core_keyword": "SCI论文",
+        "items": [
+            {"core_keyword": "SCI论文", "suggested_keyword": "sci论文怎么写", "suggestion_rank": 1, "raw_payload": {"source": "search_sug_intercept"}, "fetched_at": "2026-06-13T08:00:00Z"},
+            {"core_keyword": "SCI论文", "suggested_keyword": "sci论文辅导", "suggestion_rank": 2, "raw_payload": {}, "fetched_at": "2026-06-13T08:00:00Z"},
+        ],
+    }
+
+    response = client.post("/api/ingestion/search-suggestions", json=payload)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["inserted"] == 2
+    db_session.expire_all()
+    rows = list(db_session.scalars(select(XhsSearchSuggestion).where(XhsSearchSuggestion.core_keyword == "SCI论文")))
+    assert len(rows) == 2
+    assert {r.platform for r in rows} == {"douyin"}
+
+
+def test_legacy_xhs_search_suggestions_endpoint_defaults_to_xhs(db_session):
+    client = _client(db_session)
+    payload = {
+        "core_keyword": "考研复习",
+        "items": [
+            {"core_keyword": "考研复习", "suggested_keyword": "考研复习规划", "suggestion_rank": 1, "raw_payload": {}, "fetched_at": "2026-06-13T08:00:00Z"},
+        ],
+    }
+
+    response = client.post("/api/ingestion/xhs-search-suggestions", json=payload)
+
+    assert response.status_code == 200, response.text
+    db_session.expire_all()
+    row = db_session.scalar(select(XhsSearchSuggestion).where(XhsSearchSuggestion.core_keyword == "考研复习"))
+    assert row is not None
+    assert row.platform == "xhs"
 
 
 def test_creator_monitor_items_ingestion_writes_events_and_detail_job(db_session):
