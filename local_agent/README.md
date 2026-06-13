@@ -2,6 +2,8 @@
 
 Local Agent 运行在员工电脑，负责本机 Chrome / CDP / Profile、领取中央 Job、执行采集并通过 HTTP JSON 上报中央 API。
 
+本文描述当前 Runtime V1（P0/P1 已验收基线）的运行方式。P2 的 Local-First 目标是把全量采集流水优先写入员工本地库，只在素材库精华、账号/Agent、配置同步等场景联机；P2 细节以 `..\central_server\docs\guidance\p2-development-plan.md` 为准。
+
 ## 启动与停止
 
 ```powershell

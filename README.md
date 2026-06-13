@@ -66,5 +66,9 @@ npm run build
 | 文档 | 说明 |
 |------|------|
 | `central_server/docs/README.md` | 当前需求、验收、运行和边界文档入口 |
-| `central_server/docs/guidance/p0-intelligence-center-design-v1.md` | P0 当前设计与验收清单 |
+| `central_server/docs/guidance/p0-intelligence-center-design-v1.md` | P0 已验收设计与验收清单 |
+| `central_server/docs/guidance/p0-acceptance-results.md` | P0 工程验收结果 |
+| `central_server/docs/guidance/p1-development-plan.md` | P1 已验收开发落地计划 |
+| `central_server/docs/guidance/p1-acceptance-results.md` | P1 工程验收结果 |
+| `central_server/docs/guidance/p2-development-plan.md` | P2 Local-First 开发落地计划与当前开发入口 |
 | `central_server/docs/demo/clean-start-customer-test-playbook.md` | reset 后从零首跑手册 |

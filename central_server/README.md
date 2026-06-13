@@ -67,4 +67,7 @@ Copy-Item .env.example .env
 
 当前文档入口：`docs/README.md`。
 
-P0 设计摘要与验收清单：`docs/guidance/p0-intelligence-center-design-v1.md`。工程验收实测：`docs/guidance/p0-acceptance-results.md`。
+阶段口径：
+
+- P0/P1 已验收基线：见 `docs/guidance/p0-intelligence-center-design-v1.md`、`docs/guidance/p0-acceptance-results.md`、`docs/guidance/p1-development-plan.md`、`docs/guidance/p1-acceptance-results.md`。
+- P2 当前开发入口：`docs/guidance/p2-development-plan.md`。P2 目标是 Local-First，本文件仍描述当前中央服务的启动与运行方式。

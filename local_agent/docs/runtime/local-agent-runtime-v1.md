@@ -2,6 +2,8 @@
 
 Local Agent 运行在员工电脑，只通过 HTTP JSON 与中央服务器通信。
 
+本文描述当前 Runtime V1（P0/P1 已验收基线）的中央 Job 模式。P2 的 Local-First 本地采存看闭环是下一阶段目标，入口见 `central_server/docs/guidance/p2-development-plan.md`。
+
 ## 启动与停止
 
 ```powershell
@@ -70,6 +72,8 @@ Local Agent 不保存或上传 Cookie 原文。`logs/`、`profiles/` 是运行�
 - `creator_monitor` — 对标监控
 - `detail_fetch` / `comment_fetch` — 详情与评论补采
 - `search_collect` — 关键词搜索采集（真实 connector）
-- `xhs_search_suggest` — 搜索联想词采集
+- `xhs_account_posted_notes` — 当前小红书账号已发布笔记
+- `xhs_search_suggest` — 小红书搜索联想词采集（历史兼容）
+- `search_suggest` — 平台无关搜索联想词采集
 
 当前项目文档入口见：`central_server/docs/README.md`。协议与任务链路以中央 API、`shared_contracts/` 和本文件为准。
