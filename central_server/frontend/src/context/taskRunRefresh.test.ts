@@ -32,6 +32,7 @@ function run(partial: Partial<OpsTaskRunItem>): OpsTaskRunItem {
     updated_at: '2026-01-01T00:00:00Z',
     finished_at: null,
     has_active_jobs: true,
+    has_stuck_jobs: false,
     ...partial,
   };
 }

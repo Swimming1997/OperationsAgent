@@ -161,7 +161,7 @@ export function IntelligenceDetailPanel({
   const inLibrary = Boolean(selected?.in_reference_library);
   const refItem = detail?.reference_library_items?.[0];
   const canRevokeLibrary =
-    Boolean(refItem && onRevokeReferenceLibrary) && canRevokeOwnReferenceLibraryItem(role, refItem, userId);
+    refItem && onRevokeReferenceLibrary ? canRevokeOwnReferenceLibraryItem(role, refItem, userId) : false;
   const revokeRemaining = refItem ? formatReferenceRevokeRemaining(refItem) : null;
 
   useEffect(() => {

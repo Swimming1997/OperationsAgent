@@ -197,13 +197,14 @@ def ensure_executor_account_for_template(
     template: TaskTemplate,
     executor_account_id: str,
 ) -> PlatformAccount:
-    if not template.business_account_type_id:
-        raise HTTPException(status_code=400, detail="task template has no business account type")
     account = db.get(PlatformAccount, executor_account_id)
     if not account:
         raise HTTPException(status_code=404, detail="executor account not found")
-    if account.business_account_type_id != template.business_account_type_id:
+    if template.business_account_type_id and account.business_account_type_id != template.business_account_type_id:
         raise HTTPException(status_code=400, detail="executor account business type does not match template")
+    if not template.business_account_type_id and account.business_account_type_id:
+        template.business_account_type_id = account.business_account_type_id
+        db.flush()
     role = getattr(account, "account_role", None) or AccountRole.INTELLIGENCE_COLLECTOR.value
     if role != AccountRole.INTELLIGENCE_COLLECTOR.value:
         raise HTTPException(status_code=400, detail=f"account cannot run intelligence collection tasks (role={role})")

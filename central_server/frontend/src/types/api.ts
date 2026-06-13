@@ -294,6 +294,8 @@ export type TaskTemplateDetail = {
   platform: string | null;
   account_id: string | null;
   business_account_type_id: string | null;
+  created_by_user_id?: string | null;
+  permissions?: TaskTemplatePermissions;
   config: Record<string, unknown>;
   enabled: boolean;
   typed_payload: Record<string, unknown>;

@@ -1,7 +1,7 @@
 # P0 运营情报中心 — 阶段 0 设计摘要与验收清单
 
 > 定稿日期：2026-05-26（权限增补：2026-05-30）  
-> 依据：`待开发计划/运营情报中心V1开发计划_20260526.md` §4.3、§7.5、§10.1、§11  
+> 依据：当前实现、P0 验收结果和已落地的 API / service / 前端路径。历史开发计划已合并进本文档，不再作为开发入口。  
 > 实现对照：`alembic/versions/0005_*`～`0007_*`、`BenchmarkSelectionService`、`IntelligencePage`、`BenchmarkLibraryPage`、`intelligence_access.py`
 
 ---
@@ -161,7 +161,7 @@ $env:INTEL_ENGINE_DATABASE_URL = "postgresql+psycopg://intel:intel@localhost:554
 
 ### 8.3 XHS SLO（阶段 6）
 
-见 `docs/guidance/xhs_stability_slo.md`。SQLite 可跑报告脚本；成功率盖章需真实 job 数据：
+口径：推荐流、搜索、详情、评论四类 job，`success + partial_success` / 终态 >= 90%；stale running job 30 分钟内处理；错误码复用 `ErrorCode` 并在运行中心展示。SQLite 可跑报告脚本；生产成功率盖章需真实 Local Agent job 数据：
 
 ```powershell
 ..\.venv\Scripts\python.exe scripts/xhs_slo_report.py --window-hours 24
@@ -190,7 +190,7 @@ $env:INTEL_ENGINE_DATABASE_URL = "postgresql+psycopg://intel:intel@localhost:554
 |--------------|----------|
 | `BenchmarkSelectionService` | `services/benchmark_selection.py` |
 | `RuleProfileService` | `services/rule_profile.py` |
-| `LeadDetectionService` | 合并在 `BenchmarkSelectionService._evaluate_target` + `CandidateDecision` 命中词 |
-| `ContentScreeningService` | `filtering/candidate_classifier.py` + 情报池可见性阈值 |
+| `LeadDetectionService` | `services/lead_detection.py` |
+| `ContentScreeningService` | `services/content_screening.py` + `filtering/candidate_classifier.py` |
 
 Ingestion 触发：`api/routes.py`（feed/detail/comment commit 后 `ai_select_by_rules`）。

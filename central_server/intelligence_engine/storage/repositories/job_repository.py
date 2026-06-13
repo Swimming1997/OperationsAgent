@@ -22,6 +22,13 @@ class JobRepository:
     def __init__(self, db: Session):
         self.db = db
 
+    def _ensure_claim_owner(self, job: Job, *, agent_id: str | None) -> None:
+        """Reject stale agent callbacks once a job has an explicit owner."""
+        if not agent_id or not job.claimed_by_agent_id:
+            return
+        if job.claimed_by_agent_id != agent_id:
+            raise ValueError(f"job is claimed by another agent: {job.claimed_by_agent_id}")
+
     def create_job(
         self,
         *,
@@ -251,6 +258,7 @@ class JobRepository:
         return jobs
 
     def mark_started(self, job: Job, *, agent_id: str) -> Job:
+        self._ensure_claim_owner(job, agent_id=agent_id)
         assert_transition(job.status, JobStatus.RUNNING)
         job.status = JobStatus.RUNNING.value
         job.claimed_by_agent_id = agent_id
@@ -259,13 +267,15 @@ class JobRepository:
         self.add_event(job.id, "job_started", {"agent_id": agent_id})
         return job
 
-    def update_checkpoint(self, job: Job, *, checkpoint: dict, partial_metrics: dict | None = None) -> Job:
+    def update_checkpoint(self, job: Job, *, checkpoint: dict, partial_metrics: dict | None = None, agent_id: str | None = None) -> Job:
+        self._ensure_claim_owner(job, agent_id=agent_id)
         job.checkpoint_json = checkpoint
         job.updated_at = utcnow()
-        self.add_event(job.id, "checkpoint_updated", {"checkpoint": checkpoint, "partial_metrics": partial_metrics or {}})
+        self.add_event(job.id, "checkpoint_updated", {"checkpoint": checkpoint, "partial_metrics": partial_metrics or {}, "agent_id": agent_id})
         return job
 
-    def mark_success(self, job: Job, *, status: JobStatus, result_summary: dict) -> Job:
+    def mark_success(self, job: Job, *, status: JobStatus, result_summary: dict, agent_id: str | None = None) -> Job:
+        self._ensure_claim_owner(job, agent_id=agent_id)
         target_status = JobStatus(enum_value(status))
         assert_transition(job.status, target_status)
         job.status = target_status.value
@@ -275,7 +285,8 @@ class JobRepository:
         self.add_event(job.id, "job_success" if target_status == JobStatus.SUCCESS else "job_partial_success", result_summary)
         return job
 
-    def mark_failed(self, job: Job, *, error_code: str, error_message: str, checkpoint: dict | None = None) -> Job:
+    def mark_failed(self, job: Job, *, error_code: str, error_message: str, checkpoint: dict | None = None, agent_id: str | None = None) -> Job:
+        self._ensure_claim_owner(job, agent_id=agent_id)
         assert_transition(job.status, JobStatus.FAILED)
         job.status = JobStatus.FAILED.value
         job.last_error_code = error_code

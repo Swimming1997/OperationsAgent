@@ -72,4 +72,4 @@ Local Agent 不保存或上传 Cookie 原文。`logs/`、`profiles/` 是运行�
 - `search_collect` — 关键词搜索采集（真实 connector）
 - `xhs_search_suggest` — 搜索联想词采集
 
-详细协议与任务链路见：`central_server/docs/runtime/local-agent-runtime-v1.md`（中央侧副本，内容更完整）。
+当前项目文档入口见：`central_server/docs/README.md`。协议与任务链路以中央 API、`shared_contracts/` 和本文件为准。

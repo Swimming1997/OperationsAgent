@@ -65,6 +65,6 @@ Copy-Item .env.example .env
 | Agent 管理 | `/agents` | admin, supervisor |
 | 组织管理 | `/organization` | admin, supervisor |
 
-P0 设计摘要与验收清单：`docs/guidance/p0-intelligence-center-design-v1.md`。工程验收实测：`docs/guidance/p0-acceptance-results.md`。
+当前文档入口：`docs/README.md`。
 
-客户首跑手册：`docs/demo/clean-start-customer-test-playbook.md`。
+P0 设计摘要与验收清单：`docs/guidance/p0-intelligence-center-design-v1.md`。工程验收实测：`docs/guidance/p0-acceptance-results.md`。
