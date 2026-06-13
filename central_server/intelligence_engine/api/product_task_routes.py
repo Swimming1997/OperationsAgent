@@ -1,7 +1,19 @@
+from datetime import timedelta
+
 from intelligence_engine.api.product_common import *
+from intelligence_engine.db.models import utcnow
+from intelligence_engine.domain.enums import TaskScheduleType
 
 
 router = APIRouter(prefix="/api")
+
+
+def _default_next_run_at(schedule_type: str, interval_seconds: int | None, next_run_at):
+    if next_run_at is not None:
+        return next_run_at
+    if schedule_type == TaskScheduleType.INTERVAL_SECONDS.value and interval_seconds:
+        return utcnow() + timedelta(seconds=interval_seconds)
+    return None
 
 
 def _filtered_templates(db: Session, principal: Principal) -> list[TaskTemplate]:
@@ -370,7 +382,7 @@ def create_task_schedule(
         interval_seconds=request.interval_seconds,
         daily_time_window=request.daily_time_window,
         enabled=request.enabled,
-        next_run_at=request.next_run_at,
+        next_run_at=_default_next_run_at(_enum_value(request.schedule_type), request.interval_seconds, request.next_run_at),
     )
     db.commit()
     return _schedule_read(schedule)
@@ -405,6 +417,8 @@ def update_task_schedule(
         schedule.enabled = patch["enabled"]
     if "next_run_at" in patch:
         schedule.next_run_at = patch["next_run_at"]
+    elif schedule.enabled and not schedule.next_run_at:
+        schedule.next_run_at = _default_next_run_at(schedule.schedule_type, schedule.interval_seconds, None)
     db.commit()
     return _schedule_read(schedule)
 

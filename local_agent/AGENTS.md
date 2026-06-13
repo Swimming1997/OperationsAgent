@@ -8,3 +8,6 @@
 6. 不保存或上传 Cookie 原文。Chrome Profile 保留在本机 `profiles/accounts/{profile_key}/`。
 7. `references/MediaCrawler` 只作参考源码，不作为运行依赖。
 8. `logs/`、`profiles/` 是运行数据，不作为源码。
+9. 必须遵循仓库根 `AGENTS.md` 的稳定性、可维护性、可拓展性强约束。
+10. 新增跨 Central/Local 的协议、枚举、payload 必须优先使用或扩展 `shared_contracts/`，不得在 Local Agent 内复制一份不受测试约束的协议。
+11. 新增平台采集能力必须优先通过 `local_agent_runtime/connectors/base/connector.py` 的 connector 契约扩展，不得继续膨胀核心 runtime 分支。

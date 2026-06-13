@@ -8,6 +8,7 @@
 |---|---|
 | `guidance/p0-intelligence-center-design-v1.md` | P0 运营情报中心当前设计、API、权限、边界与验收清单 |
 | `guidance/p0-acceptance-results.md` | P0 性能与 XHS SLO 验收记录 |
+| `guidance/p1-development-plan.md` | P1 开发落地计划、范围边界、主线拆解与验收清单 |
 
 ## 运行与排障
 

@@ -120,6 +120,7 @@ from intelligence_engine.domain.product_schemas import (
     ReferenceLibraryItemCreateRequest,
     ReferenceLibraryItemList,
     ReferenceLibraryItemRead,
+    CreativeMaterialPreparationRequest,
     ReferenceLibraryReevaluateRequest,
     ReferenceLibraryReevaluateResponse,
     ReferenceLibraryReevaluateResult,

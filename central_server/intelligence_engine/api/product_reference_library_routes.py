@@ -1,7 +1,65 @@
+from __future__ import annotations
+
 from intelligence_engine.api.product_common import *
 
 
 router = APIRouter(prefix="/api")
+
+
+def _text_excerpt(value: str | None, *, limit: int = 240) -> str | None:
+    text = " ".join(str(value or "").split())
+    if not text:
+        return None
+    return text if len(text) <= limit else f"{text[:limit]}..."
+
+
+def _build_creative_material(db: Session, item: ReferenceLibraryItem, request: CreativeMaterialPreparationRequest) -> dict:
+    content = db.get(ContentIdentity, item.content_id)
+    snapshot = db.get(ContentSnapshot, content.latest_snapshot_id) if content and content.latest_snapshot_id else None
+    comments = list(
+        db.scalars(
+            select(CommentSnapshot)
+            .where(CommentSnapshot.content_id == item.content_id)
+            .order_by(CommentSnapshot.like_count.desc().nullslast(), CommentSnapshot.created_at.desc())
+            .limit(5)
+        )
+    )
+    metrics = {
+        "like_count": snapshot.like_count if snapshot else None,
+        "comment_count": snapshot.comment_count if snapshot else None,
+        "collect_count": snapshot.collect_count if snapshot else None,
+        "share_count": snapshot.share_count if snapshot else None,
+    }
+    comment_highlights = [
+        {
+            "body_text": _text_excerpt(comment.body_text, limit=160),
+            "like_count": comment.like_count,
+            "author_name": comment.author_name,
+        }
+        for comment in comments
+        if _text_excerpt(comment.body_text, limit=160)
+    ]
+    return {
+        "source": "reference_library_item",
+        "content_id": item.content_id,
+        "title": snapshot.title if snapshot else None,
+        "body_excerpt": _text_excerpt(snapshot.body_text if snapshot else None),
+        "cover_url": snapshot.cover_url if snapshot else None,
+        "image_urls": list((snapshot.image_urls_json or [])[:9]) if snapshot else [],
+        "video_url": snapshot.video_url if snapshot else None,
+        "author_name": snapshot.author_name if snapshot else None,
+        "publish_time": snapshot.publish_time.isoformat() if snapshot and snapshot.publish_time else None,
+        "metrics": metrics,
+        "comment_highlights": comment_highlights,
+        "manual_tags": list(item.manual_tags_json or []),
+        "material_tags": request.material_tags if request.material_tags is not None else list(item.material_tags_json or []),
+        "reusable_angles": request.reusable_angles,
+        "selling_points": request.selling_points,
+        "pain_points": request.pain_points,
+        "risk_notes": request.risk_notes,
+        "applicable_business_type_ids": request.applicable_business_type_ids,
+        "operator_note": request.operator_note,
+    }
 
 
 @router.post("/intelligence/contents/{content_id}/reference-library-items", response_model=ReferenceLibraryItemRead)
@@ -168,6 +226,38 @@ def update_reference_library_item(item_id: str, request: ReferenceLibraryItemUpd
         **updates,
         actor_user_id=request.user_id or principal.user_id,
         actor_employee_id=request.employee_id or get_principal_employee_id(db, principal),
+    )
+    db.commit()
+    return ReferenceLibraryItemRead(**repo._item_dict(item, content, snapshot))
+
+
+@router.post("/reference-library/items/{item_id}/creative-material", response_model=ReferenceLibraryItemRead)
+def prepare_reference_library_creative_material(
+    item_id: str,
+    request: CreativeMaterialPreparationRequest,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+):
+    repo = ReferenceLibraryRepository(db)
+    item = repo.get_item(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="reference library item not found")
+    content = db.get(ContentIdentity, item.content_id)
+    snapshot = db.get(ContentSnapshot, content.latest_snapshot_id) if content and content.latest_snapshot_id else None
+    metadata = dict(item.metadata_json or {})
+    material = _build_creative_material(db, item, request)
+    metadata["creative_material"] = material
+    updates = {"metadata_json": metadata}
+    if request.material_tags is not None:
+        updates["material_tags_json"] = request.material_tags
+    if request.operator_note is not None:
+        updates["note"] = request.operator_note
+    item = repo.update_item(
+        item,
+        event_type="material_prepared",
+        actor_user_id=principal.user_id,
+        actor_employee_id=get_principal_employee_id(db, principal),
+        **updates,
     )
     db.commit()
     return ReferenceLibraryItemRead(**repo._item_dict(item, content, snapshot))

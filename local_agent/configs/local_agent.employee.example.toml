@@ -37,6 +37,7 @@ supported_job_types = [
   "detail_fetch",
   "comment_fetch",
   "search_collect",
+  "xhs_account_posted_notes",
 ]
 
 # Legacy single-browser CDP (optional; account login uses per-account Chrome + port)

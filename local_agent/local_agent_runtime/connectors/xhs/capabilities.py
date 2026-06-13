@@ -141,8 +141,13 @@ _CAPABILITIES: tuple[XhsCapabilitySpec, ...] = (
     XhsCapabilitySpec(
         key="xhs.account.posted_notes",
         layer=XhsCapabilityLayer.ACCOUNT_ASSET_READ,
-        status=XhsCapabilityStatus.PLANNED,
+        status=XhsCapabilityStatus.IMPLEMENTED,
         description="当前账号已发布笔记。",
+        current_impl=["connectors/xhs/creator.py::fetch_current_account_posted_notes", "runtime.py::_run_account_posted_notes"],
+        mediacrawler_reference=["/api/sns/web/v1/user/selfinfo", "/api/sns/web/v1/user_posted"],
+        required_context=["ready browser session", "self_info.user_id"],
+        output_contract=["FeedCandidateInput"],
+        audit_supported=True,
     ),
     XhsCapabilitySpec(
         key="xhs.account.liked_notes",

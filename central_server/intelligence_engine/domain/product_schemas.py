@@ -1051,6 +1051,16 @@ class ReferenceLibraryItemUpdateRequest(ApiModel):
     employee_id: str | None = None
 
 
+class CreativeMaterialPreparationRequest(ApiModel):
+    reusable_angles: list[str] = Field(default_factory=list)
+    selling_points: list[str] = Field(default_factory=list)
+    pain_points: list[str] = Field(default_factory=list)
+    risk_notes: list[str] = Field(default_factory=list)
+    applicable_business_type_ids: list[str] = Field(default_factory=list)
+    operator_note: str | None = None
+    material_tags: list[str] | None = None
+
+
 class ReferenceLibraryItemRead(ApiModel):
     id: str
     content_id: str

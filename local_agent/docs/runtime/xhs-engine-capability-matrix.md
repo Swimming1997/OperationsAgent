@@ -21,7 +21,7 @@
 
 | capability_key | 说明 | 当前状态 |
 |---|---|---|
-| xhs.account.posted_notes | 当前账号已发布笔记 | 未正式做 |
+| xhs.account.posted_notes | 当前账号已发布笔记 | 已有正式 Job：`xhs_account_posted_notes` |
 | xhs.account.liked_notes | 当前账号点赞/喜欢笔记 | 未做 |
 | xhs.account.collected_notes | 当前账号收藏笔记 | 未做 |
 | xhs.creator_platform.published_list | 创作者平台已发布作品列表 | 未做 |

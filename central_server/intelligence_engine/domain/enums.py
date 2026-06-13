@@ -65,6 +65,7 @@ class SourceSurface(str, Enum):
     DOUYIN_IMAGE_HOME_FEED = "douyin_image_home_feed"
     SEARCH = "search"
     CREATOR_MONITOR = "creator_monitor"
+    ACCOUNT_POSTED_NOTES = "account_posted_notes"
     MANUAL_IMPORT = "manual_import"
 
 
@@ -124,6 +125,7 @@ class JobType(str, Enum):
     SEARCH_COLLECT = "search_collect"
     # Canonical, platform-agnostic long-tail keyword job; XHS_SEARCH_SUGGEST kept as legacy alias.
     SEARCH_SUGGEST = "search_suggest"
+    XHS_ACCOUNT_POSTED_NOTES = "xhs_account_posted_notes"
     XHS_SEARCH_SUGGEST = "xhs_search_suggest"
     MEDIA_DOWNLOAD = "media_download"
 

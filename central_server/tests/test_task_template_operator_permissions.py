@@ -201,6 +201,7 @@ def test_operator_schedule_requires_own_template(db_session):
         },
     )
     assert allowed.status_code == 200, allowed.text
+    assert allowed.json()["next_run_at"] is not None
 
 
 def test_operator_can_delete_own_template_not_others(db_session):

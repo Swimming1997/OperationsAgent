@@ -184,6 +184,21 @@ def test_search_task_template_materializes_search_collect_job(db_session):
     assert job.payload_json["max_items"] == 30
 
 
+def test_enqueue_account_posted_notes_job(db_session):
+    client = _client(db_session)
+    account = _account(db_session)
+    response = client.post(f"/api/product/accounts/{account.id}/posted-notes/jobs?max_items=12")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["job_type"] == JobType.XHS_ACCOUNT_POSTED_NOTES.value
+    job = db_session.get(Job, body["job_id"])
+    assert job.account_id == account.id
+    assert job.local_agent_id == account.default_agent_id
+    assert job.payload_json["max_items"] == 12
+    assert job.payload_json["source_surface"] == SourceSurface.ACCOUNT_POSTED_NOTES.value
+
+
 def test_manual_run_api_and_due_schedule_materialization(db_session):
     client = _client(db_session)
     account = _account(db_session)

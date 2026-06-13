@@ -265,6 +265,28 @@ export function updateReferenceLibraryItem(
   });
 }
 
+export function prepareReferenceLibraryCreativeMaterial(
+  role: Role,
+  itemId: string,
+  payload: {
+    reusable_angles?: string[];
+    selling_points?: string[];
+    pain_points?: string[];
+    risk_notes?: string[];
+    applicable_business_type_ids?: string[];
+    operator_note?: string;
+    material_tags?: string[];
+  },
+  userId?: string,
+) {
+  return apiRequest<ReferenceLibraryItem>(`/api/reference-library/items/${itemId}/creative-material`, {
+    method: 'POST',
+    role,
+    userId,
+    body: payload,
+  });
+}
+
 export function archiveReferenceLibraryItem(role: Role, itemId: string, userId?: string) {
   return apiRequest<ReferenceLibraryItem>(`/api/reference-library/items/${itemId}/archive`, {
     method: 'POST',

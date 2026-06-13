@@ -359,6 +359,8 @@ cd local_agent
 - [ ] 单账号关键词搜索跑通，情报中心可见 search 来源
 - [ ] 单对标组监控跑通，情报中心可见 creator_monitor 来源
 - [ ] operator `/my-runs` 或 admin `/operations` 批次与执行项数量一致
+- [ ] 真实 XHS SLO 报告使用 Local Agent 实跑数据，不使用夹具盖章：
+  `..\.venv\Scripts\python.exe scripts\xhs_slo_report.py --window-hours 24 --require-real-data --min-terminal-per-type 50`
 
 ---
 

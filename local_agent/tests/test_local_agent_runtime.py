@@ -16,7 +16,7 @@ from local_agent_runtime.runtime import (
     XhsJobExecutor,
 )
 from local_agent_runtime.contracts import FeedCandidateInput
-from local_agent_runtime.connectors.xhs.creator import XhsCreatorFetchError
+from local_agent_runtime.connectors.xhs.creator import XhsCreatorFetchError, XhsCreatorFetchResult, XhsCreatorItem, _current_account_profile_from_page
 from local_agent_runtime.enums import ContentType, ErrorCode, FeedType, JobStatus, JobType, Platform, SourceSurface
 
 
@@ -131,6 +131,30 @@ def test_runtime_reports_failure_with_existing_error_code():
     assert ("fail", "job-1", ErrorCode.MANUAL_VERIFY_REQUIRED.value, "manual verify required", {"cursor": "a"}) in client.events
 
 
+def test_runtime_run_forever_survives_transient_center_request_error(monkeypatch):
+    calls = {"count": 0, "sleeps": 0}
+    runtime = LocalAgentRuntime(config=AgentRuntimeConfig(agent_id="agent-1", poll_interval_seconds=0.01), client=FakeCenterClient())
+
+    async def flaky_run_once():
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise httpx.ReadError("temporary read error")
+        raise asyncio.CancelledError()
+
+    async def fake_sleep(_seconds):
+        calls["sleeps"] += 1
+
+    monkeypatch.setattr(runtime, "run_once", flaky_run_once)
+    monkeypatch.setattr(runtime_module.asyncio, "sleep", fake_sleep)
+
+    try:
+        asyncio.run(runtime.run_forever())
+    except asyncio.CancelledError:
+        pass
+
+    assert calls == {"count": 2, "sleeps": 1}
+
+
 def test_runtime_routes_creator_monitor_job_type():
     job = ClaimedJobPayload(
         job_id="job-creator",
@@ -147,6 +171,108 @@ def test_runtime_routes_creator_monitor_job_type():
 
     assert executor.seen == [("agent-1", JobType.CREATOR_MONITOR.value)]
     assert any(event[0] == "complete" and event[3]["items_seen"] == 3 for event in client.events)
+
+
+def test_default_capabilities_include_account_posted_notes():
+    payload = runtime_module.build_agent_capabilities_payload(AgentRuntimeConfig())
+    assert JobType.XHS_ACCOUNT_POSTED_NOTES.value in payload["job_types"]
+
+
+def test_account_posted_notes_job_ingests_candidates(monkeypatch):
+    async def fake_fetch_current(self, page, *, limit=20):
+        return XhsCreatorFetchResult(
+            creator_platform_id="5f58bd990000000001003753",
+            creator_display_name="当前账号",
+            items=[
+                XhsCreatorItem(
+                    platform_content_id="note-1",
+                    canonical_url="https://www.xiaohongshu.com/explore/note-1",
+                    title_or_summary="已发布笔记",
+                    cover_url=None,
+                    publish_time=None,
+                    xsec_token="token",
+                    xsec_source="pc_feed",
+                    raw_payload={"note_id": "note-1"},
+                )
+            ],
+            raw_payload={"account_asset_source": "current_account_posted_notes"},
+        )
+
+    monkeypatch.setattr(runtime_module.XhsCreatorConnector, "fetch_current_account_posted_notes", fake_fetch_current)
+    executor = XhsJobExecutor(client=FakeIngestionClient(), config=AgentRuntimeConfig(agent_id="agent-1"))
+    job = ClaimedJobPayload(
+        job_id="job-account-posted",
+        job_type=JobType.XHS_ACCOUNT_POSTED_NOTES.value,
+        account_id="account-1",
+        payload={"max_items": 10},
+        checkpoint={},
+    )
+
+    result = asyncio.run(executor._run_account_posted_notes(job, object()))
+
+    assert result.status == JobStatus.SUCCESS.value
+    assert result.checkpoint["items_seen"] == 1
+    assert result.result_summary["source_surface"] == SourceSurface.ACCOUNT_POSTED_NOTES.value
+    assert result.result_summary["new_content_count"] == 1
+
+
+def test_account_posted_notes_fallback_reads_profile_link():
+    class FakeLocator:
+        async def evaluate_all(self, script):
+            return [
+                {
+                    "href": "https://www.xiaohongshu.com/user/profile/613a04fe000000000201d25c?channel_type=web_user_board",
+                    "text": "我",
+                    "cls": "link-wrapper",
+                }
+            ]
+
+    class FakePage:
+        def locator(self, selector):
+            assert selector == 'a[href*="/user/profile/"]'
+            return FakeLocator()
+
+    user_id, home_url = asyncio.run(_current_account_profile_from_page(FakePage()))
+
+    assert user_id == "613a04fe000000000201d25c"
+    assert home_url.startswith("https://www.xiaohongshu.com/user/profile/")
+
+
+def test_search_collect_job_uses_search_probe(monkeypatch):
+    class FakeSearchProbe:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        async def collect(self, page):
+            return [
+                FeedCandidateInput(
+                    platform=Platform.XHS,
+                    platform_content_id="search-note-1",
+                    canonical_url="https://www.xiaohongshu.com/explore/search-note-1",
+                    content_type=ContentType.IMAGE_TEXT,
+                    title_or_summary="搜索结果",
+                    source_surface=SourceSurface.SEARCH,
+                    feed_type=FeedType.XHS_HOME_FEED,
+                    discovered_at=datetime.now(timezone.utc),
+                    raw_payload={"search_keyword": "论文"},
+                )
+            ], {"searched_keyword_count": 1, "total_items_seen": 1}
+
+    monkeypatch.setattr(runtime_module, "XhsSearchProbe", FakeSearchProbe)
+    executor = XhsJobExecutor(client=FakeIngestionClient(), config=AgentRuntimeConfig(agent_id="agent-1"))
+    job = ClaimedJobPayload(
+        job_id="job-search",
+        job_type=JobType.SEARCH_COLLECT.value,
+        account_id="account-1",
+        payload={"keywords": ["论文"], "max_items": 5},
+        checkpoint={},
+    )
+
+    result = asyncio.run(executor._run_search_collect(job, object()))
+
+    assert result.status == JobStatus.SUCCESS.value
+    assert result.result_summary["new_content_count"] == 1
+    assert result.result_summary["detail_jobs_enqueued"] == 1
 
 
 def test_creator_monitor_fetch_error_maps_to_runtime_failure(monkeypatch):

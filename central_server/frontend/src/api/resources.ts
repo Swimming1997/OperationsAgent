@@ -37,6 +37,13 @@ export function updateAccount(role: Role, accountId: string, payload: Partial<Pl
   return apiRequest<PlatformAccount>(`/api/product/accounts/${accountId}`, { method: 'PATCH', role, userId, body: payload });
 }
 
+export function enqueueAccountPostedNotesJob(role: Role, accountId: string, maxItems = 20, userId?: string) {
+  return apiRequest<{ job_id: string; job_type: string; status: string }>(
+    `/api/product/accounts/${accountId}/posted-notes/jobs?max_items=${maxItems}`,
+    { method: 'POST', role, userId },
+  );
+}
+
 export function registerMyLocalAgents(role: Role, payload: { agent_ids: string[]; force?: boolean }, userId?: string) {
   return apiRequest<LocalAgent[]>('/api/product/me/local-agents/register', { method: 'POST', role, userId, body: payload });
 }

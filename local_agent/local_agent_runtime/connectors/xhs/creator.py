@@ -8,7 +8,7 @@ from urllib.parse import parse_qs, quote, urlencode, urlparse
 import httpx
 from playwright.async_api import Page
 
-from local_agent_runtime.connectors.xhs.api_client import XhsApiClient, XhsApiError, XhsApiUnavailable, browser_context_cookie_header
+from local_agent_runtime.connectors.xhs.api_client import XhsApiClient, XhsApiError, XhsApiUnavailable, browser_context_cookie_header, extract_self_info_result
 from local_agent_runtime.connectors.xhs.context import XHS_BASE_URL, merge_xhs_context, normalize_xhs_url
 from local_agent_runtime.enums import ContentType, FeedType, Platform, SourceSurface
 from local_agent_runtime.contracts import FeedCandidateInput
@@ -58,7 +58,7 @@ class XhsCreatorItem:
             }
         )
 
-    def to_candidate(self, *, feed_position: int) -> FeedCandidateInput:
+    def to_candidate(self, *, feed_position: int, source_surface: SourceSurface = SourceSurface.CREATOR_MONITOR) -> FeedCandidateInput:
         return FeedCandidateInput(
             platform=Platform.XHS,
             platform_content_id=self.platform_content_id,
@@ -66,7 +66,7 @@ class XhsCreatorItem:
             content_type=ContentType.VIDEO if _looks_video(self.raw_payload) else ContentType.IMAGE_TEXT,
             title_or_summary=self.title_or_summary,
             cover_url=self.cover_url,
-            source_surface=SourceSurface.CREATOR_MONITOR,
+            source_surface=source_surface,
             feed_type=FeedType.XHS_HOME_FEED,
             feed_position=feed_position,
             discovered_at=datetime.now(timezone.utc),
@@ -177,7 +177,70 @@ def parse_user_posted_response(payload: dict[str, Any]) -> tuple[list[dict[str, 
     return notes, meta
 
 
+async def _current_account_profile_from_page(page: Page) -> tuple[str, str]:
+    try:
+        links = await page.locator('a[href*="/user/profile/"]').evaluate_all(
+            """(els) => els.map((el) => ({
+                href: el.href || "",
+                text: (el.innerText || el.getAttribute("aria-label") || "").trim(),
+                cls: String(el.className || "")
+            }))"""
+        )
+    except Exception:
+        return "", ""
+    for item in links:
+        href = str(item.get("href") or "")
+        text = str(item.get("text") or "").strip()
+        cls = str(item.get("cls") or "")
+        if text == "我" or "bottom-channel" in cls or "link-wrapper" in cls:
+            try:
+                context = parse_xhs_creator_context(href)
+            except ValueError:
+                continue
+            return context.creator_platform_id, href
+    return "", ""
+
+
 class XhsCreatorConnector:
+    async def fetch_current_account_posted_notes(self, page: Page, *, limit: int = 20) -> XhsCreatorFetchResult:
+        cookie_str = await browser_context_cookie_header(page.context)
+        raw_self = await XhsApiClient(cookie_str=cookie_str).query_self()
+        self_info = extract_self_info_result(raw_self if isinstance(raw_self, dict) else {})
+        fallback_user_id = ""
+        fallback_home_url = ""
+        if not self_info.user_id:
+            fallback_user_id, fallback_home_url = await _current_account_profile_from_page(page)
+        current_user_id = self_info.user_id or fallback_user_id
+        if not current_user_id:
+            raise XhsCreatorFetchError(
+                "self_info 未返回当前账号 user_id，无法读取当前账号已发布笔记",
+                error_code="auth_required",
+                retryable=True,
+                raw_context={"source_path": "account_self_info", "has_nickname": bool(self_info.nickname)},
+            )
+        result = await self.fetch_latest(
+            page,
+            creator_platform_id=current_user_id,
+            context={},
+            limit=limit,
+        )
+        return XhsCreatorFetchResult(
+            creator_platform_id=result.creator_platform_id,
+            creator_display_name=result.creator_display_name or self_info.nickname,
+            items=result.items,
+            raw_payload={
+                **result.raw_payload,
+                "account_asset_source": "current_account_posted_notes",
+                "self_info": {
+                    "nickname": self_info.nickname,
+                    "user_id": current_user_id,
+                    "red_id": self_info.red_id,
+                    "home_url": self_info.home_url or fallback_home_url,
+                    "source": "api_self_info" if self_info.user_id else "page_profile_link",
+                },
+            },
+        )
+
     async def fetch_latest(
         self,
         page: Page,

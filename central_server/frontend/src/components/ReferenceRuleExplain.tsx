@@ -29,6 +29,17 @@ type Props = {
 export function ReferenceRuleExplainSummary({ snapshot, title = '规则判断', onOpenRules }: Props) {
   const locked = snapshot.manual_locked ?? isReferenceManualLocked(snapshot.metadata);
   const reason = snapshot.ai_reason || snapshot.selected_reason;
+  const metadata = snapshot.metadata || {};
+  const ruleProfileVersion = metadataNumber(metadata, 'rule_profile_version');
+  const triggerSource = metadataText(metadata, 'trigger_source');
+  const ruleProfileId = metadataText(metadata, 'rule_profile_id');
+  const inputSnapshot = metadata.input_snapshot_json;
+  const candidateBucket = inputSnapshot && typeof inputSnapshot === 'object'
+    ? metadataText(inputSnapshot as Record<string, unknown>, 'candidate_bucket')
+    : '';
+  const likeCount = inputSnapshot && typeof inputSnapshot === 'object'
+    ? metadataNumber(inputSnapshot as Record<string, unknown>, 'like_count')
+    : null;
 
   return (
     <div className="detail-section reference-explain-summary" data-testid="reference-rule-explain">
@@ -47,9 +58,38 @@ export function ReferenceRuleExplainSummary({ snapshot, title = '规则判断', 
       </span>
       <span>命中词：{formatTags(snapshot.matched_keywords)}</span>
       <span>判断原因：{reason || '-'}</span>
+      {(ruleProfileVersion || triggerSource || candidateBucket || likeCount !== null) && (
+        <div className="mini-list reference-rule-trace" data-testid="reference-rule-trace">
+          {ruleProfileVersion ? <div className="mini-row passive"><span>规则版本</span><span>v{ruleProfileVersion}</span></div> : null}
+          {triggerSource ? <div className="mini-row passive"><span>触发来源</span><span>{labelTriggerSource(triggerSource)}</span></div> : null}
+          {candidateBucket ? <div className="mini-row passive"><span>候选分层</span><span>{candidateBucket}</span></div> : null}
+          {likeCount !== null ? <div className="mini-row passive"><span>输入点赞数</span><span>{likeCount}</span></div> : null}
+          {ruleProfileId ? <div className="mini-row passive"><span>RuleProfile</span><span>{ruleProfileId.slice(0, 8)}...</span></div> : null}
+        </div>
+      )}
       <ReferenceRuleSettingsLink onOpenRules={onOpenRules} />
     </div>
   );
+}
+
+function metadataText(metadata: Record<string, unknown>, key: string): string {
+  const value = metadata[key];
+  return typeof value === 'string' ? value : '';
+}
+
+function metadataNumber(metadata: Record<string, unknown>, key: string): number | null {
+  const value = metadata[key];
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function labelTriggerSource(value: string): string {
+  const labels: Record<string, string> = {
+    feed_ingestion: '推荐流入库',
+    detail_ingestion: '详情入库',
+    comment_ingestion: '评论入库',
+    manual_re_evaluate: '人工重评',
+  };
+  return labels[value] || value;
 }
 
 type ResultsProps = {

@@ -48,4 +48,5 @@ Platform connectors should expose a stable capability/support/execute boundary s
 3. Do not add new central/local duplicate protocol enums; add them to `shared_contracts` and extend the alignment tests.
 4. Keep repository methods persistence-focused; cross-entity business workflows belong in service/domain modules.
 5. Keep compatibility paths for legacy task templates until the migration backlog is empty.
-
+6. Treat stability, maintainability, and extensibility as release-blocking constraints. A change that weakens module boundaries, protocol compatibility, or testability should be rejected or redesigned before merge.
+7. `api/product_routes.py` and `db/models.py` are compatibility aggregators. They should not regain business implementation bodies.

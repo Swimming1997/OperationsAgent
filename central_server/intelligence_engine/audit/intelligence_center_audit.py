@@ -47,6 +47,7 @@ KNOWN_SOURCE_SURFACES = {
     SourceSurface.DOUYIN_IMAGE_HOME_FEED.value,
     SourceSurface.SEARCH.value,
     SourceSurface.CREATOR_MONITOR.value,
+    SourceSurface.ACCOUNT_POSTED_NOTES.value,
     SourceSurface.MANUAL_IMPORT.value,
 }
 
@@ -187,6 +188,8 @@ def audit_source_distribution(db: Session) -> dict[str, Any]:
             issues.append("search_job_non_search_surface")
         if job_type == JobType.FEED_COLLECT.value and event.source_surface not in FEED_SOURCE_SURFACES:
             issues.append("feed_job_unexpected_surface")
+        if job_type == JobType.XHS_ACCOUNT_POSTED_NOTES.value and event.source_surface != SourceSurface.ACCOUNT_POSTED_NOTES.value:
+            issues.append("account_posted_job_unexpected_surface")
         if issues:
             inconsistent.append(
                 {

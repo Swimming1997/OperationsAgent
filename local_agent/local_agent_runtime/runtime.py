@@ -14,12 +14,13 @@ from local_agent_runtime.connectors.xhs.creator import XhsCreatorConnector, XhsC
 from local_agent_runtime.connectors.xhs.cover_capture import attach_cover_bytes
 from local_agent_runtime.connectors.xhs.detail_probe import XhsDetailProbe
 from local_agent_runtime.connectors.xhs.homefeed_probe import XhsHomeFeedProbe
+from local_agent_runtime.connectors.xhs.search_probe import XhsSearchProbe
 from local_agent_runtime.connectors.xhs.search_suggest_probe import XhsSearchSuggestProbe
 from local_agent_runtime.connectors.douyin.feed_probe import DouyinFeedProbe
 from local_agent_runtime.connectors.douyin.suggest_probe import DouyinSearchSuggestProbe
 from local_agent_runtime.engine.search_config import SearchQueryConfig
 from local_agent_runtime.audit.summary import engine_audit_summary
-from local_agent_runtime.enums import ErrorCode, JobStatus, JobType, Platform, SessionStatus
+from local_agent_runtime.enums import ErrorCode, JobStatus, JobType, Platform, SessionStatus, SourceSurface
 from local_agent_runtime.contracts import (
     CommentIngestionRequest,
     CreatorMonitorIngestionRequest,
@@ -56,6 +57,7 @@ class AgentRuntimeConfig:
         JobType.COMMENT_FETCH.value,
         JobType.CREATOR_MONITOR.value,
         JobType.SEARCH_COLLECT.value,
+        JobType.XHS_ACCOUNT_POSTED_NOTES.value,
         JobType.XHS_SEARCH_SUGGEST.value,
         JobType.SEARCH_SUGGEST.value,
     )
@@ -360,6 +362,8 @@ class XhsJobExecutor:
                 return await self._run_creator_monitor(job, session.page)
             if job.job_type == JobType.SEARCH_COLLECT.value:
                 return await self._run_search_collect(job, session.page)
+            if job.job_type == JobType.XHS_ACCOUNT_POSTED_NOTES.value:
+                return await self._run_account_posted_notes(job, session.page)
             if job.job_type == JobType.XHS_SEARCH_SUGGEST.value:
                 return await self._run_search_suggest(job, session.page)
             return JobExecutionResult(status=JobStatus.PARTIAL_SUCCESS.value, result_summary={"unsupported_job_type": job.job_type})
@@ -458,6 +462,52 @@ class XhsJobExecutor:
                 "core_keyword": core_keyword,
                 "suggestion_count": len(items),
                 "runtime": "local_agent_runtime_v1",
+            },
+        )
+
+    async def _run_account_posted_notes(self, job: ClaimedJobPayload, page) -> JobExecutionResult:
+        payload = job.payload
+        limit = int(payload.get("max_items") or payload.get("limit") or 20)
+        try:
+            fetch_result = await XhsCreatorConnector().fetch_current_account_posted_notes(page, limit=limit)
+        except XhsCreatorFetchError as exc:
+            raise RuntimeFailure(
+                ErrorCode(exc.error_code),
+                str(exc),
+                retryable=exc.retryable,
+                raw_context=exc.raw_context,
+            ) from exc
+        candidates = [
+            item.to_candidate(feed_position=index, source_surface=SourceSurface.ACCOUNT_POSTED_NOTES)
+            for index, item in enumerate(fetch_result.items, start=1)
+        ]
+        ingestion = await self.client.ingest_feed_candidates(
+            FeedCandidateIngestionRequest(job_id=job.job_id, account_id=job.account_id, candidates=candidates)
+        )
+        results = ingestion.get("results") or []
+        new_count = sum(1 for item in results if item.get("is_new_content"))
+        detail_jobs = sum(1 for item in results if item.get("detail_job_enqueued"))
+        return JobExecutionResult(
+            status=JobStatus.SUCCESS.value,
+            checkpoint={"items_seen": len(candidates), "creator_platform_id": fetch_result.creator_platform_id},
+            result_summary={
+                "items_seen": len(candidates),
+                "new_content_count": new_count,
+                "duplicate_content_count": max(0, len(results) - new_count),
+                "detail_jobs_enqueued": detail_jobs,
+                "creator_platform_id": fetch_result.creator_platform_id,
+                "creator_display_name": fetch_result.creator_display_name,
+                "source_surface": SourceSurface.ACCOUNT_POSTED_NOTES.value,
+                "runtime": "local_agent_runtime_v1",
+                "engine_audit": engine_audit_summary(
+                    capability_key="xhs.account.posted_notes",
+                    surface="account_posted_notes",
+                    report={
+                        "source_path": "current_account_user_posted",
+                        "field_coverage": {},
+                        "perf": {},
+                    },
+                ),
             },
         )
 
@@ -878,7 +928,10 @@ class LocalAgentRuntime:
 
     async def run_forever(self) -> None:
         while True:
-            await self.run_once()
+            try:
+                await self.run_once()
+            except httpx.RequestError as exc:
+                logging.getLogger("local_agent").warning("transient center request error: %s", exc)
             await asyncio.sleep(self.config.poll_interval_seconds)
 
     async def run_once(self) -> int:

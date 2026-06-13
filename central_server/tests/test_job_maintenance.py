@@ -1,7 +1,7 @@
 from datetime import timedelta
 
-from intelligence_engine.db.models import AccountLoginSession, Job, PlatformAccount, utcnow
-from intelligence_engine.domain.enums import AuthStatus, JobStatus, JobType, LoginSessionStatus, Platform
+from intelligence_engine.db.models import AccountLoginSession, Job, PlatformAccount, TaskRun, utcnow
+from intelligence_engine.domain.enums import AuthStatus, JobStatus, JobType, LoginSessionStatus, Platform, TaskRunStatus, TaskRunTriggerType
 from intelligence_engine.jobs.maintenance import JobMaintenanceService
 
 
@@ -41,4 +41,38 @@ def test_job_maintenance_requeues_claims_and_expires_login_sessions(db_session):
     assert claimed.claimed_by_agent_id is None
     assert session.status == LoginSessionStatus.EXPIRED.value
     assert account.auth_status == AuthStatus.ERROR.value
+    assert result.task_run_refreshed_count == 0
 
+
+def test_job_maintenance_refreshes_task_run_after_stale_running_job(db_session, monkeypatch):
+    monkeypatch.setenv("INTEL_ENGINE_JOB_RUNNING_TIMEOUT_SECONDS", "60")
+    run = TaskRun(
+        trigger_type=TaskRunTriggerType.MANUAL.value,
+        status=TaskRunStatus.RUNNING.value,
+        result_summary_json={},
+        error_summary_json={},
+    )
+    db_session.add(run)
+    db_session.flush()
+    job = Job(
+        task_run_id=run.id,
+        job_type=JobType.FEED_COLLECT.value,
+        status=JobStatus.RUNNING.value,
+        payload_json={},
+        checkpoint_json={},
+        result_summary_json={},
+        started_at=utcnow() - timedelta(minutes=10),
+    )
+    db_session.add(job)
+    db_session.commit()
+
+    result = JobMaintenanceService(db_session).run_once()
+
+    assert result.stale_running_failed_count == 1
+    assert result.task_run_refreshed_count == 1
+    assert job.status == JobStatus.FAILED.value
+    assert job.last_error_code == "job_execution_timeout"
+    assert run.status == TaskRunStatus.FAILED.value
+    assert run.jobs_total == 1
+    assert run.jobs_failed == 1
+    assert run.finished_at is not None

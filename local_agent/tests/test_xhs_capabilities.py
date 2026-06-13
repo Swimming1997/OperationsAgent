@@ -1,4 +1,4 @@
-from local_agent_runtime.connectors.xhs.capabilities import XhsCapabilityLayer, get_xhs_capability, list_xhs_capabilities
+from local_agent_runtime.connectors.xhs.capabilities import XhsCapabilityLayer, XhsCapabilityStatus, get_xhs_capability, list_xhs_capabilities
 
 
 def test_xhs_capability_keys_are_unique():
@@ -18,3 +18,10 @@ def test_read_only_audit_supported_flags():
 
 def test_get_xhs_capability():
     assert get_xhs_capability("xhs.account.self_info").key == "xhs.account.self_info"
+
+
+def test_account_posted_notes_is_implemented_account_asset_read():
+    capability = get_xhs_capability("xhs.account.posted_notes")
+    assert capability.layer == XhsCapabilityLayer.ACCOUNT_ASSET_READ
+    assert capability.status == XhsCapabilityStatus.IMPLEMENTED
+    assert capability.audit_supported is True

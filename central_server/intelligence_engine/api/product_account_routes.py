@@ -179,6 +179,34 @@ def get_product_account(
     return _account_read(db, repo, account)
 
 
+@router.post("/product/accounts/{account_id}/posted-notes/jobs", response_model=EnqueueFetchResponse)
+def enqueue_account_posted_notes_job(
+    account_id: str,
+    max_items: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)),
+):
+    account = db.get(PlatformAccount, account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="account not found")
+    ensure_account_readable(db, principal, account)
+    if account.platform != Platform.XHS.value:
+        raise HTTPException(status_code=400, detail="only xhs account posted notes are supported")
+    job = JobRepository(db).create_job(
+        job_type=JobType.XHS_ACCOUNT_POSTED_NOTES,
+        account_id=account.id,
+        local_agent_id=account.default_agent_id,
+        payload={
+            "platform": Platform.XHS.value,
+            "account_id": account.id,
+            "max_items": max_items,
+            "source_surface": SourceSurface.ACCOUNT_POSTED_NOTES.value,
+        },
+    )
+    db.commit()
+    return EnqueueFetchResponse(job_id=job.id, job_type=job.job_type, status=job.status)
+
+
 @router.patch("/product/accounts/{account_id}", response_model=PlatformAccountRead)
 def update_product_account(
     account_id: str,

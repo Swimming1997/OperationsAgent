@@ -49,12 +49,22 @@ def _rate(success: int, total: int) -> float | None:
     return success / total
 
 
+def _is_fixture_job(job: Job) -> bool:
+    payload = job.payload_json or {}
+    return bool(payload.get("fixture") or payload.get("slo_fixture"))
+
+
 def build_report(*, window_hours: int, session: Session | None = None) -> dict:
     since = utcnow() - timedelta(hours=window_hours)
     owns_session = session is None
     if session is None:
         session = SessionLocal()
     try:
+        jobs = list(
+            session.scalars(
+                select(Job).where(Job.created_at >= since, Job.job_type.in_(TRACKED_JOB_TYPES))
+            )
+        )
         rows = list(
             session.execute(
                 select(Job.job_type, Job.status, func.count(Job.id))
@@ -75,6 +85,18 @@ def build_report(*, window_hours: int, session: Session | None = None) -> dict:
     by_type: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     for job_type, status, count in rows:
         by_type[job_type][status] = int(count)
+    real_terminal_by_type: dict[str, int] = defaultdict(int)
+    fixture_terminal_by_type: dict[str, int] = defaultdict(int)
+    error_code_by_type: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for job in jobs:
+        if job.status not in TERMINAL:
+            continue
+        if _is_fixture_job(job):
+            fixture_terminal_by_type[job.job_type] += 1
+        else:
+            real_terminal_by_type[job.job_type] += 1
+        if job.last_error_code:
+            error_code_by_type[job.job_type][job.last_error_code] += 1
 
     job_types = []
     for job_type in TRACKED_JOB_TYPES:
@@ -91,6 +113,9 @@ def build_report(*, window_hours: int, session: Session | None = None) -> dict:
                 "success_rate": rate,
                 "slo_target": SLO_SUCCESS_RATE,
                 "slo_met": rate is not None and rate >= SLO_SUCCESS_RATE,
+                "real_terminal_total": real_terminal_by_type.get(job_type, 0),
+                "fixture_terminal_total": fixture_terminal_by_type.get(job_type, 0),
+                "error_code_counts": dict(error_code_by_type.get(job_type, {})),
             }
         )
 
@@ -101,7 +126,8 @@ def build_report(*, window_hours: int, session: Session | None = None) -> dict:
         "stale_running_over_30m": int(stale_running),
         "notes": [
             "任务成功率按 SUCCESS + PARTIAL_SUCCESS / 终态任务统计。",
-            "需结合 Local Agent 实跑与运行中心失败分类进一步验收。",
+            "real_terminal_total 不包含 seed_xhs_slo_fixture.py 写入的夹具任务。",
+            "P1 真实验收建议使用 --require-real-data --min-terminal-per-type 50。",
         ],
     }
 
@@ -109,19 +135,32 @@ def build_report(*, window_hours: int, session: Session | None = None) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--window-hours", type=int, default=24)
+    parser.add_argument("--require-real-data", action="store_true")
+    parser.add_argument("--min-terminal-per-type", type=int, default=0)
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
     report = build_report(window_hours=args.window_hours)
+    real_data_ok = all(item["real_terminal_total"] >= args.min_terminal_per_type for item in report["job_types"])
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
+        if args.require_real_data and not real_data_ok:
+            sys.exit(3)
         return
     print(f"XHS SLO report (last {report['window_hours']}h)")
     for item in report["job_types"]:
         rate = item["success_rate"]
         rate_text = f"{rate * 100:.1f}%" if rate is not None else "n/a"
         status = "PASS" if item["slo_met"] else "FAIL"
-        print(f"- {item['job_type']}: success_rate={rate_text} terminal={item['terminal_total']} [{status}]")
+        print(
+            f"- {item['job_type']}: success_rate={rate_text} terminal={item['terminal_total']} "
+            f"real={item['real_terminal_total']} fixture={item['fixture_terminal_total']} [{status}]"
+        )
+        if item["error_code_counts"]:
+            print(f"  error_codes={item['error_code_counts']}")
     print(f"- stale_running_over_30m: {report['stale_running_over_30m']}")
+    if args.require_real_data and not real_data_ok:
+        print(f"真实终态样本不足：要求每类 >= {args.min_terminal_per_type}，请先用 Local Agent 实跑。")
+        sys.exit(3)
     if not all(item["slo_met"] for item in report["job_types"] if item["terminal_total"] > 0):
         sys.exit(2)
 

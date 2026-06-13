@@ -1,7 +1,7 @@
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
-from intelligence_engine.db.models import ReferenceLibraryEvent
+from intelligence_engine.db.models import CommentSnapshot, ReferenceLibraryEvent, utcnow
 from intelligence_engine.db.session import get_db
 from intelligence_engine.main import create_app
 from tests.test_intelligence_pool_product_fields import _seed_content
@@ -169,6 +169,56 @@ def test_reference_library_events_api_returns_audit_trail(db_session):
     event_types = [item["event_type"] for item in events.json()]
     assert "created" in event_types
     assert "updated" in event_types
+
+
+def test_reference_library_creative_material_preparation(db_session):
+    content = _seed_content(db_session)
+    db_session.add(
+        CommentSnapshot(
+            content_id=content.id,
+            platform_comment_id="comment-creative-1",
+            body_text="这个方案正好解决了我的投稿焦虑",
+            like_count=12,
+            fetched_at=utcnow(),
+            raw_payload_json={},
+        )
+    )
+    db_session.commit()
+    client = _client(db_session)
+    created = client.post(
+        f"/api/intelligence/contents/{content.id}/reference-library-items",
+        json={"library_type": "non_lead", "rating": "good", "material_tags": ["标题结构"]},
+    )
+    assert created.status_code == 200, created.text
+
+    response = client.post(
+        f"/api/reference-library/items/{created.json()['id']}/creative-material",
+        json={
+            "reusable_angles": ["焦虑场景切入"],
+            "selling_points": ["投稿规划"],
+            "pain_points": ["投稿焦虑"],
+            "risk_notes": ["避免夸大承诺"],
+            "applicable_business_type_ids": ["biz-1"],
+            "operator_note": "适合拆标题",
+            "material_tags": ["标题结构", "评论洞察"],
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    material = body["metadata"]["creative_material"]
+    assert material["title"] == "SCI投稿经验"
+    assert material["comment_highlights"][0]["body_text"] == "这个方案正好解决了我的投稿焦虑"
+    assert material["reusable_angles"] == ["焦虑场景切入"]
+    assert body["material_tags"] == ["标题结构", "评论洞察"]
+    assert body["note"] == "适合拆标题"
+    event = db_session.scalar(
+        select(ReferenceLibraryEvent).where(
+            ReferenceLibraryEvent.library_item_id == body["id"],
+            ReferenceLibraryEvent.event_type == "material_prepared",
+        )
+    )
+    assert event is not None
 
 
 def test_reference_library_list_and_pool_filters_by_p0_fields(db_session):

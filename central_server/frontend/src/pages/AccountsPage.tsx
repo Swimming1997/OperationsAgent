@@ -1,4 +1,4 @@
-import { LogIn, Plus, RefreshCw, Save, Trash2 } from 'lucide-react';
+import { LogIn, Play, Plus, RefreshCw, Save, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { getActiveAccountLogin, prepareBridgeChromeContext, resetAccountLogin, startAccountLogin, syncLocalBridgeLogin } from '../api/accountLogin';
 import {
@@ -10,7 +10,7 @@ import {
   startLocalBridgeChrome,
 } from '../api/localBridge';
 import { fetchOptions } from '../api/options';
-import { createAccount, createBusinessAccountType, deleteBusinessAccountType, getAccount, listAccounts, listAgents, listBusinessAccountTypes, listEmployees, registerMyLocalAgents, resolveDiscoveredLocalAgents, updateAccount, updateBusinessAccountType } from '../api/resources';
+import { createAccount, createBusinessAccountType, deleteBusinessAccountType, enqueueAccountPostedNotesJob, getAccount, listAccounts, listAgents, listBusinessAccountTypes, listEmployees, registerMyLocalAgents, resolveDiscoveredLocalAgents, updateAccount, updateBusinessAccountType } from '../api/resources';
 import { useAuth } from '../auth/AuthContext';
 import { ResourceSelect } from '../components/ResourceSelect';
 import { EmptyState, ErrorState, LoadingState } from '../components/Status';
@@ -89,6 +89,8 @@ export function AccountsPage({ role, userId }: Props) {
   const [registerCandidates, setRegisterCandidates] = useState<Array<{ agentId: string; discovered: LocalBridgeDiscoveredAgent }>>([]);
   const [bridgeAlivePorts, setBridgeAlivePorts] = useState<number[]>([]);
   const [businessTypeFilter, setBusinessTypeFilter] = useState('');
+  const [assetBusy, setAssetBusy] = useState(false);
+  const [assetMessage, setAssetMessage] = useState('');
   const readonly = false;
 
   const myEmployee = useMemo(
@@ -324,6 +326,7 @@ export function AccountsPage({ role, userId }: Props) {
     setLoginMessage('');
     setBridgeSession(null);
     setSelectedLoginAgentId('');
+    setAssetMessage('');
   }
 
   async function saveAccount() {
@@ -419,6 +422,21 @@ export function AccountsPage({ role, userId }: Props) {
       setLoginMessage(err instanceof Error ? err.message : '刷新失败');
     } finally {
       setLoginBusy(false);
+    }
+  }
+
+  async function handleEnqueueAccountPostedNotes() {
+    if (!selected?.id) return;
+    setAssetBusy(true);
+    setAssetMessage('');
+    setError('');
+    try {
+      const result = await enqueueAccountPostedNotesJob(role, selected.id, 20, userId);
+      setAssetMessage(`已创建 ${result.job_type} Job：${result.job_id.slice(0, 8)}...`);
+    } catch (err) {
+      setAssetMessage(err instanceof Error ? err.message : '创建账号资产读取任务失败');
+    } finally {
+      setAssetBusy(false);
     }
   }
 
@@ -880,6 +898,19 @@ export function AccountsPage({ role, userId }: Props) {
               <span>CDP 端口：{selected.login_cdp_port ?? '—'}</span>
               {selected.platform_nickname ? <span>平台昵称：{selected.platform_nickname}</span> : null}
               {bridgeSession ? <span>本机会话：{labelUsageStatus(bridgeSession.status === 'ready' ? 'ready' : bridgeSession.status === 'manual_verify_required' ? 'need_verify' : bridgeSession.status === 'expired' ? 'need_login' : 'unavailable')}</span> : null}
+            </div>
+          ) : null}
+          {!isCreate && selected ? (
+            <div className="detail-section">
+              <b>账号资产</b>
+              <span>读取当前账号已发布笔记，任务将在运行中心追踪。</span>
+              <div className="detail-actions">
+                <button type="button" className="secondary" disabled={assetBusy || selected.platform !== 'xhs'} onClick={() => void handleEnqueueAccountPostedNotes()}>
+                  <Play size={14} />
+                  {assetBusy ? '创建中' : '读取已发布笔记'}
+                </button>
+              </div>
+              {assetMessage ? <p className="login-hint">{assetMessage}</p> : null}
             </div>
           ) : null}
           <button type="button" onClick={() => void saveAccount()} disabled={readonly || !canCreate}>

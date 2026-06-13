@@ -39,16 +39,19 @@ def should_enqueue_detail_fetch(
     if policy == EnqueueDetailPolicy.CANDIDATE_ONLY.value:
         if is_candidate:
             return True
-        if parent_job_type == JobType.CREATOR_MONITOR.value:
+        if parent_job_type in {JobType.CREATOR_MONITOR.value, JobType.XHS_ACCOUNT_POSTED_NOTES.value}:
             return True
-        if candidate.source_surface == SourceSurface.CREATOR_MONITOR:
+        if candidate.source_surface in {SourceSurface.CREATOR_MONITOR, SourceSurface.ACCOUNT_POSTED_NOTES}:
             return True
         return False
 
     if policy == EnqueueDetailPolicy.THRESHOLD_ONLY.value:
         if is_candidate:
             return True
-        if parent_job_type == JobType.CREATOR_MONITOR.value or candidate.source_surface == SourceSurface.CREATOR_MONITOR:
+        if parent_job_type in {JobType.CREATOR_MONITOR.value, JobType.XHS_ACCOUNT_POSTED_NOTES.value} or candidate.source_surface in {
+            SourceSurface.CREATOR_MONITOR,
+            SourceSurface.ACCOUNT_POSTED_NOTES,
+        }:
             return True
         if candidate.visible_like_count is not None and candidate.visible_like_count >= settings.detail_auto_like_threshold:
             return True

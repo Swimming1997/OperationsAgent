@@ -14,6 +14,7 @@ import {
   getTaskTemplateRunReadiness,
   listTaskTemplates,
   listTemplateSchedules,
+  patchTaskSchedule,
   runTaskTemplate,
   type TaskFormData,
   type TaskScheduleFormData,
@@ -492,6 +493,24 @@ export function TasksPage({ role, userId, onOpenOperations }: Props) {
     }
   }
 
+  async function toggleSchedule(schedule: TaskSchedule) {
+    if (!selected) return;
+    setError('');
+    try {
+      await patchTaskSchedule(role, schedule.id, { enabled: !schedule.enabled }, userId);
+      setToast(schedule.enabled ? '定时调度已停用' : '定时调度已启用');
+      await reloadSchedules(selected.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '更新定时调度失败');
+    }
+  }
+
+  function scheduleAccountLabel(accountId: string | null) {
+    if (!accountId) return '-';
+    const account = resources.accounts.find((item) => item.id === accountId);
+    return account ? account.display_name : accountId;
+  }
+
   async function reloadRunContext(templateId: string) {
     try {
       setReadiness(await getTaskTemplateReadiness(role, templateId, userId));
@@ -730,9 +749,14 @@ export function TasksPage({ role, userId, onOpenOperations }: Props) {
                 <div className="mini-list">
                   {schedules.map((item) => (
                     <div key={item.id} className="mini-row passive">
-                      <span>{item.schedule_type}</span>
+                      <b>{item.schedule_type === 'interval_seconds' ? `每 ${item.interval_seconds || '-'} 秒` : item.schedule_type}</b>
                       <span>{item.enabled ? '启用' : '停用'}</span>
-                      <span>{item.executor_account_id}</span>
+                      <span>{scheduleAccountLabel(item.executor_account_id)}</span>
+                      <span>下次 {formatNullableTime(item.next_run_at)}</span>
+                      <span>上次 {formatNullableTime(item.last_run_at)}</span>
+                      <button type="button" className="inline-link" onClick={() => void toggleSchedule(item)}>
+                        {item.enabled ? '停用' : '启用'}
+                      </button>
                     </div>
                   ))}
                 </div>
@@ -864,6 +888,10 @@ function statusLabel(status: string) {
 
 function formatTime(value: string) {
   return new Date(value).toLocaleString('zh-CN', { hour12: false });
+}
+
+function formatNullableTime(value: string | null) {
+  return value ? formatTime(value) : '-';
 }
 
 function readableRunError(err: unknown) {

@@ -9,6 +9,7 @@ import {
   fetchProductDetail,
   fetchReferenceLibraryEvents,
   fetchReferenceLibraryItems,
+  prepareReferenceLibraryCreativeMaterial,
   reEvaluateReferenceLibraryItems,
   updateReferenceLibraryItem,
   type ReferenceLibraryFilters,
@@ -112,6 +113,13 @@ function formatCommentTime(value: string | null | undefined) {
   return new Date(value).toLocaleString('zh-CN', { hour12: false });
 }
 
+function splitInput(value: string): string[] {
+  return value
+    .split(/[,\n、]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
 function formatEventPayload(event: ReferenceLibraryEvent): string {
   const payload = event.event_payload || {};
   const parts: string[] = [];
@@ -160,13 +168,16 @@ export function BenchmarkLibraryPage({ role, userId, onOpenIntelligencePool, onO
   const [feedback, setFeedback] = useState('');
   const [reevaluating, setReevaluating] = useState(false);
   const [bulkWorking, setBulkWorking] = useState(false);
+  const [materialWorking, setMaterialWorking] = useState(false);
   const [reevaluateResults, setReevaluateResults] = useState<ReferenceLibraryReevaluateResult[]>([]);
   const [edit, setEdit] = useState({ library_type: 'uncategorized', rating: 'watching', note: '', selected_reason: '' });
+  const [materialForm, setMaterialForm] = useState({ note: '', tags: '', angles: '', risks: '' });
 
   const readOnly = isIntelligenceReadOnly(role);
   const canReevaluate = canReevaluateReference(role);
   const canEdit = canEditReferenceLibrary(role);
   const selected = useMemo(() => items.find((item) => item.id === selectedId) || null, [items, selectedId]);
+  const creativeMaterial = selected?.metadata?.creative_material as Record<string, unknown> | undefined;
   const canArchiveCurrent = selected ? canArchiveReference(role, selected, userId) : false;
   const archiveActionLabel = selected ? referenceArchiveActionLabel(role, selected, userId) : '移出对标库';
   const revokeRemaining = selected ? formatReferenceRevokeRemaining(selected) : null;
@@ -250,6 +261,13 @@ export function BenchmarkLibraryPage({ role, userId, onOpenIntelligencePool, onO
       note: selected.note || '',
       selected_reason: selected.selected_reason || '',
     });
+    const material = selected.metadata?.creative_material as Record<string, unknown> | undefined;
+    setMaterialForm({
+      note: String(material?.operator_note || selected.note || ''),
+      tags: (selected.material_tags || []).join('、'),
+      angles: Array.isArray(material?.reusable_angles) ? material.reusable_angles.join('、') : '',
+      risks: Array.isArray(material?.risk_notes) ? material.risk_notes.join('、') : '',
+    });
   }, [selected]);
 
   useEffect(() => {
@@ -312,6 +330,32 @@ export function BenchmarkLibraryPage({ role, userId, onOpenIntelligencePool, onO
     await updateReferenceLibraryItem(role, selected.id, edit, userId);
     setFeedback('对标条目已更新');
     await loadList(activeFilters, selected.id);
+  }
+
+  async function handlePrepareMaterial() {
+    if (!selected || !canEdit) return;
+    setMaterialWorking(true);
+    setDetailError('');
+    try {
+      await prepareReferenceLibraryCreativeMaterial(
+        role,
+        selected.id,
+        {
+          operator_note: materialForm.note,
+          material_tags: splitInput(materialForm.tags),
+          reusable_angles: splitInput(materialForm.angles),
+          risk_notes: splitInput(materialForm.risks),
+        },
+        userId,
+      );
+      setFeedback('素材准备已生成');
+      await loadList(activeFilters, selected.id);
+      setEvents(await fetchReferenceLibraryEvents(role, selected.id, userId));
+    } catch (err) {
+      setDetailError(err instanceof Error ? err.message : '素材准备生成失败');
+    } finally {
+      setMaterialWorking(false);
+    }
   }
 
   async function handleArchive() {
@@ -693,6 +737,58 @@ export function BenchmarkLibraryPage({ role, userId, onOpenIntelligencePool, onO
                     </button>
                   )}
                 </div>
+              </div>
+            )}
+
+            {selected && (
+              <div className="detail-section benchmark-edit-panel" data-testid="creative-material-panel">
+                <b>创作素材准备</b>
+                {creativeMaterial ? (
+                  <div className="mini-list">
+                    {creativeMaterial.title ? <div className="mini-row passive"><span>标题</span><span>{String(creativeMaterial.title)}</span></div> : null}
+                    {Array.isArray(creativeMaterial.comment_highlights) && creativeMaterial.comment_highlights.length > 0 ? (
+                      <div className="mini-row passive">
+                        <span>评论亮点</span>
+                        <span>{String((creativeMaterial.comment_highlights[0] as Record<string, unknown>).body_text || '')}</span>
+                      </div>
+                    ) : null}
+                    {Array.isArray(creativeMaterial.reusable_angles) && creativeMaterial.reusable_angles.length > 0 ? (
+                      <div className="mini-row passive"><span>可借鉴点</span><span>{creativeMaterial.reusable_angles.join('、')}</span></div>
+                    ) : null}
+                  </div>
+                ) : (
+                  <span className="muted-hint">尚未生成素材准备记录。</span>
+                )}
+                {canEdit ? (
+                  <>
+                    <input
+                      value={materialForm.tags}
+                      onChange={(event) => setMaterialForm((current) => ({ ...current, tags: event.target.value }))}
+                      placeholder="素材标签，用顿号或逗号分隔"
+                    />
+                    <input
+                      value={materialForm.angles}
+                      onChange={(event) => setMaterialForm((current) => ({ ...current, angles: event.target.value }))}
+                      placeholder="可借鉴点"
+                    />
+                    <input
+                      value={materialForm.risks}
+                      onChange={(event) => setMaterialForm((current) => ({ ...current, risks: event.target.value }))}
+                      placeholder="风险提示"
+                    />
+                    <textarea
+                      value={materialForm.note}
+                      onChange={(event) => setMaterialForm((current) => ({ ...current, note: event.target.value }))}
+                      placeholder="素材备注"
+                    />
+                    <div className="action-strip">
+                      <button type="button" disabled={materialWorking} onClick={() => void handlePrepareMaterial()}>
+                        <Check size={14} />
+                        {materialWorking ? '生成中' : '生成素材准备'}
+                      </button>
+                    </div>
+                  </>
+                ) : null}
               </div>
             )}
 
