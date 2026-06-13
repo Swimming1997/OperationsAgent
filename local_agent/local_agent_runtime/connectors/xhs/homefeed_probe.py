@@ -7,6 +7,7 @@ from playwright.async_api import Page
 
 from local_agent_runtime.contracts import FeedCandidateInput
 from local_agent_runtime.connectors.xhs.normalizer import candidate_field_report, coverage_from_field_report, normalize_xhs_card
+from local_agent_runtime.engine.pacing import PacingController
 
 
 CARD_EXTRACTION_SCRIPT = """
@@ -52,10 +53,18 @@ CARD_EXTRACTION_SCRIPT = """
 
 
 class XhsHomeFeedProbe:
-    def __init__(self, *, target_count: int = 50, max_scrolls: int = 30, scroll_pause_ms: int | None = None):
+    def __init__(
+        self,
+        *,
+        target_count: int = 50,
+        max_scrolls: int = 30,
+        scroll_pause_ms: int | None = None,
+        pacing: PacingController | None = None,
+    ):
         self.target_count = target_count
         self.max_scrolls = max_scrolls
         self.scroll_pause_ms = scroll_pause_ms or 1200
+        self.pacing = pacing or PacingController()
 
     async def collect(self, page: Page) -> tuple[list[FeedCandidateInput], dict[str, Any]]:
         started = time.perf_counter()
@@ -68,7 +77,7 @@ class XhsHomeFeedProbe:
             await page.goto("https://www.xiaohongshu.com/explore", wait_until="domcontentloaded", timeout=45000)
             page_goto_ms = (time.perf_counter() - goto_started) * 1000
             wait_started = time.perf_counter()
-            await page.wait_for_timeout(1500)
+            await self.pacing.initial_dwell(page)
             initial_wait_ms = (time.perf_counter() - wait_started) * 1000
         candidates_by_id: dict[str, FeedCandidateInput] = {}
         raw_cards_seen = 0
@@ -102,9 +111,8 @@ class XhsHomeFeedProbe:
             if no_growth_stop_count >= 3:
                 break
             scroll_started = time.perf_counter()
-            await page.mouse.wheel(0, 1800)
+            await self.pacing.human_scroll(page)
             actual_scroll_count += 1
-            await page.wait_for_timeout(self.scroll_pause_ms)
             scroll_ms += (time.perf_counter() - scroll_started) * 1000
         candidates = list(candidates_by_id.values())[: self.target_count]
         report = candidate_field_report(candidates, target_count=self.target_count)

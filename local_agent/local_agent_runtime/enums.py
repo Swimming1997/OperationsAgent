@@ -51,6 +51,10 @@ class JobType(str, Enum):
     COMMENT_FETCH = "comment_fetch"
     CREATOR_MONITOR = "creator_monitor"
     SEARCH_COLLECT = "search_collect"
+    # Canonical, platform-agnostic long-tail keyword (search suggestion) job.
+    # XHS_SEARCH_SUGGEST is kept as a legacy alias so existing central jobs and
+    # the XHS executor route unchanged while Douyin reuses SEARCH_SUGGEST.
+    SEARCH_SUGGEST = "search_suggest"
     XHS_SEARCH_SUGGEST = "xhs_search_suggest"
     MEDIA_DOWNLOAD = "media_download"
 

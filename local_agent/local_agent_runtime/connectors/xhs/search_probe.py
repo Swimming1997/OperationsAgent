@@ -23,7 +23,9 @@ from local_agent_runtime.connectors.xhs.normalizer import (
     coverage_from_field_report,
     normalize_xhs_search_card,
 )
+from local_agent_runtime.connectors.xhs.search_filter import apply_search_filters, filters_are_default
 from local_agent_runtime.contracts import FeedCandidateInput
+from local_agent_runtime.engine.pacing import PacingController
 
 
 class XhsSearchProbe:
@@ -39,22 +41,33 @@ class XhsSearchProbe:
         publish_time: str = "all",
         search_scope: str = "all",
         location_filter: str = "all",
+        start_rank: int = 0,
+        apply_filters: bool = True,
         skip_initial_goto: bool = False,
+        pacing: PacingController | None = None,
     ):
         self.keywords = [item.strip() for item in keywords if item and item.strip()]
         self.max_items = max_items
         self.max_scrolls_per_keyword = max_scrolls_per_keyword
         self.scroll_pause_ms = scroll_pause_ms or 1200
+        self.pacing = pacing or PacingController()
         self.search_sort = search_sort
         self.note_type = note_type
         self.publish_time = publish_time
         self.search_scope = search_scope
         self.location_filter = location_filter
+        self.start_rank = max(0, start_rank)
+        # Apply native filters when this probe owns the navigation (live job
+        # path). The smoke runner applies filters itself and passes
+        # skip_initial_goto=True, so it disables this to avoid double-clicking.
+        self.apply_filters = apply_filters
         self.skip_initial_goto = skip_initial_goto
 
     async def collect(self, page: Page) -> tuple[list[FeedCandidateInput], dict[str, Any]]:
         started = time.perf_counter()
-        per_keyword_target = max(1, self.max_items // max(len(self.keywords), 1))
+        # Collect enough to honor start_rank (skip first N) before slicing.
+        collect_target = self.start_rank + self.max_items
+        per_keyword_target = max(1, collect_target // max(len(self.keywords), 1))
         candidates_by_id: dict[str, FeedCandidateInput] = {}
         per_keyword_summary: list[dict[str, Any]] = []
         failed_keywords: list[str] = []
@@ -64,6 +77,18 @@ class XhsSearchProbe:
         initial_wait_ms = 0.0
         scroll_ms = 0.0
         dom_extract_ms = 0.0
+        filter_apply_ms = 0.0
+
+        requested_filters = build_search_filter_context(
+            search_sort=self.search_sort,
+            note_type=self.note_type,
+            publish_time=self.publish_time,
+            search_scope=self.search_scope,
+            location_filter=self.location_filter,
+        )
+        applied_filter_context: dict[str, Any] | None = None
+        filter_status = "not_applicable" if filters_are_default(requested_filters) else "not_implemented"
+        filter_diagnostics: dict[str, Any] = {}
 
         for keyword in self.keywords:
             keyword_seen = 0
@@ -77,8 +102,21 @@ class XhsSearchProbe:
                     )
                     page_goto_ms += (time.perf_counter() - goto_started) * 1000
                     wait_started = time.perf_counter()
-                    await page.wait_for_timeout(1200)
+                    await self.pacing.initial_dwell(page)
                     initial_wait_ms += (time.perf_counter() - wait_started) * 1000
+                    # Apply XHS native filters via the platform's own UI controls
+                    # so results are server-filtered (lowest detection risk).
+                    if self.apply_filters and not filters_are_default(requested_filters):
+                        ctx, status, diag, ms = await apply_search_filters(
+                            page,
+                            search_sort=self.search_sort,
+                            note_type=self.note_type,
+                            publish_time=self.publish_time,
+                        )
+                        filter_apply_ms += ms
+                        applied_filter_context = ctx
+                        filter_status = status
+                        filter_diagnostics = diag
                 no_growth_count = 0
                 for _ in range(self.max_scrolls_per_keyword + 1):
                     extract_started = time.perf_counter()
@@ -111,9 +149,9 @@ class XhsSearchProbe:
                             candidates_by_id[candidate.platform_content_id] = existing.model_copy(update={"raw_payload": old_payload})
                         else:
                             candidates_by_id[candidate.platform_content_id] = candidate
-                        if keyword_seen >= per_keyword_target or len(candidates_by_id) >= self.max_items:
+                        if keyword_seen >= per_keyword_target or len(candidates_by_id) >= collect_target:
                             break
-                    if keyword_seen >= per_keyword_target or len(candidates_by_id) >= self.max_items:
+                    if keyword_seen >= per_keyword_target or len(candidates_by_id) >= collect_target:
                         break
                     if len(candidates_by_id) == before_count:
                         no_growth_count += 1
@@ -122,9 +160,8 @@ class XhsSearchProbe:
                     if no_growth_count >= 3:
                         break
                     scroll_started = time.perf_counter()
-                    await page.mouse.wheel(0, 1600)
+                    await self.pacing.human_scroll(page)
                     actual_scroll_count += 1
-                    await page.wait_for_timeout(self.scroll_pause_ms)
                     scroll_ms += (time.perf_counter() - scroll_started) * 1000
             except Exception as exc:
                 failed_keywords.append(keyword)
@@ -132,7 +169,7 @@ class XhsSearchProbe:
                 continue
             per_keyword_summary.append({"keyword": keyword, "items_seen": keyword_seen, "error": None})
 
-        candidates = list(candidates_by_id.values())[: self.max_items]
+        candidates = list(candidates_by_id.values())[self.start_rank : self.start_rank + self.max_items]
         report = candidate_field_report(candidates, target_count=self.max_items)
         field_coverage = coverage_from_field_report(
             report,
@@ -147,15 +184,11 @@ class XhsSearchProbe:
                 "publish_time": self.publish_time,
                 "search_scope": self.search_scope,
                 "location_filter": self.location_filter,
-                "requested_filter_context": build_search_filter_context(
-                    search_sort=self.search_sort,
-                    note_type=self.note_type,
-                    publish_time=self.publish_time,
-                    search_scope=self.search_scope,
-                    location_filter=self.location_filter,
-                ),
-                "applied_filter_context": None,
-                "filter_apply_status": "not_implemented",
+                "requested_filter_context": requested_filters,
+                "applied_filter_context": applied_filter_context,
+                "filter_apply_status": filter_status,
+                "filter_diagnostics": filter_diagnostics,
+                "start_rank": self.start_rank,
                 "searched_keyword_count": len(self.keywords),
                 "failed_keyword_count": len(failed_keywords),
                 "failed_keywords": failed_keywords,
@@ -172,6 +205,7 @@ class XhsSearchProbe:
                     "initial_wait_ms": round(initial_wait_ms, 2),
                     "scroll_ms": round(scroll_ms, 2),
                     "dom_extract_ms": round(dom_extract_ms, 2),
+                    "filter_apply_ms": round(filter_apply_ms, 2),
                     "total_ms": round(elapsed * 1000, 2),
                     "items_per_second": round(len(candidates) / elapsed, 3) if candidates else 0.0,
                 },

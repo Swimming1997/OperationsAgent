@@ -15,6 +15,9 @@ from local_agent_runtime.connectors.xhs.cover_capture import attach_cover_bytes
 from local_agent_runtime.connectors.xhs.detail_probe import XhsDetailProbe
 from local_agent_runtime.connectors.xhs.homefeed_probe import XhsHomeFeedProbe
 from local_agent_runtime.connectors.xhs.search_suggest_probe import XhsSearchSuggestProbe
+from local_agent_runtime.connectors.douyin.feed_probe import DouyinFeedProbe
+from local_agent_runtime.connectors.douyin.suggest_probe import DouyinSearchSuggestProbe
+from local_agent_runtime.engine.search_config import SearchQueryConfig
 from local_agent_runtime.audit.summary import engine_audit_summary
 from local_agent_runtime.enums import ErrorCode, JobStatus, JobType, Platform, SessionStatus
 from local_agent_runtime.contracts import (
@@ -23,7 +26,9 @@ from local_agent_runtime.contracts import (
     DetailIngestionRequest,
     FeedCandidateIngestionRequest,
 )
-from local_agent_runtime.sessions.xhs_browser_session import XhsBrowserSessionProvider
+from local_agent_runtime.sessions.registry import default_session_registry
+from local_agent_runtime.engine.pacing import PacingController
+from local_agent_runtime.engine.session import SessionProviderRegistry
 
 
 @dataclass(frozen=True)
@@ -52,6 +57,7 @@ class AgentRuntimeConfig:
         JobType.CREATOR_MONITOR.value,
         JobType.SEARCH_COLLECT.value,
         JobType.XHS_SEARCH_SUGGEST.value,
+        JobType.SEARCH_SUGGEST.value,
     )
 
 
@@ -82,7 +88,13 @@ class RuntimeFailure(Exception):
 
 def build_agent_capabilities_payload(config: AgentRuntimeConfig) -> dict[str, Any]:
     return {
-        "platforms": [Platform.XHS.value],
+        "platforms": [Platform.XHS.value, Platform.DOUYIN.value],
+        # Per-platform job coverage: Douyin currently only implements keyword
+        # search collection; other Douyin job types are not wired yet.
+        "platform_job_types": {
+            Platform.XHS.value: list(config.supported_job_types),
+            Platform.DOUYIN.value: [JobType.SEARCH_COLLECT.value, JobType.SEARCH_SUGGEST.value],
+        },
         "supports_cdp": bool(config.cdp_url),
         "supports_account_login": config.supports_account_login,
         "job_types": list(config.supported_job_types),
@@ -302,17 +314,34 @@ class CenterClient:
         response.raise_for_status()
         return response.json()
 
+    async def ingest_search_suggestions(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Platform-agnostic long-tail keyword ingestion (payload carries platform)."""
+        response = await self._client.post(f"{self.base_url}/api/ingestion/search-suggestions", json=payload)
+        response.raise_for_status()
+        return response.json()
+
 
 class XhsJobExecutor:
-    def __init__(self, *, client: CenterClient, config: AgentRuntimeConfig):
+    def __init__(
+        self,
+        *,
+        client: CenterClient,
+        config: AgentRuntimeConfig,
+        session_registry: SessionProviderRegistry | None = None,
+    ):
         self.client = client
         self.config = config
+        self.session_registry = session_registry or default_session_registry
 
     async def execute(self, *, agent_id: str, job: ClaimedJobPayload) -> JobExecutionResult:
-        if (job.payload.get("platform") or Platform.XHS.value) != Platform.XHS.value:
-            return JobExecutionResult(status=JobStatus.PARTIAL_SUCCESS.value, result_summary={"unsupported_platform": job.payload.get("platform")})
+        platform = job.payload.get("platform") or Platform.XHS.value
+        # This executor only implements XHS probes. Douyin sessions are routable
+        # via the registry, but their probes are not wired here yet, so reject
+        # non-XHS jobs instead of running XHS probes on the wrong page.
+        if platform != Platform.XHS.value:
+            return JobExecutionResult(status=JobStatus.PARTIAL_SUCCESS.value, result_summary={"unsupported_platform": platform})
         session_meta = await self._session_meta(agent_id=agent_id, account_id=job.account_id)
-        session = await XhsBrowserSessionProvider().acquire(session_meta=session_meta)
+        session = await self.session_registry.create(platform).acquire(session_meta=session_meta)
         if session.status != SessionStatus.READY:
             await session.close()
             raise RuntimeFailure(_session_error_code(session.status), session.message or f"session status: {session.status.value}", retryable=True)
@@ -370,14 +399,17 @@ class XhsJobExecutor:
         payload = job.payload
         keywords = payload.get("keywords") or []
         max_items = int(payload.get("max_items") or 50)
+        # Accept both XHS-native keys and the unified vocabulary (sort/content_form),
+        # so XHS and Douyin search jobs share one config contract.
         candidates, report = await XhsSearchProbe(
             keywords=keywords,
             max_items=max_items,
-            search_sort=str(payload.get("search_sort") or "comprehensive"),
-            note_type=str(payload.get("note_type") or "all"),
+            search_sort=str(payload.get("search_sort") or payload.get("sort") or "comprehensive"),
+            note_type=str(payload.get("note_type") or payload.get("content_form") or "all"),
             publish_time=str(payload.get("publish_time") or "all"),
             search_scope=str(payload.get("search_scope") or "all"),
             location_filter=str(payload.get("location_filter") or "all"),
+            start_rank=int(payload.get("start_rank") or 0),
         ).collect(page)
         ingestion = await self.client.ingest_feed_candidates(
             FeedCandidateIngestionRequest(job_id=job.job_id, account_id=job.account_id, candidates=candidates)
@@ -591,6 +623,183 @@ class XhsJobExecutor:
         )
 
 
+class DouyinJobExecutor:
+    """Douyin job executor.
+
+    Currently implements keyword search collection via response interception
+    (validated against the live site). Other Douyin job types are deferred and
+    return a non-fatal ``partial_success`` so the central scheduler is not
+    blocked while they are being built.
+    """
+
+    SEARCH_CAPABILITY_KEY = "douyin.search.videos"
+
+    def __init__(
+        self,
+        *,
+        client: CenterClient,
+        config: AgentRuntimeConfig,
+        session_registry: SessionProviderRegistry | None = None,
+    ):
+        self.client = client
+        self.config = config
+        self.session_registry = session_registry or default_session_registry
+
+    SUPPORTED_JOB_TYPES = (JobType.SEARCH_COLLECT.value, JobType.SEARCH_SUGGEST.value)
+
+    async def execute(self, *, agent_id: str, job: ClaimedJobPayload) -> JobExecutionResult:
+        if job.job_type not in self.SUPPORTED_JOB_TYPES:
+            return JobExecutionResult(
+                status=JobStatus.PARTIAL_SUCCESS.value,
+                result_summary={"unsupported_job_type": job.job_type, "platform": Platform.DOUYIN.value},
+            )
+        session_meta = await self._session_meta(agent_id=agent_id, account_id=job.account_id)
+        session = await self.session_registry.create(Platform.DOUYIN.value).acquire(session_meta=session_meta)
+        if session.status != SessionStatus.READY:
+            await session.close()
+            raise RuntimeFailure(
+                _session_error_code(session.status),
+                session.message or f"session status: {session.status.value}",
+                retryable=True,
+            )
+        try:
+            if job.job_type == JobType.SEARCH_SUGGEST.value:
+                return await self._run_search_suggest(job, session.page)
+            return await self._run_search_collect(job, session.page)
+        finally:
+            await session.close()
+
+    async def _session_meta(self, *, agent_id: str, account_id: str | None) -> dict[str, Any]:
+        if account_id and account_id in self.config.account_sessions:
+            return dict(self.config.account_sessions[account_id])
+        if account_id:
+            try:
+                meta = await self.client.get_ready_session(account_id, agent_id)
+                if meta:
+                    return dict(meta)
+            except httpx.HTTPStatusError:
+                pass
+        if self.config.cdp_url:
+            return {"cdp_url": self.config.cdp_url}
+        raise RuntimeFailure(ErrorCode.SESSION_CONNECT_FAILED, "no ready account session and no fallback cdp_url", retryable=True)
+
+    async def _run_search_collect(self, job: ClaimedJobPayload, page) -> JobExecutionResult:
+        cfg = SearchQueryConfig.from_payload(job.payload)
+        per_keyword = max(1, cfg.max_items // max(len(cfg.keywords), 1)) if cfg.keywords else cfg.max_items
+        candidates_by_id: dict[str, FeedCandidateInput] = {}
+        per_keyword_summary: list[dict[str, Any]] = []
+        merged_report: dict[str, Any] = {}
+        for keyword in cfg.keywords:
+            probe = DouyinFeedProbe(
+                keyword=keyword,
+                target_count=per_keyword,
+                sort=cfg.sort,
+                publish_time=cfg.publish_time,
+                duration=cfg.duration,
+                start_rank=cfg.start_rank,
+            )
+            items, report = await probe.collect(page)
+            merged_report = report
+            for candidate in items:
+                candidates_by_id.setdefault(candidate.platform_content_id, candidate)
+            per_keyword_summary.append({"keyword": keyword, "items_seen": len(items)})
+        candidates = list(candidates_by_id.values())[: cfg.max_items]
+        ingestion = await self.client.ingest_feed_candidates(
+            FeedCandidateIngestionRequest(job_id=job.job_id, account_id=job.account_id, candidates=candidates)
+        )
+        results = ingestion.get("results") or []
+        new_count = sum(1 for item in results if item.get("is_new_content"))
+        detail_jobs = sum(1 for item in results if item.get("detail_job_enqueued"))
+        ingestion_total = len(results)
+        return JobExecutionResult(
+            status=JobStatus.SUCCESS.value,
+            checkpoint={"items_seen": len(candidates), "keywords": cfg.keywords},
+            result_summary={
+                **merged_report,
+                "platform": Platform.DOUYIN.value,
+                "keywords": cfg.keywords,
+                "sort": cfg.sort,
+                "publish_time": cfg.publish_time,
+                "duration": cfg.duration,
+                "start_rank": cfg.start_rank,
+                "per_keyword_summary": per_keyword_summary,
+                "normalized_items": len(candidates),
+                "ingestion_success_count": ingestion_total,
+                "new_content_count": new_count,
+                "duplicate_content_count": max(0, ingestion_total - new_count),
+                "detail_jobs_enqueued": detail_jobs,
+                "runtime": "local_agent_runtime_v1",
+                "engine_audit": engine_audit_summary(
+                    capability_key=self.SEARCH_CAPABILITY_KEY,
+                    surface="search",
+                    report=merged_report,
+                ),
+            },
+        )
+
+
+    async def _run_search_suggest(self, job: ClaimedJobPayload, page) -> JobExecutionResult:
+        payload = job.payload
+        core_keyword = str(payload.get("core_keyword") or payload.get("keyword") or "").strip()
+        items, report = await DouyinSearchSuggestProbe(core_keyword=core_keyword).collect(page)
+        ingestion_status = "skipped"
+        if items and hasattr(self.client, "ingest_search_suggestions"):
+            try:
+                await self.client.ingest_search_suggestions(
+                    {
+                        "job_id": job.job_id,
+                        "account_id": job.account_id,
+                        "platform": Platform.DOUYIN.value,
+                        "core_keyword": core_keyword,
+                        "items": items,
+                    }
+                )
+                ingestion_status = "ok"
+            except Exception:
+                # Central endpoint may not be deployed yet; keep the words in the
+                # result summary so the run is not lost, and report degraded.
+                ingestion_status = "failed"
+        return JobExecutionResult(
+            status=JobStatus.SUCCESS.value,
+            checkpoint={"suggestion_count": len(items)},
+            result_summary={
+                **report,
+                "platform": Platform.DOUYIN.value,
+                "core_keyword": core_keyword,
+                "suggestion_count": len(items),
+                "ingestion_status": ingestion_status,
+                "items": items,
+                "runtime": "local_agent_runtime_v1",
+            },
+        )
+
+
+class PlatformJobExecutor:
+    """Routes a claimed job to the executor for its ``payload.platform``."""
+
+    def __init__(
+        self,
+        *,
+        client: CenterClient,
+        config: AgentRuntimeConfig,
+        session_registry: SessionProviderRegistry | None = None,
+    ):
+        self._executors = {
+            Platform.XHS.value: XhsJobExecutor(client=client, config=config, session_registry=session_registry),
+            Platform.DOUYIN.value: DouyinJobExecutor(client=client, config=config, session_registry=session_registry),
+        }
+
+    async def execute(self, *, agent_id: str, job: ClaimedJobPayload) -> JobExecutionResult:
+        platform = job.payload.get("platform") or Platform.XHS.value
+        executor = self._executors.get(platform)
+        if executor is None:
+            return JobExecutionResult(
+                status=JobStatus.PARTIAL_SUCCESS.value,
+                result_summary={"unsupported_platform": platform},
+            )
+        return await executor.execute(agent_id=agent_id, job=job)
+
+
 class LocalAgentRuntime:
     def __init__(
         self,
@@ -599,12 +808,14 @@ class LocalAgentRuntime:
         client: CenterClientProtocol | None = None,
         executor: Any | None = None,
         login_executor: Any | None = None,
+        pacing: PacingController | None = None,
     ):
         self.config = config
         self.client = client or CenterClient(base_url=config.center_base_url)
         self.agent_id = config.agent_id
         self.executor = executor
         self.login_executor = login_executor
+        self.pacing = pacing or PacingController()
         self.running_job_ids: set[str] = set()
         self._last_heartbeat_at = 0.0
         self._registered_this_process = False
@@ -628,8 +839,13 @@ class LocalAgentRuntime:
         if self.config.supports_account_login:
             handled += await self._handle_login_sessions(agent_id)
         jobs = await self.client.claim_jobs(agent_id, self.config.supported_job_types, self.config.max_jobs_per_claim)
-        for job in jobs:
+        for index, job in enumerate(jobs):
             await self._handle_job(agent_id, job)
+            # Human-like gap between consecutive jobs on the same account so a
+            # batch does not fire as a uniform machine-gun burst. Skipped after
+            # the last job (next cycle's poll interval already spaces things).
+            if index < len(jobs) - 1:
+                await asyncio.sleep(self.pacing.inter_job_delay_ms() / 1000)
         return handled + len(jobs)
 
     async def _handle_login_sessions(self, agent_id: str) -> int:
@@ -682,7 +898,7 @@ class LocalAgentRuntime:
 
     async def _handle_job(self, agent_id: str, job: ClaimedJobPayload) -> None:
         self.running_job_ids.add(job.job_id)
-        executor = self.executor or XhsJobExecutor(client=self.client, config=self.config)
+        executor = self.executor or PlatformJobExecutor(client=self.client, config=self.config)
         try:
             await self.client.start_job(job.job_id, agent_id)
             result = await executor.execute(agent_id=agent_id, job=job)

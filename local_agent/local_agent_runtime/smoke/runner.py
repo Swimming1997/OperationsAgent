@@ -492,6 +492,7 @@ class XhsCapabilitySmokeRunner:
                 note_type=self.options.note_type,
                 publish_time=self.options.publish_time,
                 skip_initial_goto=True,
+                apply_filters=False,
             )
             candidates, report = await probe.collect(page)
             perf = report.get("perf") or {}
