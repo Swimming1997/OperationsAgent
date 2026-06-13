@@ -55,8 +55,9 @@ def extract_aweme_list(data: Any) -> list[dict[str, Any]]:
 
     Handles: ``{"aweme_list": [...]}`` (feed/user posts),
     ``{"data": [{"aweme_info": {...}}, ...]}`` (general search),
-    ``{"data": [<aweme>, ...]}``, and ``{"aweme_detail": {...}}`` (detail).
-    Any object carrying an ``aweme_id`` is treated as an aweme.
+    ``{"data": [<aweme>, ...]}``, ``{"aweme_detail": {...}}`` (detail), and the
+    jingxuan recommend feed which also carries items under ``chime_video_list``
+    and ``preload_awemes``. Any object carrying an ``aweme_id`` is an aweme.
     """
 
     if not isinstance(data, dict):
@@ -75,7 +76,7 @@ def extract_aweme_list(data: Any) -> list[dict[str, Any]]:
     if isinstance(detail, dict) and detail.get("aweme_id"):
         out.append(detail)
 
-    for key in ("aweme_list", "data", "cards"):
+    for key in ("aweme_list", "data", "cards", "chime_video_list", "preload_awemes"):
         container = data.get(key)
         if isinstance(container, list):
             for item in container:

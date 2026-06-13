@@ -170,3 +170,15 @@ def test_normalize_suggestions_falls_back_to_order_without_position():
 def test_normalize_suggestions_defensive():
     assert normalize_douyin_suggestions(None, core_keyword="x", fetched_at_iso="t") == []
     assert normalize_douyin_suggestions({"sug_list": "nope"}, core_keyword="x", fetched_at_iso="t") == []
+
+
+def test_extract_aweme_list_covers_recommend_feed_containers():
+    # jingxuan module/feed responses carry items under several keys; all aweme
+    # objects (with an aweme_id) should be pulled regardless of container.
+    data = {
+        "aweme_list": [{"aweme_id": "1"}],
+        "chime_video_list": [{"aweme_id": "2"}],
+        "preload_awemes": [{"aweme_id": "3"}, {"no_id": True}],
+    }
+    ids = [a["aweme_id"] for a in extract_aweme_list(data)]
+    assert ids == ["1", "2", "3"]

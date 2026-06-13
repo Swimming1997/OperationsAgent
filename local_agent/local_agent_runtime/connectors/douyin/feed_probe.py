@@ -122,6 +122,13 @@ class DouyinFeedProbe:
             await self.pacing.initial_dwell(page)
             initial_wait_ms = (time.perf_counter() - wait_started) * 1000
 
+            # The jingxuan recommend feed is a waterfall that paginates on wheel
+            # events over the grid. Park the cursor at the viewport center so the
+            # human-like mouse.wheel scrolls the feed (verified to trigger the
+            # module/feed XHR); search results scroll the document regardless.
+            if not self._is_search:
+                await self._center_cursor(page)
+
             no_growth = 0
             for _ in range(self.max_scrolls):
                 before = len(self._dedupe(collector.awemes))
@@ -190,6 +197,14 @@ class DouyinFeedProbe:
             ],
         }
         return candidates, report
+
+    @staticmethod
+    async def _center_cursor(page: Page) -> None:
+        try:
+            vp = await page.evaluate("() => ({w: window.innerWidth, h: window.innerHeight})")
+            await page.mouse.move(vp["w"] / 2, vp["h"] / 2)
+        except Exception:
+            pass
 
     @staticmethod
     def _dedupe(awemes: list[dict[str, Any]]) -> list[dict[str, Any]]:

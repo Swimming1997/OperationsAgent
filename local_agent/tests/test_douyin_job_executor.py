@@ -115,6 +115,39 @@ def test_douyin_executor_runs_search_collect(monkeypatch):
     assert len(client.ingested) == 1
 
 
+def test_douyin_executor_runs_homefeed(monkeypatch):
+    from local_agent_runtime.enums import SessionStatus
+
+    captured = []
+    _patch_probe(monkeypatch, captured)
+    session = FakeSession(SessionStatus.READY)
+    client = FakeIngestionClient()
+    executor = DouyinJobExecutor(
+        client=client,
+        config=AgentRuntimeConfig(cdp_url="http://127.0.0.1:9223"),
+        session_registry=FakeRegistry(session),
+    )
+    job = ClaimedJobPayload(
+        job_id="dy-feed",
+        job_type=JobType.FEED_COLLECT.value,
+        account_id=None,
+        payload={"platform": "douyin", "max_items": 20, "start_rank": 3},
+        checkpoint={},
+    )
+
+    result = asyncio.run(executor.execute(agent_id="agent-1", job=job))
+
+    assert result.status == JobStatus.SUCCESS.value
+    assert result.result_summary["normalized_items"] == 2
+    assert result.result_summary["start_rank"] == 3
+    # homefeed mode must not pass a keyword to the probe.
+    assert captured[0]["keyword"] is None
+    assert captured[0]["target_count"] == 20
+    assert captured[0]["start_rank"] == 3
+    assert len(client.ingested) == 1
+    assert session.closed is True
+
+
 def test_douyin_executor_runs_search_suggest(monkeypatch):
     from local_agent_runtime.enums import SessionStatus
 

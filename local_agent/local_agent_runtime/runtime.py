@@ -93,7 +93,11 @@ def build_agent_capabilities_payload(config: AgentRuntimeConfig) -> dict[str, An
         # search collection; other Douyin job types are not wired yet.
         "platform_job_types": {
             Platform.XHS.value: list(config.supported_job_types),
-            Platform.DOUYIN.value: [JobType.SEARCH_COLLECT.value, JobType.SEARCH_SUGGEST.value],
+            Platform.DOUYIN.value: [
+                JobType.SEARCH_COLLECT.value,
+                JobType.SEARCH_SUGGEST.value,
+                JobType.FEED_COLLECT.value,
+            ],
         },
         "supports_cdp": bool(config.cdp_url),
         "supports_account_login": config.supports_account_login,
@@ -633,6 +637,7 @@ class DouyinJobExecutor:
     """
 
     SEARCH_CAPABILITY_KEY = "douyin.search.videos"
+    FEED_CAPABILITY_KEY = "douyin.feed.recommend"
 
     def __init__(
         self,
@@ -645,7 +650,11 @@ class DouyinJobExecutor:
         self.config = config
         self.session_registry = session_registry or default_session_registry
 
-    SUPPORTED_JOB_TYPES = (JobType.SEARCH_COLLECT.value, JobType.SEARCH_SUGGEST.value)
+    SUPPORTED_JOB_TYPES = (
+        JobType.SEARCH_COLLECT.value,
+        JobType.SEARCH_SUGGEST.value,
+        JobType.FEED_COLLECT.value,
+    )
 
     async def execute(self, *, agent_id: str, job: ClaimedJobPayload) -> JobExecutionResult:
         if job.job_type not in self.SUPPORTED_JOB_TYPES:
@@ -665,6 +674,8 @@ class DouyinJobExecutor:
         try:
             if job.job_type == JobType.SEARCH_SUGGEST.value:
                 return await self._run_search_suggest(job, session.page)
+            if job.job_type == JobType.FEED_COLLECT.value:
+                return await self._run_homefeed(job, session.page)
             return await self._run_search_collect(job, session.page)
         finally:
             await session.close()
@@ -737,6 +748,44 @@ class DouyinJobExecutor:
             },
         )
 
+
+    async def _run_homefeed(self, job: ClaimedJobPayload, page) -> JobExecutionResult:
+        payload = job.payload
+        target_count = int(payload.get("max_items") or payload.get("target_count") or 30)
+        start_rank = int(payload.get("start_rank") or 0)
+        probe = DouyinFeedProbe(
+            keyword=None,
+            target_count=target_count,
+            start_rank=start_rank,
+        )
+        candidates, report = await probe.collect(page)
+        ingestion = await self.client.ingest_feed_candidates(
+            FeedCandidateIngestionRequest(job_id=job.job_id, account_id=job.account_id, candidates=candidates)
+        )
+        results = ingestion.get("results") or []
+        new_count = sum(1 for item in results if item.get("is_new_content"))
+        detail_jobs = sum(1 for item in results if item.get("detail_job_enqueued"))
+        ingestion_total = len(results)
+        return JobExecutionResult(
+            status=JobStatus.SUCCESS.value,
+            checkpoint={"items_seen": len(candidates), "start_rank": start_rank},
+            result_summary={
+                **report,
+                "platform": Platform.DOUYIN.value,
+                "start_rank": start_rank,
+                "normalized_items": len(candidates),
+                "ingestion_success_count": ingestion_total,
+                "new_content_count": new_count,
+                "duplicate_content_count": max(0, ingestion_total - new_count),
+                "detail_jobs_enqueued": detail_jobs,
+                "runtime": "local_agent_runtime_v1",
+                "engine_audit": engine_audit_summary(
+                    capability_key=self.FEED_CAPABILITY_KEY,
+                    surface="homefeed",
+                    report=report,
+                ),
+            },
+        )
 
     async def _run_search_suggest(self, job: ClaimedJobPayload, page) -> JobExecutionResult:
         payload = job.payload

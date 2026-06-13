@@ -14,7 +14,9 @@ DOUYIN_HOST = "https://www.douyin.com"
 
 # Web page URLs a human would visit.
 HOME_URL = f"{DOUYIN_HOST}/"
-RECOMMEND_URL = f"{DOUYIN_HOST}/?recommend=1"
+# The "精选" discover feed is a waterfall of recommended videos that paginates
+# on scroll via the module/feed XHR — this is our recommend-feed surface.
+RECOMMEND_URL = f"{DOUYIN_HOST}/jingxuan"
 
 
 # Canonical filter value → Douyin web search URL params. Sort/publish_time are
@@ -73,11 +75,12 @@ DETAIL_RESPONSE_PATH = "/aweme/v1/web/aweme/detail/"
 COMMENT_RESPONSE_PATH = "/aweme/v1/web/comment/list/"
 SUB_COMMENT_RESPONSE_PATH = "/aweme/v1/web/comment/list/reply/"
 USER_POSTS_RESPONSE_PATH = "/aweme/v1/web/aweme/post/"
-# The recommend feed XHR (path fragment may evolve; kept here as the single
-# place to update if Douyin changes it).
+# The recommend feed XHR. The 精选 waterfall paginates via module/feed (count=20
+# per page) returning plain JSON with an ``aweme_list``. Match without the API
+# version so both v1/v2 builds are covered (observed live: v2 module/feed).
 FEED_RESPONSE_PATHS = (
-    "/aweme/v1/web/tab/feed/",
-    "/aweme/v1/web/module/feed/",
+    "/web/tab/feed/",
+    "/web/module/feed/",
 )
 
 # Search box input selectors (first match wins), used to type a seed keyword
