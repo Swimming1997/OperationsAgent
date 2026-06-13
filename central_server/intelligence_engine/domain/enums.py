@@ -122,6 +122,8 @@ class JobType(str, Enum):
     COMMENT_FETCH = "comment_fetch"
     CREATOR_MONITOR = "creator_monitor"
     SEARCH_COLLECT = "search_collect"
+    # Canonical, platform-agnostic long-tail keyword job; XHS_SEARCH_SUGGEST kept as legacy alias.
+    SEARCH_SUGGEST = "search_suggest"
     XHS_SEARCH_SUGGEST = "xhs_search_suggest"
     MEDIA_DOWNLOAD = "media_download"
 
