@@ -2,12 +2,12 @@
 
 ## 扫描范围
 
-- `D:\AMiracle\local_agent\local_agent_runtime`
-- `D:\AMiracle\local_agent\scripts\run_local_agent.py`
-- `D:\AMiracle\local_agent\scripts\start.ps1`
-- `D:\AMiracle\local_agent\tests`
+- `local_agent\local_agent_runtime`
+- `local_agent\scripts\run_local_agent.py`
+- `local_agent\scripts\start.ps1`
+- `local_agent\tests`
 
-`D:\AMiracle\local_agent\scripts\dev_legacy` 不属于正式 runtime，单独列为 legacy 例外。
+`local_agent\scripts\dev_legacy` 不属于正式 runtime，单独列为 legacy 例外。
 
 ## 禁止项
 

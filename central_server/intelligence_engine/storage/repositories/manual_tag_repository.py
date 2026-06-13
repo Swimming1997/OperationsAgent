@@ -153,6 +153,8 @@ class ManualTagRepository:
             tags = list(self.db.scalars(select(ManualTag).where(ManualTag.id.in_(unique_ids))))
             if len(tags) != len(unique_ids):
                 raise ValueError("tag not found")
+            by_id = {tag.id: tag for tag in tags}
+            tags = [by_id[tag_id] for tag_id in unique_ids]
         else:
             tags = []
         self.db.query(ContentManualTag).filter(ContentManualTag.content_id == content_id).delete()

@@ -209,6 +209,8 @@ export type ProductDetail = {
     author_name: string | null;
     cover_url: string | null;
     cover_display_url: string | null;
+    image_urls?: string[];
+    image_display_urls?: string[];
     like_count: number | null;
     comment_count: number | null;
     collect_count: number | null;
@@ -292,6 +294,8 @@ export type TaskTemplateDetail = {
   platform: string | null;
   account_id: string | null;
   business_account_type_id: string | null;
+  created_by_user_id?: string | null;
+  permissions?: TaskTemplatePermissions;
   config: Record<string, unknown>;
   enabled: boolean;
   typed_payload: Record<string, unknown>;

@@ -2,7 +2,7 @@
 
 本文按**真实操作顺序**编写，假设你已用 `reset_demo_environment.py` 把系统恢复到「空库 + 默认角色」状态。
 
-下文路径均相对于**仓库根目录**（例如 `OperationsAgent\`），不再使用硬编码 `D:\AMiracle\`。
+下文路径均相对于**仓库根目录**（例如 `OperationsAgent\`），不再使用硬编码的旧绝对路径。
 
 ---
 
@@ -174,7 +174,7 @@ Profile 实际路径：
 local_agent\profiles\accounts\{profile_key}\
 ```
 
-`profile_key` 由中央分配（形如 `accounts/<uuid>`），**不要**手动指定 `D:\AMiracle\profiles\` 等旧路径。
+`profile_key` 由中央分配（形如 `accounts/<uuid>`），**不要**手动指定旧的本机绝对路径。
 
 ### 4.1 启动 Local Agent
 
@@ -279,7 +279,7 @@ cd local_agent
 
 **Session ready**：账号会话健康为可用（Agent 在线 + 登录完成）。可在账号详情查看 session 状态。
 
-双账号隔离验收见：`stage-3f-dual-account-login.md`。
+双账号隔离验收以本手册中的账号、Agent 绑定和运行中心结果为准；旧阶段单独验收文档已归档移除。
 
 ---
 

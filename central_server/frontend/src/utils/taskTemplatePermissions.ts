@@ -1,6 +1,9 @@
 import type { PlatformAccount, Role, TaskTemplateListItem } from '../types/api';
 
-type TemplateLike = Pick<TaskTemplateListItem, 'created_by_user_id' | 'permissions'>;
+type TemplateLike = {
+  created_by_user_id?: TaskTemplateListItem['created_by_user_id'];
+  permissions?: TaskTemplateListItem['permissions'];
+};
 
 export function canCreateTaskTemplate(role: Role): boolean {
   return role === 'admin' || role === 'supervisor' || role === 'operator';

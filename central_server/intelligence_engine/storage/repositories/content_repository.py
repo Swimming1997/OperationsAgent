@@ -12,7 +12,7 @@ from intelligence_engine.db.models import (
     utcnow,
 )
 from intelligence_engine.config import get_settings
-from intelligence_engine.domain.enums import CandidateBucket, JobType, Platform
+from intelligence_engine.domain.enums import CandidateBucket, JobStatus, JobType, Platform
 from intelligence_engine.domain.schemas import CommentSnapshotInput, DetailSnapshotInput, FeedCandidateInput
 from intelligence_engine.db.models import Job
 from intelligence_engine.filtering.candidate_classifier import (
@@ -39,6 +39,13 @@ def xhs_platform_context(*contexts: dict | None) -> dict:
 
 
 INVALID_FEED_AUTHOR_NAMES = frozenset({"我", "我的", "首页", "发现", "推荐", "关注", "消息", "搜索", "登录", "发布"})
+
+ACTIVE_DETAIL_JOB_STATUSES = {
+    JobStatus.PENDING.value,
+    JobStatus.CLAIMED.value,
+    JobStatus.RUNNING.value,
+    JobStatus.PAUSED.value,
+}
 
 
 def sanitize_feed_author_name(value: str | None) -> str | None:
@@ -86,6 +93,16 @@ def _filter_config_from_rule_set(db: Session, rule_set_id: str | None) -> Intell
 class ContentRepository:
     def __init__(self, db: Session):
         self.db = db
+
+    def has_active_detail_job(self, content_id: str) -> bool:
+        stmt = (
+            select(Job.id)
+            .where(Job.job_type == JobType.DETAIL_FETCH.value)
+            .where(Job.status.in_(ACTIVE_DETAIL_JOB_STATUSES))
+            .where(Job.payload_json["content_id"].as_string() == content_id)
+            .limit(1)
+        )
+        return self.db.scalar(stmt) is not None
 
     def get_by_platform_identity(self, *, platform: str, platform_content_id: str) -> ContentIdentity | None:
         return self.db.scalar(
@@ -205,7 +222,7 @@ class ContentRepository:
                 feed_prelim_pass=feed_prelim_pass,
                 parent_job_type=parent_job_type,
             )
-        if (is_new or not content.latest_snapshot_id) and should_enqueue:
+        if (is_new or not content.latest_snapshot_id) and should_enqueue and not self.has_active_detail_job(content.id):
             metadata_context = (content.metadata_json or {}).get("platform_context", {})
             platform_context = (
                 xhs_platform_context(metadata_context, candidate.platform_context)

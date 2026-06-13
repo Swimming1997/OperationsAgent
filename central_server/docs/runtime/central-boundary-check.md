@@ -2,10 +2,10 @@
 
 ## 扫描范围
 
-- `D:\AMiracle\central_server\intelligence_engine`
-- `D:\AMiracle\central_server\scripts`
+- `central_server\intelligence_engine`
+- `central_server\scripts`
 
-`D:\AMiracle\central_server\scripts\dev_legacy` 不属于正式中央运行路径，单独列为 legacy 例外。
+`central_server\scripts\dev_legacy` 不属于正式中央运行路径，单独列为 legacy 例外。
 
 ## 禁止 import
 

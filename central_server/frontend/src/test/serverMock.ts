@@ -247,7 +247,7 @@ export function installFetchMock(config: FetchMockConfig = {}) {
     if (url.includes('/api/behavior-profiles')) return json(behaviorProfiles);
     if (url.includes('/api/network-egress-profiles')) return json(networkProfiles);
     if (url.includes('/api/risk-policies')) return json(riskPolicies);
-    if (url.includes('/api/media/cover/')) {
+    if (url.includes('/api/media/cover/') || url.includes('/api/media/image/')) {
       const gif = Uint8Array.from(atob('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7'), (char) => char.charCodeAt(0));
       return Promise.resolve(new Response(gif, { status: 200, headers: { 'Content-Type': 'image/gif' } }));
     }

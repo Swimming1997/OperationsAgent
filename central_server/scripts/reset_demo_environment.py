@@ -379,7 +379,7 @@ def main() -> int:
 
     print()
     print("下一步建议：")
-    print("  1. central_server\scripts\start.ps1 启动前后端（见 docs/demo/clean-start-customer-test-playbook.md）")
+    print("  1. central_server\scripts\start.ps1 启动前后端（见 docs/README.md）")
     print("  2. 浏览器打开前端，完成「初始化管理员」与组织管理")
     print("  3. 创建员工、账号、Agent，按 playbook 跑三类引擎")
     return 0

@@ -108,9 +108,10 @@ describe('IntelligencePage', () => {
   it('shows image fallback after cover load failure', async () => {
     installFetchMock();
     const { container } = render(<IntelligencePage role="supervisor" userId="supervisor-user" />);
-    await screen.findByText('SCI论文投稿避坑');
-    const image = container.querySelector('img');
+    await screen.findByText('这是一条详情正文');
+    const image = container.querySelector('.xhs-note-detail img');
     expect(image).toBeTruthy();
+    fireEvent.error(image as HTMLImageElement);
     fireEvent.error(image as HTMLImageElement);
     expect(await screen.findByText('无图')).toBeInTheDocument();
   });

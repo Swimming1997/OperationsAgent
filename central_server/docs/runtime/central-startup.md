@@ -58,5 +58,6 @@ INTEL_ENGINE_MEDIA_ROOT=./data/media
 
 ## 相关文档
 
+- 文档索引：`docs/README.md`
 - 客户首跑手册：`docs/demo/clean-start-customer-test-playbook.md`
-- Local Agent 运行时：`docs/runtime/local-agent-runtime-v1.md`
+- Local Agent 运行时：`../../local_agent/docs/runtime/local-agent-runtime-v1.md`

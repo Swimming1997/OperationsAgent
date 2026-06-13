@@ -1,4 +1,4 @@
-# AMiracle Local Agent — employee workstation template (Stage 3F)
+# AMiracle Local Agent — employee workstation template
 #
 # Copy to a private path if needed, e.g. configs/local_agent.my.toml
 # and set:  set LOCAL_AGENT_CONFIG=configs\local_agent.my.toml
@@ -47,4 +47,4 @@ cdp_url = "http://127.0.0.1:9222"
 # Central must see capabilities.supports_account_login for login session claim.
 
 [accounts]
-# Optional legacy per-account CDP overrides (Stage 3F login uses profile_key from central)
+# Optional legacy per-account CDP overrides. Current account login uses profile_key from central.

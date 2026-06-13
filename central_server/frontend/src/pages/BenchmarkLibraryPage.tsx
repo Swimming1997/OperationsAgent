@@ -28,8 +28,9 @@ import {
   referenceArchiveActionLabel,
   shouldUseReferenceRevokeEndpoint,
 } from '../utils/intelligencePermissions';
+import { NoteImageCarousel } from '../components/NoteImageCarousel';
 import { SafeImage } from '../components/SafeImage';
-import { coverSrc } from '../utils/mediaUrl';
+import { coverSrc, noteImageSlides } from '../utils/mediaUrl';
 import { EmptyState, ErrorState, LoadingState } from '../components/Status';
 import type { ManualTag, ProductDetail, ReferenceLibraryEvent, ReferenceLibraryItem, ReferenceLibraryReevaluateResult, Role } from '../types/api';
 import {
@@ -617,11 +618,9 @@ export function BenchmarkLibraryPage({ role, userId, onOpenIntelligencePool, onO
                   </span>
                 </div>
               </div>
-              <SafeImage
-                src={coverSrc(detail?.latest_snapshot) ?? coverSrc(selected)}
-                className="detail-cover"
-                frameClassName="cover-media-frame cover-media-frame-detail"
-                placeholderClassName="detail-cover-placeholder"
+              <NoteImageCarousel
+                slides={noteImageSlides(detail?.latest_snapshot ?? selected)}
+                alt={selected.title || detail?.latest_snapshot?.title || '笔记图片'}
               />
               <div className="xhs-note-copy">
                 <div className="detail-title">{selected.title || detail?.latest_snapshot?.title || '未命名内容'}</div>

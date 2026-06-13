@@ -341,6 +341,20 @@ button.secondary:disabled { opacity: 0.45; cursor: not-allowed; }
 .cover-media-frame-detail { max-height: min(42vh, 300px); min-height: 120px; }
 .cover-media-frame-detail .detail-cover { width: auto; height: auto; max-width: 100%; max-height: min(42vh, 300px); object-fit: contain; object-position: center; border: 0; border-radius: 0; background: transparent; }
 .cover-media-frame-detail .detail-cover-placeholder { width: 100%; height: 100%; min-height: 140px; display: flex; align-items: center; justify-content: center; border: 0; border-radius: 0; background: repeating-linear-gradient(135deg, #10151d, #10151d 8px, #141b25 8px, #141b25 16px); color: var(--muted); font-size: 12px; }
+.note-image-carousel { position: relative; touch-action: pan-y; user-select: none; }
+.note-image-carousel-track { display: flex; width: 100%; height: 100%; transition: transform 220ms ease; will-change: transform; }
+.note-image-carousel-track.is-dragging { transition: none; cursor: grabbing; }
+.note-image-carousel-slide { flex: 0 0 100%; display: flex; align-items: center; justify-content: center; min-width: 100%; height: 100%; }
+.note-image-carousel-nav { position: absolute; top: 50%; z-index: 2; transform: translateY(-50%); width: 28px; height: 28px; border: 0; border-radius: 999px; display: grid; place-items: center; background: rgba(8, 12, 18, 0.72); color: #fff; cursor: pointer; opacity: 0; transition: opacity 160ms ease, background 160ms ease; }
+.note-image-carousel:hover .note-image-carousel-nav { opacity: 1; }
+.note-image-carousel-nav:disabled { opacity: 0 !important; cursor: default; }
+.note-image-carousel-nav-prev { left: 8px; }
+.note-image-carousel-nav-next { right: 8px; }
+.note-image-carousel-nav:not(:disabled):hover { background: rgba(8, 12, 18, 0.92); }
+.note-image-carousel-dots { position: absolute; left: 50%; bottom: 8px; z-index: 2; transform: translateX(-50%); display: flex; gap: 5px; padding: 4px 8px; border-radius: 999px; background: rgba(8, 12, 18, 0.55); }
+.note-image-carousel-dot { width: 6px; height: 6px; border: 0; border-radius: 999px; padding: 0; background: rgba(255, 255, 255, 0.35); cursor: pointer; }
+.note-image-carousel-dot.is-active { width: 14px; background: #fff; }
+.note-image-carousel-counter { position: absolute; top: 8px; right: 8px; z-index: 2; padding: 2px 8px; border-radius: 999px; background: rgba(8, 12, 18, 0.62); color: #fff; font-size: 11px; line-height: 1.6; }
 .detail-cover { width: 100%; max-height: 190px; object-fit: contain; object-position: center; border: 1px solid var(--line); border-radius: 6px; background: #0b1017; }
 .detail-cover-placeholder { width: 100%; height: 160px; display: flex; align-items: center; justify-content: center; border: 1px solid var(--line); border-radius: 6px; background: repeating-linear-gradient(135deg, #10151d, #10151d 8px, #141b25 8px, #141b25 16px); color: var(--muted); font-size: 12px; }
 .body-text { margin: 0; color: #c4ccd8; font-size: 13px; line-height: 1.6; max-height: 120px; overflow: auto; }

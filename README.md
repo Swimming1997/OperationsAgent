@@ -65,7 +65,6 @@ npm run build
 
 | 文档 | 说明 |
 |------|------|
-| `central_server/docs/demo/clean-start-customer-test-playbook.md` | 客户从零首跑手册 |
-| `central_server/docs/demo/stage-3f-local-agent-startup.md` | Stage 3F 启动与 Agent 绑定 |
-| `central_server/docs/runtime/central-startup.md` | 中央服务运行时说明 |
-| `local_agent/docs/runtime/local-agent-runtime-v1.md` | Local Agent 运行时说明 |
+| `central_server/docs/README.md` | 当前需求、验收、运行和边界文档入口 |
+| `central_server/docs/guidance/p0-intelligence-center-design-v1.md` | P0 当前设计与验收清单 |
+| `central_server/docs/demo/clean-start-customer-test-playbook.md` | reset 后从零首跑手册 |

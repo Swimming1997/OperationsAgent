@@ -139,6 +139,25 @@ class MediaService:
             ordered.append(meta_cover)
         return ordered
 
+    @classmethod
+    def iter_note_image_urls(
+        cls,
+        snapshot: ContentSnapshot | None,
+        metadata: dict | None = None,
+    ) -> list[str]:
+        seen: set[str] = set()
+        ordered: list[str] = []
+        if snapshot:
+            for url in snapshot.image_urls_json or []:
+                candidate = str(url or "").strip()
+                if candidate and candidate not in seen:
+                    seen.add(candidate)
+                    ordered.append(candidate)
+        if ordered:
+            return ordered
+        effective_cover = cls.resolve_effective_cover_url(snapshot, metadata)
+        return [effective_cover] if effective_cover else []
+
     def resolve_after_detail_ingest(self, snapshot: ContentSnapshot) -> None:
         cover_url = self.resolve_effective_cover_url(snapshot)
         if not cover_url:
@@ -186,6 +205,26 @@ class MediaService:
         ).hexdigest()
         return hmac.compare_digest(expected, signature)
 
+    def sign_image_token(self, content_id: str, index: int, expires_at: int | None = None) -> tuple[int, str]:
+        expires = expires_at or int(time.time()) + self.settings.media_url_ttl_seconds
+        payload = f"{content_id}:{index}:{expires}"
+        signature = hmac.new(
+            self.settings.media_signing_key.encode("utf-8"),
+            payload.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        return expires, signature
+
+    def verify_image_token(self, content_id: str, index: int, expires_at: int, signature: str) -> bool:
+        if index < 1 or expires_at < int(time.time()):
+            return False
+        expected = hmac.new(
+            self.settings.media_signing_key.encode("utf-8"),
+            f"{content_id}:{index}:{expires_at}".encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        return hmac.compare_digest(expected, signature)
+
     def build_cover_display_url_for_snapshot(
         self,
         content_id: str,
@@ -214,6 +253,19 @@ class MediaService:
             return None
         expires, signature = self.sign_cover_token(content_id)
         return f"/api/media/cover/{content_id}?e={expires}&s={signature}"
+
+    def build_image_display_url(self, content_id: str, index: int) -> str:
+        expires, signature = self.sign_image_token(content_id, index)
+        return f"/api/media/image/{content_id}?i={index}&e={expires}&s={signature}"
+
+    def build_image_display_urls_for_snapshot(
+        self,
+        content_id: str,
+        snapshot: ContentSnapshot | None,
+        metadata: dict | None = None,
+    ) -> list[str]:
+        image_urls = self.iter_note_image_urls(snapshot, metadata)
+        return [self.build_image_display_url(content_id, index) for index in range(1, len(image_urls) + 1)]
 
     def fetch_remote_cover(self, url: str) -> tuple[bytes, str] | None:
         return self.download_cover(url)

@@ -260,7 +260,10 @@ def start_job(job_id: str, request: JobStartRequest, db: Session = Depends(get_d
     job = repo.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="job not found")
-    repo.mark_started(job, agent_id=request.agent_id)
+    try:
+        repo.mark_started(job, agent_id=request.agent_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     db.commit()
     return _job_read(job)
 
@@ -271,7 +274,10 @@ def progress_job(job_id: str, request: JobProgressRequest, db: Session = Depends
     job = repo.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="job not found")
-    repo.update_checkpoint(job, checkpoint=request.checkpoint, partial_metrics=request.partial_metrics)
+    try:
+        repo.update_checkpoint(job, checkpoint=request.checkpoint, partial_metrics=request.partial_metrics, agent_id=request.agent_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     db.commit()
     return _job_read(job)
 
@@ -282,7 +288,10 @@ def complete_job(job_id: str, request: JobCompleteRequest, db: Session = Depends
     job = repo.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="job not found")
-    repo.mark_success(job, status=request.status, result_summary=request.result_summary)
+    try:
+        repo.mark_success(job, status=request.status, result_summary=request.result_summary, agent_id=request.agent_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if job.task_run_id:
         from intelligence_engine.services.task_materialization import TaskMaterializationService
 
@@ -299,7 +308,16 @@ def fail_job(job_id: str, request: JobFailRequest, db: Session = Depends(get_db)
     job = repo.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="job not found")
-    repo.mark_failed(job, error_code=_enum_value(request.error.code), error_message=request.error.message, checkpoint=request.checkpoint)
+    try:
+        repo.mark_failed(
+            job,
+            error_code=_enum_value(request.error.code),
+            error_message=request.error.message,
+            checkpoint=request.checkpoint,
+            agent_id=request.agent_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     db.commit()
     return _job_read(job)
 
