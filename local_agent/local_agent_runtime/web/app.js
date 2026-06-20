@@ -284,7 +284,8 @@ async function fetchContentDetail(contentId) {
     body: "{}",
   });
   if (!result.task_id) return;
-  await pollTask(result.task_id);
+  const finalStatus = await pollTask(result.task_id);
+  if (finalStatus !== "success" || state.selectedId !== contentId) return;
   const refreshed = await api(`/api/local/contents/${contentId}`);
   if (refreshed.detail_fetched_at) {
     await loadDetail(contentId);
@@ -413,7 +414,7 @@ async function pollTask(taskId) {
     el("searchButton").disabled = false;
     state.activeTaskId = null;
     await loadContents();
-    return;
+    return effectiveStatus;
   }
   if (effectiveStatus === "failed") {
     el("searchButton").disabled = false;
@@ -422,15 +423,18 @@ async function pollTask(taskId) {
       ? JSON.parse(task.latest_run.error_summary_json).message
       : "采集失败";
     toast(message || "采集失败");
-    return;
+    return effectiveStatus;
   }
   if (effectiveStatus === "paused") {
     el("searchButton").disabled = false;
     state.activeTaskId = null;
     toast("任务已暂停");
-    return;
+    return effectiveStatus;
   }
-  state.pollTimer = window.setTimeout(() => pollTask(taskId).catch((error) => toast(error.message)), 1200);
+  await new Promise((resolve) => {
+    state.pollTimer = window.setTimeout(resolve, 1200);
+  });
+  return pollTask(taskId);
 }
 
 el("searchForm").addEventListener("submit", async (event) => {

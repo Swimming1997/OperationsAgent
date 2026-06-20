@@ -10,8 +10,9 @@
 | `guidance/p0-acceptance-results.md` | P0 已验收基线：性能与 XHS SLO 验收记录 |
 | `guidance/p1-development-plan.md` | P1 已验收基线：开发落地计划、范围边界、主线拆解与验收清单 |
 | `guidance/p1-acceptance-results.md` | P1 功能落地、真实 XHS SLO 与最终验收记录 |
-| `guidance/p2-development-plan.md` | P2 当前开发入口：Local-First 开发落地计划、任务优先级、工程红线与验收清单 |
+| `guidance/p2-development-plan.md` | P2 已验收基线：Local-First 开发落地计划、任务优先级、工程红线与验收清单 |
 | `guidance/p2-acceptance-runbook.md` | P2 开发验收、真实账号 smoke、20+ Agent 和 PostgreSQL 恢复演练流程 |
+| `guidance/p3-agent-assistance-development-plan.md` | P3 当前开发入口：管理员配置第三方网关/API Key、Codex CLI 接入、辅助筛选与仿写工作流 |
 | `operations/postgresql-production.md` | PostgreSQL 生产部署、Alembic、备份校验与恢复演练 |
 
 ## 运行与排障
@@ -35,7 +36,8 @@
 ## 文档维护规则
 
 - P0/P1 文档是已验收基线，除勘误外不再扩需求。
-- P2 需求先更新 `guidance/p2-development-plan.md`，再开发实现。
-- `../../待开发计划/` 下的 2026-06-13 文档仅作为背景材料；其中优先级、架构取舍和排期若与 `guidance/p2-development-plan.md` 冲突，以 `guidance/p2-development-plan.md` 为准。
+- P2 已完成开发验收，部署验收继续以 `guidance/p2-acceptance-runbook.md` 为准。
+- P3 智能体能力需求先更新 `guidance/p3-agent-assistance-development-plan.md`，再开发实现。
+- `../../待开发计划/` 下的 2026-06-13 文档仅作为背景材料；其中优先级、架构取舍和排期若与 P2/P3 正式计划冲突，以 `guidance/` 下对应阶段计划为准。
 - 历史方案、评审草稿、一次性阶段手册不要继续新增到主文档树。
 - 若需要保留旧材料，请放到外部归档，不作为仓库内开发入口。
