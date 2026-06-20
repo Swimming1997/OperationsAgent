@@ -1,19 +1,21 @@
 from __future__ import annotations
 
 import asyncio
-import json
+import hmac
 import logging
 import re
 from dataclasses import dataclass
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
 from typing import Any
-from urllib.parse import parse_qs, urlparse
 
 from local_agent_runtime.account_login_executor import AccountLoginExecutor
 from local_agent_runtime.chrome_launcher import launch_managed_chrome
+from local_agent_runtime.local_bridge_http import build_local_bridge_handler, is_trusted_origin
+from local_agent_runtime.local_workspace import LocalWorkspaceServiceMixin
 from local_agent_runtime.runtime import AgentRuntimeConfig
+from local_agent_runtime.storage.repository import LocalIntelligenceRepository
 
 
 @dataclass(frozen=True)
@@ -24,12 +26,38 @@ class LocalBridgeConfig:
     token: str | None = None
 
 
-class LocalBridgeService:
-    def __init__(self, *, config: AgentRuntimeConfig, loop: asyncio.AbstractEventLoop):
+class LocalBridgeService(LocalWorkspaceServiceMixin):
+    def __init__(
+        self,
+        *,
+        config: AgentRuntimeConfig,
+        loop: asyncio.AbstractEventLoop,
+        repository: LocalIntelligenceRepository | None = None,
+        collection_service: Any | None = None,
+        action_service: Any | None = None,
+    ):
         self.config = config
         self.loop = loop
         self.project_root = Path(config.project_root or Path.cwd()).resolve()
+        self.repository = repository
+        self.web_root = Path(__file__).resolve().parent / "web"
         self._probe_executor = AccountLoginExecutor(project_root=self.project_root, client=_NoopClient())
+        if collection_service is not None:
+            self.local_collection = collection_service
+        elif repository is not None:
+            from local_agent_runtime.local_tasks import LocalCollectionService
+
+            self.local_collection = LocalCollectionService(config=config, repository=repository)
+        else:
+            self.local_collection = None
+        if action_service is not None:
+            self.local_actions = action_service
+        elif repository is not None:
+            from local_agent_runtime.local_actions import LocalContentActionService
+
+            self.local_actions = LocalContentActionService(config=config, repository=repository)
+        else:
+            self.local_actions = None
         # account_id -> cdp_url，由本进程 chrome/start 或前端传入端口写入
         self._runtime_account_cdp: dict[str, str] = {}
 
@@ -37,7 +65,21 @@ class LocalBridgeService:
         expected = self.config.local_bridge_token
         if not expected:
             return True
-        return bool(token and token == expected)
+        return bool(token and hmac.compare_digest(token, expected))
+
+    def authorize_request(
+        self,
+        *,
+        token: str | None,
+        origin: str | None,
+        host: str | None,
+        fetch_site: str | None,
+    ) -> bool:
+        if self.config.local_bridge_token:
+            return self.require_token(token)
+        if fetch_site and fetch_site.lower() == "cross-site":
+            return False
+        return is_trusted_origin(origin, host)
 
     def launch_chrome(self, payload: dict[str, Any]) -> dict[str, Any]:
         account_id = str(payload.get("account_id") or "").strip() or None
@@ -132,13 +174,14 @@ class LocalBridgeService:
     ) -> dict[str, Any]:
         return self.probe_account_session(account_id, cdp_port=cdp_port, cdp_url=cdp_url)
 
-    def _run_async(self, coro):
+    def _run_async(self, coro, *, timeout: float = 65):
         future = asyncio.run_coroutine_threadsafe(coro, self.loop)
-        return future.result(timeout=30)
-
+        return future.result(timeout=timeout)
 
 class LocalBridgeServer:
     def __init__(self, *, bridge_config: LocalBridgeConfig, service: LocalBridgeService):
+        if bridge_config.token != service.config.local_bridge_token:
+            raise ValueError("Local Bridge token must match AgentRuntimeConfig.local_bridge_token")
         self.bridge_config = bridge_config
         self.service = service
         self._server: ThreadingHTTPServer | None = None
@@ -147,7 +190,7 @@ class LocalBridgeServer:
     def start(self) -> None:
         if not self.bridge_config.enabled:
             return
-        handler_cls = _build_handler(self.service)
+        handler_cls = build_local_bridge_handler(self.service)
         self._server = ThreadingHTTPServer((self.bridge_config.host, self.bridge_config.port), handler_cls)
         self._thread = Thread(target=self._server.serve_forever, name="local-bridge", daemon=True)
         self._thread.start()
@@ -165,151 +208,11 @@ class LocalBridgeServer:
             self._thread.join(timeout=2)
 
 
-def _build_handler(service: LocalBridgeService):
-    session_status_pattern = re.compile(r"^/bridge/accounts/([^/]+)/session-status$")
-    revalidate_pattern = re.compile(r"^/bridge/accounts/([^/]+)/revalidate$")
-
-    class Handler(BaseHTTPRequestHandler):
-        def do_OPTIONS(self):
-            self.send_response(204)
-            self._set_cors_headers()
-            self.send_header("Content-Length", "0")
-            self.end_headers()
-
-        def do_GET(self):
-            parsed = urlparse(self.path)
-            if parsed.path == "/healthz":
-                self._write_json(200, {"status": "ok"})
-                return
-            if parsed.path == "/bridge/agents/discover":
-                self._write_json(
-                    200,
-                    {
-                        "items": [
-                            {
-                                "device_name": service.config.device_name,
-                                "machine_fingerprint": service.config.machine_fingerprint,
-                                "agent_id": service.config.agent_id,
-                                "center_url": service.config.center_base_url,
-                                "bridge_url": f"http://{service.config.local_bridge_host}:{service.config.local_bridge_port}",
-                                "bridge_port": service.config.local_bridge_port,
-                                "status": "online",
-                            }
-                        ]
-                    },
-                )
-                return
-
-            token = _extract_token(self.headers.get("Authorization"), parse_qs(parsed.query).get("token", [None])[0])
-            if not service.require_token(token):
-                self._write_json(401, {"detail": "invalid token"})
-                return
-
-            match = session_status_pattern.match(parsed.path)
-            if not match:
-                self._write_json(404, {"detail": "not found"})
-                return
-            account_id = match.group(1)
-            query = parse_qs(parsed.query)
-            cdp_port = _query_int(query.get("cdp_port", [None])[0])
-            try:
-                result = service.probe_account_session(account_id, cdp_port=cdp_port)
-                self._write_json(200, result)
-            except Exception as exc:
-                self._write_json(500, {"detail": str(exc)})
-
-        def do_POST(self):
-            parsed = urlparse(self.path)
-            token = _extract_token(self.headers.get("Authorization"), parse_qs(parsed.query).get("token", [None])[0])
-            if not service.require_token(token):
-                self._write_json(401, {"detail": "invalid token"})
-                return
-
-            body = self._read_json_body()
-            if parsed.path == "/bridge/chrome/start":
-                try:
-                    result = service.launch_chrome(body)
-                    self._write_json(200, result)
-                except ValueError as exc:
-                    self._write_json(400, {"detail": str(exc)})
-                except Exception as exc:
-                    self._write_json(500, {"detail": str(exc)})
-                return
-
-            match = revalidate_pattern.match(parsed.path)
-            if match:
-                account_id = match.group(1)
-                cdp_port = body.get("cdp_port")
-                if cdp_port is not None:
-                    cdp_port = int(cdp_port)
-                cdp_url = str(body.get("cdp_url") or "").strip() or None
-                try:
-                    result = service.revalidate_account_session(
-                        account_id,
-                        cdp_port=cdp_port,
-                        cdp_url=cdp_url,
-                    )
-                    self._write_json(200, result)
-                except Exception as exc:
-                    self._write_json(500, {"detail": str(exc)})
-                return
-
-            self._write_json(404, {"detail": "not found"})
-
-        def log_message(self, format: str, *args):  # noqa: A003
-            return
-
-        def _read_json_body(self) -> dict[str, Any]:
-            length = int(self.headers.get("Content-Length") or 0)
-            if length <= 0:
-                return {}
-            payload = self.rfile.read(length).decode("utf-8")
-            if not payload:
-                return {}
-            return json.loads(payload)
-
-        def _write_json(self, status: int, payload: dict[str, Any]):
-            data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-            self.send_response(status)
-            self._set_cors_headers()
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
-
-        def _set_cors_headers(self):
-            origin = self.headers.get("Origin")
-            allow_origin = origin if origin in {"http://127.0.0.1:5173", "http://localhost:5173"} else "*"
-            self.send_header("Access-Control-Allow-Origin", allow_origin)
-            self.send_header("Vary", "Origin")
-            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-            self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
-
-    return Handler
-
-
-def _extract_token(auth_header: str | None, query_token: str | None) -> str | None:
-    if auth_header and auth_header.lower().startswith("bearer "):
-        return auth_header.split(" ", 1)[1].strip()
-    if query_token:
-        return query_token
-    return None
-
-
 def _extract_port(cdp_url: str) -> int | None:
     match = re.match(r"^https?://[^:]+:(\d+)", cdp_url.strip())
     if not match:
         return None
     return int(match.group(1))
-
-
-def _query_int(value: str | None) -> int | None:
-    if value is None or str(value).strip() == "":
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
 
 
 class _NoopClient:

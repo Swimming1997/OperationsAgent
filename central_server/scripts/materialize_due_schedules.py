@@ -6,6 +6,7 @@ from pathlib import Path
 from sqlalchemy import select
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from intelligence_engine.db.models import TaskSchedule, utcnow
 from intelligence_engine.db.session import SessionLocal

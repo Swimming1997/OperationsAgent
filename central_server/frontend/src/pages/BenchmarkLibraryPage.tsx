@@ -1,5 +1,5 @@
 import { Archive, Bookmark, Check, ExternalLink, Heart, MessageCircle, RotateCcw, Scale, Search } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { FilterSearchRow } from '../components/FilterSearchRow';
 import { ListPaginationBar } from '../components/ListPaginationBar';
 import {
@@ -172,6 +172,8 @@ export function BenchmarkLibraryPage({ role, userId, onOpenIntelligencePool, onO
   const [reevaluateResults, setReevaluateResults] = useState<ReferenceLibraryReevaluateResult[]>([]);
   const [edit, setEdit] = useState({ library_type: 'uncategorized', rating: 'watching', note: '', selected_reason: '' });
   const [materialForm, setMaterialForm] = useState({ note: '', tags: '', angles: '', risks: '' });
+  const listRequestRef = useRef(0);
+  const detailRequestRef = useRef(0);
 
   const readOnly = isIntelligenceReadOnly(role);
   const canReevaluate = canReevaluateReference(role);
@@ -214,10 +216,12 @@ export function BenchmarkLibraryPage({ role, userId, onOpenIntelligencePool, onO
 
   const loadList = useCallback(
     async (filters = activeFilters, preferredItemId?: string | null, preferredContentId?: string | null) => {
+      const requestId = ++listRequestRef.current;
       setLoadingList(true);
       setListError('');
       try {
         const response = await fetchReferenceLibraryItems(role, filters, userId);
+        if (requestId !== listRequestRef.current) return;
         setItems(response.items);
         setTotal(response.total);
         let nextId: string | null = null;
@@ -233,9 +237,10 @@ export function BenchmarkLibraryPage({ role, userId, onOpenIntelligencePool, onO
         setBulkIds((current) => current.filter((id) => response.items.some((item) => item.id === id)));
         syncUrl(filters, nextId);
       } catch (err) {
+        if (requestId !== listRequestRef.current) return;
         setListError(err instanceof Error ? err.message : '列表加载失败');
       } finally {
-        setLoadingList(false);
+        if (requestId === listRequestRef.current) setLoadingList(false);
       }
     },
     [activeFilters, role, syncUrl, userId],
@@ -278,16 +283,24 @@ export function BenchmarkLibraryPage({ role, userId, onOpenIntelligencePool, onO
     }
     setLoadingDetail(true);
     setDetailError('');
+    const requestId = ++detailRequestRef.current;
     Promise.all([
       fetchProductDetail(role, selected.content_id, userId),
       fetchReferenceLibraryEvents(role, selected.id, userId),
     ])
       .then(([nextDetail, nextEvents]) => {
+        if (requestId !== detailRequestRef.current) return;
         setDetail(nextDetail);
         setEvents(nextEvents);
       })
-      .catch((err) => setDetailError(err instanceof Error ? err.message : '详情加载失败'))
-      .finally(() => setLoadingDetail(false));
+      .catch((err) => {
+        if (requestId === detailRequestRef.current) {
+          setDetailError(err instanceof Error ? err.message : '详情加载失败');
+        }
+      })
+      .finally(() => {
+        if (requestId === detailRequestRef.current) setLoadingDetail(false);
+      });
   }, [selected, role, userId]);
 
   function applySearch() {

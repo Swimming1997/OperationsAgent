@@ -1,7 +1,7 @@
 import asyncio
 from datetime import datetime, timezone
 
-import local_agent_runtime.runtime as runtime_module
+import local_agent_runtime.executors.douyin as douyin_executor_module
 from local_agent_runtime.runtime import (
     AgentRuntimeConfig,
     ClaimedJobPayload,
@@ -48,6 +48,9 @@ class FakeIngestionClient:
     def __init__(self):
         self.ingested = []
         self.suggestions = []
+        self.details = []
+        self.comments = []
+        self.creators = []
 
     async def ingest_feed_candidates(self, payload):
         self.ingested.append(payload)
@@ -59,6 +62,18 @@ class FakeIngestionClient:
 
     async def get_ready_session(self, account_id, agent_id):
         return {}
+
+    async def ingest_detail(self, payload):
+        self.details.append(payload)
+        return {"snapshot_id": "snapshot-1", "comment_job_enqueued": True}
+
+    async def ingest_comments(self, payload):
+        self.comments.append(payload)
+        return {"inserted": len(payload.comments), "updated": 0, "lead_keyword_hits": 1}
+
+    async def ingest_creator_monitor_items(self, payload):
+        self.creators.append(payload)
+        return {"items_seen": len(payload.items), "new_content_count": len(payload.items)}
 
 
 def _candidate(cid):
@@ -81,7 +96,7 @@ def _patch_probe(monkeypatch, captured):
         async def collect(self, page):
             return [_candidate("111"), _candidate("222")], {"intercepted_responses": 1, "filter_apply_status": "url_params"}
 
-    monkeypatch.setattr(runtime_module, "DouyinFeedProbe", FakeProbe)
+    monkeypatch.setattr(douyin_executor_module, "DouyinFeedProbe", FakeProbe)
 
 
 def test_douyin_executor_runs_search_collect(monkeypatch):
@@ -162,7 +177,7 @@ def test_douyin_executor_runs_search_suggest(monkeypatch):
             ]
             return items, {"intercepted_responses": 1, "suggestion_count": 2, "typed_selector": "input"}
 
-    monkeypatch.setattr(runtime_module, "DouyinSearchSuggestProbe", FakeSuggestProbe)
+    monkeypatch.setattr(douyin_executor_module, "DouyinSearchSuggestProbe", FakeSuggestProbe)
     session = FakeSession(SessionStatus.READY)
     client = FakeIngestionClient()
     executor = DouyinJobExecutor(
@@ -187,12 +202,19 @@ def test_douyin_executor_runs_search_suggest(monkeypatch):
     assert session.closed is True
 
 
-def test_douyin_executor_rejects_unsupported_job_type(monkeypatch):
+def test_douyin_executor_runs_detail_fetch(monkeypatch):
     from local_agent_runtime.enums import SessionStatus
 
+    class FakeDetailProbe:
+        async def fetch_detail(self, page, **kwargs):
+            from local_agent_runtime.contracts import DetailSnapshotInput
+            return DetailSnapshotInput(title="详情", raw_payload={"diagnostics": {"fetch_source": "xhr_intercept"}})
+
+    monkeypatch.setattr(douyin_executor_module, "DouyinDetailProbe", FakeDetailProbe)
     session = FakeSession(SessionStatus.READY)
+    client = FakeIngestionClient()
     executor = DouyinJobExecutor(
-        client=FakeIngestionClient(),
+        client=client,
         config=AgentRuntimeConfig(cdp_url="http://127.0.0.1:9223"),
         session_registry=FakeRegistry(session),
     )
@@ -200,13 +222,84 @@ def test_douyin_executor_rejects_unsupported_job_type(monkeypatch):
         job_id="dy-2",
         job_type=JobType.DETAIL_FETCH.value,
         account_id=None,
-        payload={"platform": "douyin"},
+        payload={"platform": "douyin", "content_id": "content-1", "platform_content_id": "aweme-1"},
         checkpoint={},
     )
 
     result = asyncio.run(executor.execute(agent_id="agent-1", job=job))
-    assert result.status == JobStatus.PARTIAL_SUCCESS.value
-    assert result.result_summary["unsupported_job_type"] == JobType.DETAIL_FETCH.value
+    assert result.status == JobStatus.SUCCESS.value
+    assert result.result_summary["snapshot_id"] == "snapshot-1"
+    assert len(client.details) == 1
+
+
+def test_douyin_executor_runs_comment_fetch(monkeypatch):
+    from local_agent_runtime.enums import SessionStatus
+    from local_agent_runtime.connectors.douyin.comment_probe import DouyinCommentFetchResult
+    from local_agent_runtime.contracts import CommentSnapshotInput
+
+    class FakeCommentProbe:
+        async def fetch_comments_result(self, page, **kwargs):
+            return DouyinCommentFetchResult(
+                comments=[CommentSnapshotInput(platform_comment_id="c-1", body_text="怎么买")],
+                surface_status="ok",
+            )
+
+    monkeypatch.setattr(douyin_executor_module, "DouyinCommentProbe", FakeCommentProbe)
+    session = FakeSession(SessionStatus.READY)
+    client = FakeIngestionClient()
+    executor = DouyinJobExecutor(
+        client=client,
+        config=AgentRuntimeConfig(cdp_url="http://127.0.0.1:9223"),
+        session_registry=FakeRegistry(session),
+    )
+    job = ClaimedJobPayload(
+        job_id="dy-comment",
+        job_type=JobType.COMMENT_FETCH.value,
+        account_id=None,
+        payload={"platform": "douyin", "content_id": "content-1", "platform_content_id": "aweme-1"},
+        checkpoint={},
+    )
+
+    result = asyncio.run(executor.execute(agent_id="agent-1", job=job))
+    assert result.status == JobStatus.SUCCESS.value
+    assert result.result_summary["comments_inserted"] == 1
+    assert len(client.comments) == 1
+
+
+def test_douyin_executor_runs_creator_monitor(monkeypatch):
+    from local_agent_runtime.enums import SessionStatus
+    from local_agent_runtime.connectors.douyin.creator_probe import DouyinCreatorFetchResult
+
+    class FakeCreatorProbe:
+        async def fetch_latest(self, page, **kwargs):
+            return DouyinCreatorFetchResult(
+                creator_platform_id="sec-1",
+                creator_display_name="作者",
+                items=[_candidate("aweme-1")],
+                profile={"follower_count": 100},
+                raw_payload={"source_path": "user_posts_response_intercept"},
+            )
+
+    monkeypatch.setattr(douyin_executor_module, "DouyinCreatorProbe", FakeCreatorProbe)
+    session = FakeSession(SessionStatus.READY)
+    client = FakeIngestionClient()
+    executor = DouyinJobExecutor(
+        client=client,
+        config=AgentRuntimeConfig(cdp_url="http://127.0.0.1:9223"),
+        session_registry=FakeRegistry(session),
+    )
+    job = ClaimedJobPayload(
+        job_id="dy-creator",
+        job_type=JobType.CREATOR_MONITOR.value,
+        account_id=None,
+        payload={"platform": "douyin", "creator_monitor_id": "monitor-1", "creator_platform_id": "sec-1"},
+        checkpoint={},
+    )
+
+    result = asyncio.run(executor.execute(agent_id="agent-1", job=job))
+    assert result.status == JobStatus.SUCCESS.value
+    assert result.result_summary["creator_platform_id"] == "sec-1"
+    assert len(client.creators) == 1
 
 
 def test_platform_dispatch_routes_to_douyin(monkeypatch):

@@ -144,3 +144,37 @@ def test_runner_search_collect_mock_items(tmp_path: Path):
     assert report["item_count"] == 1
     assert report["items"][0]["search_keyword"] == "医学sci求助"
     assert report["filter_apply_status"] == "not_applicable"
+
+
+def test_login_check_keeps_valid_when_self_info_is_unavailable(tmp_path: Path):
+    fake_page = AsyncMock()
+    fake_page.url = "https://www.xiaohongshu.com/explore"
+    fake_page.context = AsyncMock()
+    options = SmokeRunOptions(
+        capability="login_check",
+        profile_key="collector_01",
+        project_root=tmp_path,
+        output_dir=tmp_path,
+    )
+
+    async def _run():
+        async def fake_acquire(self, state):
+            state.diagnostics["session_status"] = "ready"
+            return fake_page
+
+        async def fake_capture(self, page, state, *, base_name):
+            return None
+
+        with patch.object(XhsCapabilitySmokeRunner, "_acquire_page", fake_acquire):
+            with patch.object(XhsCapabilitySmokeRunner, "_close_session", AsyncMock()):
+                with patch.object(XhsCapabilitySmokeRunner, "_capture_artifacts", fake_capture):
+                    with patch(
+                        "local_agent_runtime.smoke.runner.browser_context_cookie_header",
+                        AsyncMock(side_effect=RuntimeError("temporary 500")),
+                    ):
+                        return await XhsCapabilitySmokeRunner(options).run()
+
+    report = asyncio.run(_run())
+    assert report["status"] == "success"
+    assert report["payload"]["login_status"] == "valid"
+    assert "temporary 500" in report["diagnostics"]["self_info_warning"]

@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from intelligence_engine.audit.intelligence_center_audit import run_intelligence_center_audit, write_audit_outputs
 from intelligence_engine.db.init_db import init_db

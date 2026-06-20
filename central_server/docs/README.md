@@ -11,6 +11,8 @@
 | `guidance/p1-development-plan.md` | P1 已验收基线：开发落地计划、范围边界、主线拆解与验收清单 |
 | `guidance/p1-acceptance-results.md` | P1 功能落地、真实 XHS SLO 与最终验收记录 |
 | `guidance/p2-development-plan.md` | P2 当前开发入口：Local-First 开发落地计划、任务优先级、工程红线与验收清单 |
+| `guidance/p2-acceptance-runbook.md` | P2 开发验收、真实账号 smoke、20+ Agent 和 PostgreSQL 恢复演练流程 |
+| `operations/postgresql-production.md` | PostgreSQL 生产部署、Alembic、备份校验与恢复演练 |
 
 ## 运行与排障
 

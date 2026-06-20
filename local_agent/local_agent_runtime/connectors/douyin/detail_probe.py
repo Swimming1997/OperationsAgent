@@ -47,13 +47,13 @@ class DouyinDetailProbe:
         page.on("response", on_resp)
         resolved_url = canonical_url or dy_field.build_video_url(aweme_id)
         await page.goto(resolved_url, wait_until="domcontentloaded", timeout=45000)
-        await self.pacing.human_pause("page_load")
+        await self.pacing.initial_dwell(page)
         # The detail XHR fires shortly after load; poll briefly for it.
         for _ in range(10):
             if captured:
                 break
             await page.wait_for_timeout(600)
-        await self.pacing.human_pause("settle")
+        await page.wait_for_timeout(300)
         try:
             page.remove_listener("response", on_resp)
         except Exception:
@@ -84,5 +84,10 @@ class DouyinDetailProbe:
         }
         if not aweme:
             diagnostics["status"] = "detail_unavailable"
-            return DetailSnapshotInput(platform_content_id=aweme_id, raw_payload={}, diagnostics=diagnostics)
+            return DetailSnapshotInput(
+                raw_payload={
+                    "aweme_id": aweme_id,
+                    "diagnostics": diagnostics,
+                }
+            )
         return normalize_douyin_detail(aweme, platform_content_id=aweme_id, diagnostics=diagnostics)

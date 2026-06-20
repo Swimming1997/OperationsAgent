@@ -56,6 +56,7 @@ import {
 } from './intelligence/scenarioPresets';
 import { useTaskRunRefreshEffect } from '../context/TaskRunRefreshContext';
 import { useIntelligenceKeyboard } from './intelligence/useIntelligenceKeyboard';
+import { useDebouncedValue } from '../utils/useDebouncedValue';
 
 type Props = {
   role: Role;
@@ -118,6 +119,9 @@ export function IntelligencePage({ role, userId, initialContentId, onOpenReferen
   const [lastFetchJobId, setLastFetchJobId] = useState<string | null>(null);
   const [reevaluating, setReevaluating] = useState(false);
   const [reevaluateResults, setReevaluateResults] = useState<ReferenceLibraryReevaluateResult[]>([]);
+  const listRequestRef = useRef(0);
+  const detailRequestRef = useRef(0);
+  const debouncedAdvancedFilterState = useDebouncedValue(advancedFilterState, 250);
 
   const resolvedAdvancedFilters = useMemo(
     () => resolveScenarioFilters(materializeScenarioFilterState(advancedFilterState)),
@@ -126,12 +130,12 @@ export function IntelligencePage({ role, userId, initialContentId, onOpenReferen
 
   const listQueryFilters = useMemo(
     (): IntelligenceFilters =>
-      buildActiveListFilters(advancedFilterState, quickFilters, {
+      buildActiveListFilters(debouncedAdvancedFilterState, quickFilters, {
         contentQuery: appliedContentQuery || undefined,
         page: String(page),
         pageSize,
       }),
-    [advancedFilterState, quickFilters, appliedContentQuery, page],
+    [debouncedAdvancedFilterState, quickFilters, appliedContentQuery, page],
   );
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
@@ -191,6 +195,7 @@ export function IntelligencePage({ role, userId, initialContentId, onOpenReferen
   const loadList = useCallback(
     async (preferredContentId?: string | null, pageOverride?: number) => {
       const targetPage = pageOverride ?? page;
+      const requestId = ++listRequestRef.current;
       setLoadingList(true);
       setError('');
       try {
@@ -199,6 +204,7 @@ export function IntelligencePage({ role, userId, initialContentId, onOpenReferen
           { ...listQueryFilters, page: String(targetPage), page_size: pageSize },
           userId,
         );
+        if (requestId !== listRequestRef.current) return;
         setItems(response.items);
         setTotal(response.total);
         if (targetPage !== page) setPage(targetPage);
@@ -219,9 +225,10 @@ export function IntelligencePage({ role, userId, initialContentId, onOpenReferen
         setSelectedId(nextSelected);
         syncUrl(nextSelected, targetPage);
       } catch (err) {
+        if (requestId !== listRequestRef.current) return;
         setError(err instanceof Error ? err.message : '加载失败');
       } finally {
-        setLoadingList(false);
+        if (requestId === listRequestRef.current) setLoadingList(false);
       }
     },
     [listQueryFilters, page, role, selectedId, syncUrl, userId],
@@ -270,7 +277,7 @@ export function IntelligencePage({ role, userId, initialContentId, onOpenReferen
   useEffect(() => {
     if (!filtersLoaded) return;
     void loadList();
-  }, [filtersLoaded, page, scenario, advancedFilterState, quickFilters, appliedContentQuery]);
+  }, [filtersLoaded, page, scenario, debouncedAdvancedFilterState, quickFilters, appliedContentQuery]);
 
   useTaskRunRefreshEffect(() => {
     void loadList(selectedId ?? undefined);
@@ -282,11 +289,18 @@ export function IntelligencePage({ role, userId, initialContentId, onOpenReferen
       return;
     }
     setLastFetchJobId(null);
+    const requestId = ++detailRequestRef.current;
     setLoadingDetail(true);
     fetchProductDetail(role, selectedId, userId)
-      .then(setDetail)
-      .catch((err) => setError(err.message))
-      .finally(() => setLoadingDetail(false));
+      .then((nextDetail) => {
+        if (requestId === detailRequestRef.current) setDetail(nextDetail);
+      })
+      .catch((err) => {
+        if (requestId === detailRequestRef.current) setError(err.message);
+      })
+      .finally(() => {
+        if (requestId === detailRequestRef.current) setLoadingDetail(false);
+      });
   }, [selectedId, role, userId]);
 
   async function reloadDetail() {

@@ -229,9 +229,7 @@ def get_job(job_id: str, db: Session = Depends(get_db)):
 
 @router.post("/agents/{agent_id}/jobs/claim", response_model=ClaimJobsResponse)
 def claim_jobs(agent_id: str, request: ClaimJobsRequest, db: Session = Depends(get_db)):
-    settings = get_settings()
     repo = JobRepository(db)
-    repo.fail_stale_running_jobs(max_running_seconds=settings.job_running_timeout_seconds)
     jobs = repo.claim_jobs_for_agent(
         agent_id=agent_id,
         supported_job_types=request.supported_job_types,
@@ -315,6 +313,8 @@ def fail_job(job_id: str, request: JobFailRequest, db: Session = Depends(get_db)
             error_message=request.error.message,
             checkpoint=request.checkpoint,
             agent_id=request.agent_id,
+            retryable=request.error.retryable,
+            raw_context=request.error.raw_context,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

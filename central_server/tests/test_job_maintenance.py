@@ -70,9 +70,34 @@ def test_job_maintenance_refreshes_task_run_after_stale_running_job(db_session, 
 
     assert result.stale_running_failed_count == 1
     assert result.task_run_refreshed_count == 1
+    assert result.stale_running_requeued_count == 1
+    assert job.status == JobStatus.PENDING.value
+    assert job.last_error_code is None
+    assert job.retry_count == 1
+    assert run.status in {TaskRunStatus.QUEUED.value, TaskRunStatus.RUNNING.value}
+    assert run.jobs_total == 1
+    assert run.jobs_failed == 0
+    assert run.finished_at is None
+
+
+def test_job_maintenance_leaves_stale_job_failed_when_retry_budget_exhausted(db_session, monkeypatch):
+    monkeypatch.setenv("INTEL_ENGINE_JOB_RUNNING_TIMEOUT_SECONDS", "60")
+    job = Job(
+        job_type=JobType.FEED_COLLECT.value,
+        status=JobStatus.RUNNING.value,
+        payload_json={},
+        checkpoint_json={},
+        result_summary_json={},
+        started_at=utcnow() - timedelta(minutes=10),
+        retry_count=3,
+        max_retries=3,
+    )
+    db_session.add(job)
+    db_session.commit()
+
+    result = JobMaintenanceService(db_session).run_once()
+
+    assert result.stale_running_failed_count == 1
+    assert result.stale_running_requeued_count == 0
     assert job.status == JobStatus.FAILED.value
     assert job.last_error_code == "job_execution_timeout"
-    assert run.status == TaskRunStatus.FAILED.value
-    assert run.jobs_total == 1
-    assert run.jobs_failed == 1
-    assert run.finished_at is not None

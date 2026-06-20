@@ -22,7 +22,9 @@ from local_agent_runtime.connectors.xhs.normalizer import (
     candidate_field_report,
     coverage_from_field_report,
     normalize_xhs_search_card,
+    iter_xhs_api_cards,
 )
+from local_agent_runtime.connectors.xhs.response_capture import XhsResponseCapture
 from local_agent_runtime.connectors.xhs.search_filter import apply_search_filters, filters_are_default
 from local_agent_runtime.contracts import FeedCandidateInput
 from local_agent_runtime.engine.pacing import PacingController
@@ -65,6 +67,8 @@ class XhsSearchProbe:
 
     async def collect(self, page: Page) -> tuple[list[FeedCandidateInput], dict[str, Any]]:
         started = time.perf_counter()
+        capture = XhsResponseCapture()
+        response_capture_attached = capture.attach(page)
         # Collect enough to honor start_rank (skip first N) before slicing.
         collect_target = self.start_rank + self.max_items
         per_keyword_target = max(1, collect_target // max(len(self.keywords), 1))
@@ -72,6 +76,8 @@ class XhsSearchProbe:
         per_keyword_summary: list[dict[str, Any]] = []
         failed_keywords: list[str] = []
         raw_cards_seen = 0
+        api_cards_seen = 0
+        api_payload_count = 0
         actual_scroll_count = 0
         page_goto_ms = 0.0
         initial_wait_ms = 0.0
@@ -119,6 +125,40 @@ class XhsSearchProbe:
                         filter_diagnostics = diag
                 no_growth_count = 0
                 for _ in range(self.max_scrolls_per_keyword + 1):
+                    api_payloads = await capture.drain("search")
+                    api_payload_count += len(api_payloads)
+                    discovered_at = datetime.now(timezone.utc)
+                    for payload in api_payloads:
+                        api_cards = iter_xhs_api_cards(payload.data)
+                        api_cards_seen += len(api_cards)
+                        for raw in api_cards:
+                            candidate = normalize_xhs_search_card(
+                                raw,
+                                search_keyword=keyword,
+                                rank_position=keyword_seen + 1,
+                                discovered_at=discovered_at,
+                                search_sort=self.search_sort,
+                                note_type=self.note_type,
+                                publish_time=self.publish_time,
+                                search_scope=self.search_scope,
+                                location_filter=self.location_filter,
+                            )
+                            if not candidate:
+                                continue
+                            keyword_seen += 1
+                            existing = candidates_by_id.get(candidate.platform_content_id)
+                            if existing:
+                                old_payload = dict(existing.raw_payload or {})
+                                keywords = set(old_payload.get("search_keywords") or [])
+                                keywords.add(keyword)
+                                old_payload["search_keywords"] = sorted(keywords)
+                                candidates_by_id[candidate.platform_content_id] = existing.model_copy(update={"raw_payload": old_payload})
+                            else:
+                                candidates_by_id[candidate.platform_content_id] = candidate
+                            if keyword_seen >= per_keyword_target or len(candidates_by_id) >= collect_target:
+                                break
+                    if keyword_seen >= per_keyword_target or len(candidates_by_id) >= collect_target:
+                        break
                     extract_started = time.perf_counter()
                     raw_cards = await page.evaluate(CARD_EXTRACTION_SCRIPT)
                     dom_extract_ms += (time.perf_counter() - extract_started) * 1000
@@ -198,7 +238,17 @@ class XhsSearchProbe:
                 "raw_cards_seen": raw_cards_seen,
                 "actual_scroll_count": actual_scroll_count,
                 "page_goto_ms": round(page_goto_ms, 2),
-                "source_path": "browser_search_result_page",
+                "source_path": (
+                    "api_response_capture"
+                    if api_cards_seen and not raw_cards_seen
+                    else "api_response_capture+dom_fallback"
+                    if api_cards_seen
+                    else "dom_fallback"
+                ),
+                "response_capture_attached": response_capture_attached,
+                "api_payload_count": api_payload_count,
+                "api_cards_seen": api_cards_seen,
+                "dom_fallback_used": raw_cards_seen > 0,
                 "field_coverage": field_coverage,
                 "perf": {
                     "page_goto_ms": round(page_goto_ms, 2),
@@ -209,7 +259,7 @@ class XhsSearchProbe:
                     "total_ms": round(elapsed * 1000, 2),
                     "items_per_second": round(len(candidates) / elapsed, 3) if candidates else 0.0,
                 },
-                "implementation_basis": "browser_search_result_page",
+                "implementation_basis": "page_response_capture_with_dom_fallback",
                 "mediacrawler_api_reference": "/api/sns/web/v1/search/notes",
             }
         )

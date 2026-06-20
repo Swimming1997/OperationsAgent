@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>运营情报工作台</title>
+  <link rel="stylesheet" href="/styles.css?v=20260620-3">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>运营情报工作台</h1>
+      <p id="statusText">本地数据</p>
+    </div>
+    <div class="top-actions">
+      <button id="centralSessionButton" class="secondary" type="button">登录中央</button>
+      <button id="refreshButton" class="secondary" type="button">刷新</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="search-band">
+      <form id="searchForm">
+        <label for="keyword">搜索小红书内容</label>
+        <div class="search-row">
+          <input id="keyword" name="keyword" type="search" placeholder="输入关键词" autocomplete="off" required>
+          <select id="maxItems" name="max_items" aria-label="采集数量">
+            <option value="20">20 条</option>
+            <option value="30" selected>30 条</option>
+            <option value="50">50 条</option>
+          </select>
+          <button id="searchButton" type="submit">开始采集</button>
+        </div>
+      </form>
+      <div id="activeTask" class="task-line" hidden></div>
+    </section>
+
+    <section class="workspace">
+      <aside class="filters">
+        <h2>筛选</h2>
+        <label for="localKeyword">本地内容</label>
+        <input id="localKeyword" type="search" placeholder="标题、正文、作者">
+        <label for="platformFilter">平台</label>
+        <select id="platformFilter">
+          <option value="">全部平台</option>
+          <option value="xhs">小红书</option>
+          <option value="douyin">抖音</option>
+        </select>
+        <label for="sourceFilter">来源</label>
+        <select id="sourceFilter">
+          <option value="">全部来源</option>
+          <option value="search">搜索</option>
+          <option value="recommend">推荐流</option>
+          <option value="creator">对标博主</option>
+        </select>
+        <label for="statusFilter">处理状态</label>
+        <select id="statusFilter">
+          <option value="">全部状态</option>
+          <option value="pending">待处理</option>
+          <option value="material">素材库</option>
+          <option value="discarded">已废弃</option>
+        </select>
+        <button id="applyFilters" class="secondary full" type="button">应用筛选</button>
+
+        <div class="task-panel">
+          <h2>对标监控</h2>
+          <form id="monitorForm" class="compact-form">
+            <label for="creatorTarget">博主主页或 ID</label>
+            <input id="creatorTarget" type="text" placeholder="粘贴主页链接" required>
+            <label for="monitorInterval">检查周期</label>
+            <select id="monitorInterval">
+              <option value="1800">30 分钟</option>
+              <option value="3600" selected>1 小时</option>
+              <option value="21600">6 小时</option>
+              <option value="86400">每天</option>
+            </select>
+            <button type="submit" class="full">添加监控</button>
+          </form>
+          <div class="recommend-controls">
+            <label for="recommendInterval">推荐流</label>
+            <select id="recommendInterval">
+              <option value="1800">每 30 分钟</option>
+              <option value="3600" selected>每小时</option>
+              <option value="21600">每 6 小时</option>
+            </select>
+            <div class="button-pair">
+              <button id="refreshRecommend" class="secondary" type="button">立即刷新</button>
+              <button id="scheduleRecommend" type="button">定时刷新</button>
+            </div>
+          </div>
+
+          <h2 class="recent-title">最近任务</h2>
+          <div id="taskList" class="task-list"></div>
+        </div>
+      </aside>
+
+      <section class="results">
+        <div class="section-heading">
+          <h2>内容</h2>
+          <div class="section-heading-actions">
+            <span id="resultCount">0 条</span>
+            <button id="toggleMultiSelect" class="secondary compact-button" type="button">多选</button>
+          </div>
+        </div>
+        <div id="batchToolbar" class="batch-toolbar" hidden>
+          <label class="select-all">
+            <input id="selectPage" type="checkbox">
+            <span>全选本页</span>
+          </label>
+          <span id="selectedCount">已选 0 条</span>
+          <button id="batchPending" class="secondary" type="button" disabled>设为待处理</button>
+          <button id="batchDiscard" class="danger-outline" type="button" disabled>废弃</button>
+          <button id="batchMaterial" type="button" disabled>加入素材库</button>
+        </div>
+        <div id="emptyState" class="empty-state">
+          <strong>还没有本地内容</strong>
+          <span>提交关键词后，采集结果会保存在这台电脑。</span>
+        </div>
+        <div id="contentList" class="content-list"></div>
+        <nav id="contentPagination" class="pagination" aria-label="内容分页" hidden>
+          <button id="previousPage" class="secondary" type="button">上一页</button>
+          <span id="pageInfo">第 1 / 1 页</span>
+          <button id="nextPage" class="secondary" type="button">下一页</button>
+        </nav>
+      </section>
+
+      <aside id="detailPanel" class="detail-panel">
+        <div class="detail-placeholder">
+          <strong>选择一条内容</strong>
+          <span>查看正文、图片和获客信号。</span>
+        </div>
+      </aside>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <dialog id="loginDialog">
+    <form id="loginForm" class="dialog-form">
+      <div class="dialog-heading">
+        <h2>登录中央素材库</h2>
+        <button class="icon-close" type="button" data-close-dialog="loginDialog" aria-label="关闭">×</button>
+      </div>
+      <label for="centralServerUrl">中央服务地址</label>
+      <input id="centralServerUrl" type="url" placeholder="https://operations.company.com" autocomplete="url" required>
+      <label for="centralUsername">用户名</label>
+      <input id="centralUsername" autocomplete="username" required>
+      <label for="centralPassword">密码</label>
+      <input id="centralPassword" type="password" autocomplete="current-password" required>
+      <button type="submit">登录</button>
+    </form>
+  </dialog>
+
+  <dialog id="materialDialog">
+    <form id="materialForm" class="dialog-form">
+      <div class="dialog-heading">
+        <h2>加入中央素材库</h2>
+        <button class="icon-close" type="button" data-close-dialog="materialDialog" aria-label="关闭">×</button>
+      </div>
+      <input id="materialContentId" type="hidden">
+      <label for="libraryType">素材类型</label>
+      <select id="libraryType">
+        <option value="uncategorized">未分类</option>
+        <option value="lead">获客内容</option>
+        <option value="non_lead">内容参考</option>
+        <option value="benchmark_work">对标作品</option>
+        <option value="visual_material">视觉素材</option>
+      </select>
+      <label for="materialRating">评级</label>
+      <select id="materialRating">
+        <option value="">暂不评级</option>
+        <option value="good">优秀</option>
+        <option value="medium">一般</option>
+        <option value="watching">观察</option>
+        <option value="poor">较差</option>
+      </select>
+      <label for="materialTags">标签</label>
+      <input id="materialTags" placeholder="标题结构, 评论洞察">
+      <label for="materialNote">备注</label>
+      <textarea id="materialNote" rows="3" placeholder="可借鉴点、风险提示"></textarea>
+      <button type="submit">确认加入</button>
+    </form>
+  </dialog>
+  <script src="/app.js?v=20260620-3"></script>
+</body>
+</html>

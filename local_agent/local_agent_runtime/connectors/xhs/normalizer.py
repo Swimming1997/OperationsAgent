@@ -20,10 +20,10 @@ def sanitize_feed_author_name(value: str | None) -> str | None:
     return text or None
 
 
-def parse_visible_count(value: str | None) -> int | None:
-    if not value:
+def parse_visible_count(value: Any) -> int | None:
+    if value in (None, ""):
         return None
-    text = value.strip().replace(",", "")
+    text = str(value).strip().replace(",", "")
     if not text:
         return None
     multiplier = 1
@@ -56,7 +56,10 @@ def extract_xhs_content_id(url: str | None) -> str | None:
 
 
 def infer_content_type(raw: dict[str, Any]) -> ContentType:
-    text = " ".join(str(raw.get(key) or "") for key in ["href", "card_class", "card_text", "cover_url"]).lower()
+    text = " ".join(
+        str(raw.get(key) or "")
+        for key in ["href", "card_class", "card_text", "cover_url", "model_type"]
+    ).lower()
     if "video" in text or "视频" in text:
         return ContentType.VIDEO
     return ContentType.IMAGE_TEXT
@@ -212,6 +215,107 @@ def _pick_first(*values: Any) -> Any:
         if value not in (None, "", [], {}):
             return value
     return None
+
+
+def extract_xhs_card_image_urls(raw: dict[str, Any]) -> list[str]:
+    note = raw.get("note_card") or raw.get("note") or raw.get("card") or raw
+    if not isinstance(note, dict):
+        return []
+    urls: list[str] = []
+    for image in note.get("image_list") or note.get("imageList") or note.get("images") or []:
+        if isinstance(image, str):
+            candidates = [image]
+        elif isinstance(image, dict):
+            candidates = [
+                image.get("url_default"),
+                image.get("url"),
+                image.get("src"),
+                *[
+                    info.get("url")
+                    for info in (image.get("info_list") or image.get("infoList") or [])
+                    if isinstance(info, dict)
+                ],
+            ]
+        else:
+            continue
+        for candidate in candidates:
+            value = str(candidate or "").strip()
+            if value and value not in urls:
+                urls.append(value)
+                break
+    return urls
+
+
+def iter_xhs_api_cards(data: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(data, dict):
+        return []
+    raw_items = _pick_first(
+        data.get("items"),
+        data.get("feeds"),
+        data.get("notes"),
+        (data.get("result") or {}).get("items") if isinstance(data.get("result"), dict) else None,
+    )
+    if not isinstance(raw_items, list):
+        return []
+    cards: list[dict[str, Any]] = []
+    for raw in raw_items:
+        if not isinstance(raw, dict):
+            continue
+        model_type = str(raw.get("model_type") or "").lower()
+        if model_type and model_type != "note":
+            continue
+        note = raw.get("note_card") or raw.get("note") or raw.get("card") or raw
+        if not isinstance(note, dict):
+            continue
+        user = note.get("user") or note.get("user_info") or raw.get("user") or {}
+        interact = note.get("interact_info") or note.get("interactInfo") or {}
+        cover = note.get("cover") or {}
+        note_id = _pick_first(raw.get("id"), raw.get("note_id"), note.get("id"), note.get("note_id"))
+        if not note_id:
+            continue
+        xsec_token = _pick_first(raw.get("xsec_token"), note.get("xsec_token"))
+        xsec_source = _pick_first(raw.get("xsec_source"), note.get("xsec_source"))
+        href = build_xhs_note_url(
+            {
+                "note_id": str(note_id),
+                "xsec_token": str(xsec_token or ""),
+                "xsec_source": str(xsec_source or ""),
+            },
+            source_surface="search_api" if xsec_source == "pc_search" else "homefeed_api",
+        )
+        cards.append(
+            {
+                "href": href,
+                "platform_content_id": str(note_id),
+                "title": _pick_first(note.get("display_title"), note.get("title"), note.get("desc")),
+                "cover_url": _pick_first(
+                    cover.get("url_default") if isinstance(cover, dict) else None,
+                    cover.get("url_pre") if isinstance(cover, dict) else None,
+                    note.get("cover_url"),
+                ),
+                "author_name": _pick_first(
+                    user.get("nickname") if isinstance(user, dict) else None,
+                    user.get("nick_name") if isinstance(user, dict) else None,
+                    user.get("name") if isinstance(user, dict) else None,
+                ),
+                "author_platform_id": _pick_first(
+                    user.get("user_id") if isinstance(user, dict) else None,
+                    user.get("userId") if isinstance(user, dict) else None,
+                    user.get("id") if isinstance(user, dict) else None,
+                ),
+                "visible_like_count": _pick_first(
+                    interact.get("liked_count") if isinstance(interact, dict) else None,
+                    interact.get("likedCount") if isinstance(interact, dict) else None,
+                    note.get("liked_count"),
+                ),
+                "image_urls": extract_xhs_card_image_urls(raw),
+                "xsec_token": xsec_token,
+                "xsec_source": xsec_source,
+                "model_type": raw.get("model_type") or note.get("model_type"),
+                "api_raw": raw,
+            }
+        )
+    return cards
 
 
 def normalize_search_api_items(data: dict[str, Any] | None, *, keyword: str, limit: int = 20) -> list[dict[str, Any]]:

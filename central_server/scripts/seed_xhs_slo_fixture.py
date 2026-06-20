@@ -15,6 +15,8 @@ from uuid import uuid4
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+if str(ROOT.parent) not in sys.path:
+    sys.path.insert(0, str(ROOT.parent))
 
 from intelligence_engine.db.models import Job, utcnow
 from intelligence_engine.db.session import SessionLocal

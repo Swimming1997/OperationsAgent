@@ -23,6 +23,7 @@ class TaskTemplate(Base, TimestampMixin):
 
 class TaskSchedule(Base, TimestampMixin):
     __tablename__ = "task_schedules"
+    __table_args__ = (Index("idx_task_schedules_enabled_next_run", "enabled", "next_run_at"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
     task_template_id: Mapped[str] = mapped_column(String(36), ForeignKey("task_templates.id"), nullable=False)

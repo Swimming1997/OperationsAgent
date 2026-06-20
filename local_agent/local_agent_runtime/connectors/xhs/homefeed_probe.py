@@ -6,7 +6,13 @@ from playwright.async_api import Page
 
 
 from local_agent_runtime.contracts import FeedCandidateInput
-from local_agent_runtime.connectors.xhs.normalizer import candidate_field_report, coverage_from_field_report, normalize_xhs_card
+from local_agent_runtime.connectors.xhs.normalizer import (
+    candidate_field_report,
+    coverage_from_field_report,
+    iter_xhs_api_cards,
+    normalize_xhs_card,
+)
+from local_agent_runtime.connectors.xhs.response_capture import XhsResponseCapture
 from local_agent_runtime.engine.pacing import PacingController
 
 
@@ -68,6 +74,8 @@ class XhsHomeFeedProbe:
 
     async def collect(self, page: Page) -> tuple[list[FeedCandidateInput], dict[str, Any]]:
         started = time.perf_counter()
+        capture = XhsResponseCapture()
+        response_capture_attached = capture.attach(page)
         page_goto_ms = 0.0
         initial_wait_ms = 0.0
         scroll_ms = 0.0
@@ -81,6 +89,8 @@ class XhsHomeFeedProbe:
             initial_wait_ms = (time.perf_counter() - wait_started) * 1000
         candidates_by_id: dict[str, FeedCandidateInput] = {}
         raw_cards_seen = 0
+        api_cards_seen = 0
+        api_payload_count = 0
         actual_scroll_count = 0
         no_growth_stop_count = 0
         extraction_paths = [
@@ -90,6 +100,24 @@ class XhsHomeFeedProbe:
             "class contains title/author/like fallback selectors",
         ]
         for scroll_index in range(self.max_scrolls + 1):
+            api_payloads = await capture.drain("homefeed")
+            api_payload_count += len(api_payloads)
+            discovered_at = datetime.now(timezone.utc)
+            for payload in api_payloads:
+                api_cards = iter_xhs_api_cards(payload.data)
+                api_cards_seen += len(api_cards)
+                for raw in api_cards:
+                    candidate = normalize_xhs_card(
+                        raw,
+                        feed_position=len(candidates_by_id) + 1,
+                        discovered_at=discovered_at,
+                    )
+                    if candidate and candidate.platform_content_id not in candidates_by_id:
+                        candidates_by_id[candidate.platform_content_id] = candidate
+                        if len(candidates_by_id) >= self.target_count:
+                            break
+            if len(candidates_by_id) >= self.target_count:
+                break
             extract_started = time.perf_counter()
             raw_cards = await page.evaluate(CARD_EXTRACTION_SCRIPT)
             dom_extract_ms += (time.perf_counter() - extract_started) * 1000
@@ -130,7 +158,17 @@ class XhsHomeFeedProbe:
                 "normalized_items": len(candidates),
                 "dedupe_count": max(0, raw_cards_seen - len(candidates_by_id)),
                 "no_growth_stop_count": no_growth_stop_count,
-                "source_path": "dom_card_extract",
+                "source_path": (
+                    "api_response_capture"
+                    if api_cards_seen and not raw_cards_seen
+                    else "api_response_capture+dom_fallback"
+                    if api_cards_seen
+                    else "dom_fallback"
+                ),
+                "response_capture_attached": response_capture_attached,
+                "api_payload_count": api_payload_count,
+                "api_cards_seen": api_cards_seen,
+                "dom_fallback_used": raw_cards_seen > 0,
                 "field_coverage": field_coverage,
                 "perf": {
                     "page_goto_ms": round(page_goto_ms, 2),
@@ -149,9 +187,8 @@ class XhsHomeFeedProbe:
                     "comment fetch params",
                 ],
                 "fragile_points": [
-                    "XHS card class names are not a stable API",
-                    "author and like selectors depend on current DOM text/class naming",
-                    "virtualized feed may unload cards while scrolling",
+                    "API response shapes may change and require normalizer updates",
+                    "DOM fallback still depends on current card text/class naming",
                     "login/manual verification overlays can hide feed cards",
                 ],
             }

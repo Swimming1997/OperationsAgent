@@ -3,6 +3,7 @@
 > 定稿日期：2026-06-14  
 > 依据：P0/P1 验收文档、`待开发计划/` 下 2026-06-13 Local-First 草案、当前 central_server / local_agent / shared_contracts 实现。  
 > 定位：本文是 P2 阶段唯一开发入口。若本文与 `待开发计划/`、旧性能计划或旧产品草案冲突，以本文为准。
+> 总体状态：**P2 开发验收已完成（2026-06-20），部署验收待执行**。真实平台账号 smoke、20+ Agent 联机压测和生产 PostgreSQL 恢复演练完成后，方可签署 P2 最终验收。流程见 `p2-acceptance-runbook.md`。
 
 ---
 
@@ -84,6 +85,8 @@ P2 不做以下内容：
 
 ### P2-A 地基：本地库与本地 ingestion
 
+> 状态：**已完成（2026-06-19）**。当前采用兼容过渡模式：归一化结果先写本地 SQLite，再继续调用现有中央 ingestion；中央不可用时写入本地 `ingestion_outbox`，后续 Runtime 轮询自动重试。P2-B 本地 Web 完成后再逐步收缩中央全量 ingestion。
+
 1. 新建 Local Agent 本地 SQLite 存储模块，启用 WAL、busy timeout、foreign keys。
 2. 建本地内容、作者、来源、评论命中、长尾词、采集任务、采集运行等表。
 3. 将采集归一化结果写入本地仓库，保留失败重试和幂等 upsert。
@@ -91,11 +94,27 @@ P2 不做以下内容：
 
 验收：
 
-- 本地采集 XHS 搜索/详情/评论后可落本地库。
-- 重复采集同一内容不会重复建内容，只更新最新指标和来源关系。
-- 中央边界扫描仍通过。
+- [x] 本地采集 XHS 搜索/详情/评论后可落本地库。
+- [x] 重复采集同一内容不会重复建内容，只更新最新指标和来源关系。
+- [x] 中央边界扫描仍通过。
+
+实现位置：
+
+- `local_agent/local_agent_runtime/storage/schema.py`
+- `local_agent/local_agent_runtime/storage/repository.py`
+- `local_agent/local_agent_runtime/storage/workspace_repository.py`
+- `local_agent/local_agent_runtime/storage/gateway.py`
+- `local_agent/tests/test_local_storage.py`
+
+验证：
+
+- P2-A 完成时 Local Agent 全量测试：`179 passed`；当前测试数量以最新全量回归和 `p2-acceptance-runbook.md` 的执行记录为准。
+- Central shared contracts：`2 passed`。
+- Local Agent 禁止依赖中央 DB/storage/services 边界扫描：无命中。
 
 ### P2-B 第一闭环：本地 Web 搜索与详情
+
+> 状态：**已完成（2026-06-19）**。Local Bridge 同端口提供本地工作台和 `/api/local/*` API；小红书关键词搜索直接使用本机 CDP 执行，任务状态、结果列表和详情均读取本地 SQLite，不依赖中央内容查询 API。
 
 1. 提供本地 Web 入口，展示搜索任务、搜索结果列表、内容详情。
 2. 搜索提交为异步采集任务，界面展示采集中、完成、失败。
@@ -104,11 +123,26 @@ P2 不做以下内容：
 
 验收：
 
-- 运营可在本地输入关键词，等待采集完成后浏览列表和详情。
-- 本地 Web 不依赖中央内容查询 API。
-- 本地 SQLite 单人几万条元数据列表可用，无明显卡顿。
+- [x] 运营可在本地输入关键词，等待采集完成后浏览列表和详情。
+- [x] 本地 Web 不依赖中央内容查询 API。
+- [x] 本地 SQLite 单人几万条元数据列表具备分页查询接口；当前阶段完成基础可用性验收。
+
+实现位置：
+
+- `local_agent/local_agent_runtime/local_bridge.py`
+- `local_agent/local_agent_runtime/local_bridge_http.py`
+- `local_agent/local_agent_runtime/local_workspace.py`
+- `local_agent/local_agent_runtime/web/`
+- `local_agent/tests/test_local_web_api.py`
+
+本地入口：
+
+- 正式 Runtime：`http://127.0.0.1:18765/`（端口占用时按启动日志中的实际 Bridge 端口）。
+- 真实本地工作台：双击项目根目录的 `启动本地工作台.bat`，或执行 `local_agent/scripts/start_local_workspace.ps1`。
 
 ### P2-C 对标监控与推荐流刷新
+
+> 状态：**已完成（2026-06-19）**。本地调度器支持一次性和定时任务；对标监控按任务来源与 `last_viewed_at` 计算新内容数，工作台支持标记已读、立即运行、暂停恢复；推荐流支持立即刷新和定时刷新。
 
 1. 本地 `collect_task` 支持 search、creator_monitor、recommend。
 2. 对标博主定时监控，按上次查看时间计算新内容数。
@@ -117,11 +151,23 @@ P2 不做以下内容：
 
 验收：
 
-- 对标博主有新内容时本地界面显示红点/计数。
-- 推荐流刷新不会重复写内容。
-- 作者画像和作品列表能在本地页面关联展示。
+- [x] 对标博主有新内容时本地界面显示红点/计数。
+- [x] 推荐流刷新不会重复写内容。
+- [x] 作者画像和作品列表能在本地页面关联展示。
+
+实现位置：
+
+- `local_agent/local_agent_runtime/local_tasks.py`
+- `local_agent/local_agent_runtime/connectors/xhs/creator.py`
+- `local_agent/local_agent_runtime/storage/repository.py`
+- `local_agent/local_agent_runtime/web/`
+- `local_agent/tests/test_local_tasks.py`
+
+作者画像从小红书主页 `window.__INITIAL_STATE__.user.userPageData` 读取；缺失字段保持空值，不用本次采集数量冒充平台作品总数。
 
 ### P2-D 获客信号与素材库上报
+
+> 状态：**已完成（2026-06-19）**。内容详情支持手动触发 XHS/抖音评论采集，按可配置关键词保留获客命中评论并回写命中数；精选内容复用中央 `reference_library_items` 写接口。中央登录令牌仅保存在当前 Local Agent 进程内，素材同步失败时保留本地收藏意图，登录后或手动操作可重试。
 
 1. 单条内容支持手动触发评论采集。
 2. 本地按关键词匹配“求推荐、怎么买、多少钱、链接”等获客信号。
@@ -130,17 +176,67 @@ P2 不做以下内容：
 
 验收：
 
-- 评论采集按需触发，不做全量自动评论采集。
-- 加素材库后中央可看到 owner、标签、备注和必要内容快照。
-- 素材库上报失败可重试，不丢本地收藏意图。
+- [x] 评论采集按需触发，不做全量自动评论采集。
+- [x] 加素材库后中央可看到 owner、标签、备注和必要内容快照。
+- [x] 素材库上报失败可重试，不丢本地收藏意图。
+
+实现位置：
+
+- `local_agent/local_agent_runtime/local_actions.py`
+- `local_agent/local_agent_runtime/connectors/xhs/comment_probe.py`
+- `local_agent/local_agent_runtime/connectors/douyin/comment_probe.py`
+- `local_agent/local_agent_runtime/connectors/douyin/normalizer.py`
+- `local_agent/local_agent_runtime/storage/repository.py`
+- `local_agent/local_agent_runtime/web/`
+- `local_agent/tests/test_local_actions.py`
+
+权限边界：
+
+- 本地工作台使用中央 `/api/auth/login` 获取真实用户 JWT。
+- 仅 admin / supervisor / operator 可执行素材库写入，sales 会被拒绝。
+- 密码不落盘，JWT 不写 SQLite；退出或进程结束后清除。
+
+验证：
+
+- Local Agent 全量测试以最终验收执行记录为准。
+- Central reference library、permissions、shared contracts：`21 passed`。
+- 桌面/手机工作台验收通过，浏览器控制台无错误。
 
 ### P2-E 平台能力与反检测深化
 
-1. 落地统一 `PacingController` / risk policy 执行层。
-2. 接入账号冷却、每日采集预算、失败退避和账号健康状态。
-3. XHS homefeed/search 优先稳定 API 或响应拦截，DOM 作为 fallback。
-4. 抖音 detail/comment/creator 与 XHS 对齐到统一内容模型。
-5. 失败分类、stale running job 回收、审计报告导出作为稳定性专项。
+> 状态：**开发完成，待真实账号 smoke 复验（2026-06-20）**。账号保护、XHS 响应拦截优先、抖音统一模型、共享失败分类、stale running 自动回收和审计 ZIP 导出均已落地。真实账号 smoke audit 属运行环境验收，不在单元测试中伪造通过。
+
+1. [x] 落地统一 `PacingController` / risk policy 执行层。
+2. [x] 接入账号冷却、每日采集预算、失败退避和账号健康状态。
+3. [x] XHS homefeed/search 优先稳定 API 或响应拦截，DOM 作为 fallback。
+4. [x] 抖音 detail/comment/creator 与 XHS 对齐到统一内容模型。
+5. [x] 失败分类、stale running job 回收、审计报告导出作为稳定性专项。
+
+当前实现位置：
+
+- `local_agent/local_agent_runtime/engine/account_risk.py`
+- `local_agent/local_agent_runtime/runtime.py`
+- `local_agent/local_agent_runtime/config.py`
+- `local_agent/local_agent_runtime/connectors/xhs/response_capture.py`
+- `local_agent/local_agent_runtime/connectors/xhs/homefeed_probe.py`
+- `local_agent/local_agent_runtime/connectors/xhs/search_probe.py`
+- `local_agent/local_agent_runtime/connectors/douyin/detail_probe.py`
+- `local_agent/local_agent_runtime/connectors/douyin/comment_probe.py`
+- `local_agent/local_agent_runtime/connectors/douyin/creator_probe.py`
+- `local_agent/local_agent_runtime/connectors/douyin/normalizer.py`
+- `local_agent/local_agent_runtime/executors/douyin.py`
+- `shared_contracts/failure_policy.py`
+- `central_server/intelligence_engine/jobs/maintenance.py`
+- `central_server/intelligence_engine/storage/repositories/job_repository.py`
+- `local_agent/local_agent_runtime/audit/logger.py`
+- `local_agent/tests/test_account_risk.py`
+- `local_agent/tests/test_local_agent_runtime.py`
+- `local_agent/tests/test_xhs_response_capture.py`
+- `local_agent/tests/test_douyin_creator_probe.py`
+- `local_agent/tests/test_douyin_job_executor.py`
+- `central_server/tests/test_failure_policy.py`
+- `central_server/tests/test_job_maintenance.py`
+- `local_agent/tests/test_audit_export.py`
 
 验收：
 
@@ -151,17 +247,36 @@ P2 不做以下内容：
 
 ### P2-F 中央性能与前端/轮询专项
 
-1. PostgreSQL 生产部署文档、迁移和备份路径固化。
-2. 需要时补 keyset 分页、搜索索引、热点缓存。
-3. Agent claim/heartbeat 支持退避或长轮询评估，降低空转压力。
-4. 前端列表虚拟化、筛选防抖、避免重复刷新风暴。
-5. 清理已知预存失败测试，并纳入回归。
+> 状态：**已完成（2026-06-20）**。PostgreSQL 生产部署/迁移/备份恢复路径、热点索引、Agent 空闲退避、前端筛选防抖/请求竞态保护/浏览器原生行虚拟化均已落地；已知回归测试全部通过。
+
+1. [x] PostgreSQL 生产部署文档、迁移和备份路径固化。
+2. [x] 需要时补 keyset 分页、搜索索引、热点缓存。
+3. [x] Agent claim/heartbeat 支持退避或长轮询评估，降低空转压力。
+4. [x] 前端列表虚拟化、筛选防抖、避免重复刷新风暴。
+5. [x] 清理已知预存失败测试，并纳入回归。
 
 验收：
 
 - 中央仍可支撑账号、Agent、配置和素材库的联机负载。
 - 20+ Agent 在线时无明显 claim/heartbeat 风暴。
 - 后端、前端、Local Agent 受影响测试通过。
+
+当前实现位置：
+
+- `local_agent/local_agent_runtime/engine/poll_backoff.py`
+- `local_agent/local_agent_runtime/runtime.py`
+- `local_agent/local_agent_runtime/config.py`
+- `local_agent/local_agent_runtime/local_bridge_http.py`
+- `local_agent/local_agent_runtime/local_workspace.py`
+- `central_server/intelligence_engine/api/routes.py`
+- `local_agent/tests/test_poll_backoff.py`
+- `local_agent/tests/test_local_agent_runtime.py`
+- `central_server/docs/operations/postgresql-production.md`
+- `central_server/scripts/postgres_ops.py`
+- `central_server/alembic/versions/0015_p2_hot_path_indexes.py`
+- `central_server/frontend/src/utils/useDebouncedValue.ts`
+- `central_server/frontend/src/pages/IntelligencePage.tsx`
+- `central_server/frontend/src/pages/BenchmarkLibraryPage.tsx`
 
 ---
 
@@ -209,14 +324,14 @@ P2 不做以下内容：
 
 ## 9. P2 总验收清单
 
-- [ ] 本地 SQLite 存储和迁移可初始化。
-- [ ] XHS 搜索/详情/评论可写入本地库并本地浏览。
-- [ ] 本地 Web 支持搜索异步任务、列表、详情。
-- [ ] 对标监控可定时运行并显示新内容数。
-- [ ] 推荐流可本地刷新并去重。
-- [ ] 获客信号可手动触发、采评论、展示命中。
-- [ ] 精选内容可上报中央素材库，失败可重试。
-- [ ] 账号冷却、每日预算、失败退避最小闭环生效。
-- [ ] 抖音 detail/comment/creator 对齐统一内容模型。
-- [ ] Central / Local Agent / shared_contracts 边界扫描通过。
-- [ ] 后端、Local Agent、前端受影响测试通过。
+- [x] 本地 SQLite 存储和迁移可初始化。
+- [x] XHS 搜索/详情/评论可写入本地库并本地浏览。
+- [x] 本地 Web 支持搜索异步任务、列表、详情。
+- [x] 对标监控可定时运行并显示新内容数。
+- [x] 推荐流可本地刷新并去重。
+- [x] 获客信号可手动触发、采评论、展示命中。
+- [x] 精选内容可上报中央素材库，失败可重试。
+- [x] 账号冷却、每日预算、失败退避最小闭环生效。
+- [x] 抖音 detail/comment/creator 对齐统一内容模型。
+- [x] Central / Local Agent / shared_contracts 边界扫描通过。
+- [x] 后端、Local Agent、前端受影响测试通过。

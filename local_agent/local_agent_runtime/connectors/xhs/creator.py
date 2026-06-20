@@ -1,6 +1,6 @@
 ﻿from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import parse_qs, quote, urlencode, urlparse
@@ -12,6 +12,7 @@ from local_agent_runtime.connectors.xhs.api_client import XhsApiClient, XhsApiEr
 from local_agent_runtime.connectors.xhs.context import XHS_BASE_URL, merge_xhs_context, normalize_xhs_url
 from local_agent_runtime.enums import ContentType, FeedType, Platform, SourceSurface
 from local_agent_runtime.contracts import FeedCandidateInput
+from local_agent_runtime.connectors.xhs.normalizer import parse_visible_count
 
 
 @dataclass(frozen=True)
@@ -81,6 +82,7 @@ class XhsCreatorFetchResult:
     creator_display_name: str | None
     items: list[XhsCreatorItem]
     raw_payload: dict[str, Any]
+    profile: dict[str, Any] = field(default_factory=dict)
 
 
 class XhsCreatorFetchError(RuntimeError):
@@ -239,6 +241,7 @@ class XhsCreatorConnector:
                     "source": "api_self_info" if self_info.user_id else "page_profile_link",
                 },
             },
+            profile=result.profile,
         )
 
     async def fetch_latest(
@@ -292,6 +295,9 @@ class XhsCreatorConnector:
         except Exception:
             pass
         creator_display_name = await _extract_creator_display_name(page)
+        creator_profile = await _extract_creator_profile(page)
+        if not creator_display_name:
+            creator_display_name = creator_profile.get("nickname")
         payload = _first_payload_with_notes(captured_payloads)
         if payload is None:
             payload = await _fetch_creator_notes(page, creator_context=creator_context, limit=limit)
@@ -330,6 +336,7 @@ class XhsCreatorConnector:
                 "captured_user_posted_count": len(captured_payloads),
                 "creator_context": creator_context.to_payload(),
             },
+            profile=creator_profile,
         )
 
 
@@ -459,6 +466,71 @@ def _candidate_to_creator_context(candidate: dict[str, str]) -> dict[str, str] |
 
 def _normalize_public_identifier(value: str) -> str:
     return "".join(ch.lower() for ch in str(value or "") if not ch.isspace())
+
+
+async def _extract_creator_profile(page: Page) -> dict[str, Any]:
+    try:
+        raw = await page.evaluate(
+            """
+            () => {
+              const state = window.__INITIAL_STATE__ || {};
+              const value = state?.user?.userPageData || state?.userPageData || null;
+              if (!value) return null;
+              return JSON.parse(JSON.stringify(value));
+            }
+            """
+        )
+    except Exception:
+        return {}
+    return normalize_xhs_creator_profile(raw if isinstance(raw, dict) else {})
+
+
+def normalize_xhs_creator_profile(raw: dict[str, Any]) -> dict[str, Any]:
+    basic = raw.get("basicInfo") if isinstance(raw.get("basicInfo"), dict) else {}
+    interactions = raw.get("interactions") if isinstance(raw.get("interactions"), list) else []
+    counts = {
+        str(item.get("type") or ""): parse_visible_count(str(item.get("count") or ""))
+        for item in interactions
+        if isinstance(item, dict)
+    }
+    tags = raw.get("tags") if isinstance(raw.get("tags"), list) else []
+    verify_names = [
+        str(item.get("name"))
+        for item in tags
+        if isinstance(item, dict) and item.get("name")
+    ]
+    avatar = basic.get("images") or basic.get("image") or basic.get("avatar")
+    if isinstance(avatar, list):
+        avatar = avatar[0] if avatar else None
+    works_count = _first_profile_count(
+        raw,
+        "noteCount",
+        "notesCount",
+        "postedNoteCount",
+        "worksCount",
+    )
+    return {
+        "nickname": basic.get("nickname"),
+        "avatar_url": str(avatar) if avatar else None,
+        "fans_count": counts.get("fans"),
+        "total_liked_collected": counts.get("interaction"),
+        "works_count": works_count,
+        "verify_type": " / ".join(verify_names) or None,
+        "signature": basic.get("desc"),
+        "ip_location": basic.get("ipLocation"),
+        "raw": raw,
+    }
+
+
+def _first_profile_count(raw: dict[str, Any], *keys: str) -> int | None:
+    for key in keys:
+        if raw.get(key) is not None:
+            return parse_visible_count(str(raw[key]))
+    basic = raw.get("basicInfo") if isinstance(raw.get("basicInfo"), dict) else {}
+    for key in keys:
+        if basic.get(key) is not None:
+            return parse_visible_count(str(basic[key]))
+    return None
 
 
 async def _extract_creator_notes_from_dom(page: Page, *, fallback_xsec_source: str, limit: int) -> list[dict[str, Any]]:

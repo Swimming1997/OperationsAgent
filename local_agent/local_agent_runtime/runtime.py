@@ -16,8 +16,6 @@ from local_agent_runtime.connectors.xhs.detail_probe import XhsDetailProbe
 from local_agent_runtime.connectors.xhs.homefeed_probe import XhsHomeFeedProbe
 from local_agent_runtime.connectors.xhs.search_probe import XhsSearchProbe
 from local_agent_runtime.connectors.xhs.search_suggest_probe import XhsSearchSuggestProbe
-from local_agent_runtime.connectors.douyin.feed_probe import DouyinFeedProbe
-from local_agent_runtime.connectors.douyin.suggest_probe import DouyinSearchSuggestProbe
 from local_agent_runtime.engine.search_config import SearchQueryConfig
 from local_agent_runtime.audit.summary import engine_audit_summary
 from local_agent_runtime.enums import ErrorCode, JobStatus, JobType, Platform, SessionStatus, SourceSurface
@@ -29,6 +27,12 @@ from local_agent_runtime.contracts import (
 )
 from local_agent_runtime.sessions.registry import default_session_registry
 from local_agent_runtime.engine.pacing import PacingController
+from local_agent_runtime.engine.poll_backoff import IdlePollBackoff
+from local_agent_runtime.engine.account_risk import (
+    AccountRiskBudgetExceeded,
+    AccountRiskController,
+    AccountRiskPolicy,
+)
 from local_agent_runtime.engine.session import SessionProviderRegistry
 
 
@@ -45,11 +49,20 @@ class AgentRuntimeConfig:
     account_sessions: dict[str, dict[str, Any]] = field(default_factory=dict)
     poll_interval_seconds: float = 5.0
     heartbeat_interval_seconds: float = 30.0
+    idle_poll_max_seconds: float = 30.0
+    idle_poll_multiplier: float = 1.8
+    idle_poll_jitter_ratio: float = 0.2
     max_jobs_per_claim: int = 1
     local_bridge_enabled: bool = True
     local_bridge_host: str = "127.0.0.1"
     local_bridge_port: int = 18765
     local_bridge_token: str | None = None
+    local_storage_enabled: bool = False
+    local_database_path: str | None = None
+    risk_control_enabled: bool = False
+    risk_state_path: str | None = None
+    default_risk_policy: dict[str, Any] = field(default_factory=dict)
+    account_risk_policies: dict[str, dict[str, Any]] = field(default_factory=dict)
     supports_account_login: bool = True
     supported_job_types: tuple[str, ...] = (
         JobType.FEED_COLLECT.value,
@@ -91,14 +104,17 @@ class RuntimeFailure(Exception):
 def build_agent_capabilities_payload(config: AgentRuntimeConfig) -> dict[str, Any]:
     return {
         "platforms": [Platform.XHS.value, Platform.DOUYIN.value],
-        # Per-platform job coverage: Douyin currently only implements keyword
-        # search collection; other Douyin job types are not wired yet.
+        # Per-platform job coverage is explicit so Central does not assign a
+        # platform/job combination that this runtime cannot execute.
         "platform_job_types": {
             Platform.XHS.value: list(config.supported_job_types),
             Platform.DOUYIN.value: [
                 JobType.SEARCH_COLLECT.value,
                 JobType.SEARCH_SUGGEST.value,
                 JobType.FEED_COLLECT.value,
+                JobType.DETAIL_FETCH.value,
+                JobType.COMMENT_FETCH.value,
+                JobType.CREATOR_MONITOR.value,
             ],
         },
         "supports_cdp": bool(config.cdp_url),
@@ -677,200 +693,7 @@ class XhsJobExecutor:
         )
 
 
-class DouyinJobExecutor:
-    """Douyin job executor.
-
-    Currently implements keyword search collection via response interception
-    (validated against the live site). Other Douyin job types are deferred and
-    return a non-fatal ``partial_success`` so the central scheduler is not
-    blocked while they are being built.
-    """
-
-    SEARCH_CAPABILITY_KEY = "douyin.search.videos"
-    FEED_CAPABILITY_KEY = "douyin.feed.recommend"
-
-    def __init__(
-        self,
-        *,
-        client: CenterClient,
-        config: AgentRuntimeConfig,
-        session_registry: SessionProviderRegistry | None = None,
-    ):
-        self.client = client
-        self.config = config
-        self.session_registry = session_registry or default_session_registry
-
-    SUPPORTED_JOB_TYPES = (
-        JobType.SEARCH_COLLECT.value,
-        JobType.SEARCH_SUGGEST.value,
-        JobType.FEED_COLLECT.value,
-    )
-
-    async def execute(self, *, agent_id: str, job: ClaimedJobPayload) -> JobExecutionResult:
-        if job.job_type not in self.SUPPORTED_JOB_TYPES:
-            return JobExecutionResult(
-                status=JobStatus.PARTIAL_SUCCESS.value,
-                result_summary={"unsupported_job_type": job.job_type, "platform": Platform.DOUYIN.value},
-            )
-        session_meta = await self._session_meta(agent_id=agent_id, account_id=job.account_id)
-        session = await self.session_registry.create(Platform.DOUYIN.value).acquire(session_meta=session_meta)
-        if session.status != SessionStatus.READY:
-            await session.close()
-            raise RuntimeFailure(
-                _session_error_code(session.status),
-                session.message or f"session status: {session.status.value}",
-                retryable=True,
-            )
-        try:
-            if job.job_type == JobType.SEARCH_SUGGEST.value:
-                return await self._run_search_suggest(job, session.page)
-            if job.job_type == JobType.FEED_COLLECT.value:
-                return await self._run_homefeed(job, session.page)
-            return await self._run_search_collect(job, session.page)
-        finally:
-            await session.close()
-
-    async def _session_meta(self, *, agent_id: str, account_id: str | None) -> dict[str, Any]:
-        if account_id and account_id in self.config.account_sessions:
-            return dict(self.config.account_sessions[account_id])
-        if account_id:
-            try:
-                meta = await self.client.get_ready_session(account_id, agent_id)
-                if meta:
-                    return dict(meta)
-            except httpx.HTTPStatusError:
-                pass
-        if self.config.cdp_url:
-            return {"cdp_url": self.config.cdp_url}
-        raise RuntimeFailure(ErrorCode.SESSION_CONNECT_FAILED, "no ready account session and no fallback cdp_url", retryable=True)
-
-    async def _run_search_collect(self, job: ClaimedJobPayload, page) -> JobExecutionResult:
-        cfg = SearchQueryConfig.from_payload(job.payload)
-        per_keyword = max(1, cfg.max_items // max(len(cfg.keywords), 1)) if cfg.keywords else cfg.max_items
-        candidates_by_id: dict[str, FeedCandidateInput] = {}
-        per_keyword_summary: list[dict[str, Any]] = []
-        merged_report: dict[str, Any] = {}
-        for keyword in cfg.keywords:
-            probe = DouyinFeedProbe(
-                keyword=keyword,
-                target_count=per_keyword,
-                sort=cfg.sort,
-                publish_time=cfg.publish_time,
-                duration=cfg.duration,
-                start_rank=cfg.start_rank,
-            )
-            items, report = await probe.collect(page)
-            merged_report = report
-            for candidate in items:
-                candidates_by_id.setdefault(candidate.platform_content_id, candidate)
-            per_keyword_summary.append({"keyword": keyword, "items_seen": len(items)})
-        candidates = list(candidates_by_id.values())[: cfg.max_items]
-        ingestion = await self.client.ingest_feed_candidates(
-            FeedCandidateIngestionRequest(job_id=job.job_id, account_id=job.account_id, candidates=candidates)
-        )
-        results = ingestion.get("results") or []
-        new_count = sum(1 for item in results if item.get("is_new_content"))
-        detail_jobs = sum(1 for item in results if item.get("detail_job_enqueued"))
-        ingestion_total = len(results)
-        return JobExecutionResult(
-            status=JobStatus.SUCCESS.value,
-            checkpoint={"items_seen": len(candidates), "keywords": cfg.keywords},
-            result_summary={
-                **merged_report,
-                "platform": Platform.DOUYIN.value,
-                "keywords": cfg.keywords,
-                "sort": cfg.sort,
-                "publish_time": cfg.publish_time,
-                "duration": cfg.duration,
-                "start_rank": cfg.start_rank,
-                "per_keyword_summary": per_keyword_summary,
-                "normalized_items": len(candidates),
-                "ingestion_success_count": ingestion_total,
-                "new_content_count": new_count,
-                "duplicate_content_count": max(0, ingestion_total - new_count),
-                "detail_jobs_enqueued": detail_jobs,
-                "runtime": "local_agent_runtime_v1",
-                "engine_audit": engine_audit_summary(
-                    capability_key=self.SEARCH_CAPABILITY_KEY,
-                    surface="search",
-                    report=merged_report,
-                ),
-            },
-        )
-
-
-    async def _run_homefeed(self, job: ClaimedJobPayload, page) -> JobExecutionResult:
-        payload = job.payload
-        target_count = int(payload.get("max_items") or payload.get("target_count") or 30)
-        start_rank = int(payload.get("start_rank") or 0)
-        probe = DouyinFeedProbe(
-            keyword=None,
-            target_count=target_count,
-            start_rank=start_rank,
-        )
-        candidates, report = await probe.collect(page)
-        ingestion = await self.client.ingest_feed_candidates(
-            FeedCandidateIngestionRequest(job_id=job.job_id, account_id=job.account_id, candidates=candidates)
-        )
-        results = ingestion.get("results") or []
-        new_count = sum(1 for item in results if item.get("is_new_content"))
-        detail_jobs = sum(1 for item in results if item.get("detail_job_enqueued"))
-        ingestion_total = len(results)
-        return JobExecutionResult(
-            status=JobStatus.SUCCESS.value,
-            checkpoint={"items_seen": len(candidates), "start_rank": start_rank},
-            result_summary={
-                **report,
-                "platform": Platform.DOUYIN.value,
-                "start_rank": start_rank,
-                "normalized_items": len(candidates),
-                "ingestion_success_count": ingestion_total,
-                "new_content_count": new_count,
-                "duplicate_content_count": max(0, ingestion_total - new_count),
-                "detail_jobs_enqueued": detail_jobs,
-                "runtime": "local_agent_runtime_v1",
-                "engine_audit": engine_audit_summary(
-                    capability_key=self.FEED_CAPABILITY_KEY,
-                    surface="homefeed",
-                    report=report,
-                ),
-            },
-        )
-
-    async def _run_search_suggest(self, job: ClaimedJobPayload, page) -> JobExecutionResult:
-        payload = job.payload
-        core_keyword = str(payload.get("core_keyword") or payload.get("keyword") or "").strip()
-        items, report = await DouyinSearchSuggestProbe(core_keyword=core_keyword).collect(page)
-        ingestion_status = "skipped"
-        if items and hasattr(self.client, "ingest_search_suggestions"):
-            try:
-                await self.client.ingest_search_suggestions(
-                    {
-                        "job_id": job.job_id,
-                        "account_id": job.account_id,
-                        "platform": Platform.DOUYIN.value,
-                        "core_keyword": core_keyword,
-                        "items": items,
-                    }
-                )
-                ingestion_status = "ok"
-            except Exception:
-                # Central endpoint may not be deployed yet; keep the words in the
-                # result summary so the run is not lost, and report degraded.
-                ingestion_status = "failed"
-        return JobExecutionResult(
-            status=JobStatus.SUCCESS.value,
-            checkpoint={"suggestion_count": len(items)},
-            result_summary={
-                **report,
-                "platform": Platform.DOUYIN.value,
-                "core_keyword": core_keyword,
-                "suggestion_count": len(items),
-                "ingestion_status": ingestion_status,
-                "items": items,
-                "runtime": "local_agent_runtime_v1",
-            },
-        )
+from local_agent_runtime.executors.douyin import DouyinJobExecutor
 
 
 class PlatformJobExecutor:
@@ -908,14 +731,50 @@ class LocalAgentRuntime:
         executor: Any | None = None,
         login_executor: Any | None = None,
         pacing: PacingController | None = None,
+        account_risk: AccountRiskController | None = None,
+        poll_backoff: IdlePollBackoff | None = None,
     ):
         self.config = config
-        self.client = client or CenterClient(base_url=config.center_base_url)
+        base_client = client or CenterClient(base_url=config.center_base_url)
+        if config.local_storage_enabled:
+            from pathlib import Path
+
+            from local_agent_runtime.storage import LocalFirstIngestionGateway, LocalIntelligenceRepository
+
+            project_root = Path(config.project_root or Path.cwd())
+            database_path = Path(config.local_database_path) if config.local_database_path else project_root / "data" / "local_intelligence.db"
+            if not database_path.is_absolute():
+                database_path = project_root / database_path
+            self.local_repository = LocalIntelligenceRepository(database_path)
+            self.client = LocalFirstIngestionGateway(remote=base_client, repository=self.local_repository)
+        else:
+            self.local_repository = None
+            self.client = base_client
         self.agent_id = config.agent_id
         self.executor = executor
         self.login_executor = login_executor
         self.pacing = pacing or PacingController()
+        if account_risk is not None or config.risk_control_enabled:
+            from pathlib import Path
+
+            project_root = Path(config.project_root or Path.cwd())
+            risk_state_path = Path(config.risk_state_path) if config.risk_state_path else project_root / "data" / "account_risk.db"
+            if not risk_state_path.is_absolute():
+                risk_state_path = project_root / risk_state_path
+            self.account_risk = account_risk or AccountRiskController(
+                risk_state_path,
+                default_policy=AccountRiskPolicy.from_mapping(config.default_risk_policy),
+                account_policies=config.account_risk_policies,
+            )
+        else:
+            self.account_risk = None
         self.running_job_ids: set[str] = set()
+        self.poll_backoff = poll_backoff or IdlePollBackoff(
+            minimum_seconds=config.poll_interval_seconds,
+            maximum_seconds=min(config.idle_poll_max_seconds, config.heartbeat_interval_seconds),
+            multiplier=config.idle_poll_multiplier,
+            jitter_ratio=config.idle_poll_jitter_ratio,
+        )
         self._last_heartbeat_at = 0.0
         self._registered_this_process = False
 
@@ -928,15 +787,30 @@ class LocalAgentRuntime:
 
     async def run_forever(self) -> None:
         while True:
+            handled = 0
+            request_failed = False
             try:
-                await self.run_once()
-            except httpx.RequestError as exc:
+                handled = await self.run_once()
+            except httpx.HTTPError as exc:
                 logging.getLogger("local_agent").warning("transient center request error: %s", exc)
-            await asyncio.sleep(self.config.poll_interval_seconds)
+                request_failed = True
+            delay = self.poll_backoff.next_delay(
+                handled_count=handled,
+                request_failed=request_failed,
+            )
+            await asyncio.sleep(delay)
 
     async def run_once(self) -> int:
         agent_id = await self.ensure_registered()
         await self._heartbeat_if_due(agent_id)
+        if hasattr(self.client, "flush_pending_outbox"):
+            replay = await self.client.flush_pending_outbox(limit=20)
+            if replay["sent"] or replay["failed"]:
+                logging.getLogger("local_agent").info(
+                    "Local ingestion outbox replay sent=%s failed=%s",
+                    replay["sent"],
+                    replay["failed"],
+                )
         handled = 0
         if self.config.supports_account_login:
             handled += await self._handle_login_sessions(agent_id)
@@ -982,10 +856,16 @@ class LocalAgentRuntime:
         now = time.monotonic()
         if self._last_heartbeat_at and now - self._last_heartbeat_at < self.config.heartbeat_interval_seconds:
             return
+        capabilities = build_agent_capabilities_payload(self.config)
+        if self.account_risk is not None:
+            capabilities["metadata"] = {
+                **capabilities.get("metadata", {}),
+                "account_risk": self.account_risk.health_snapshot(),
+            }
         await self.client.heartbeat(
             agent_id,
             sorted(self.running_job_ids),
-            capabilities=build_agent_capabilities_payload(self.config),
+            capabilities=capabilities,
             agent_version=self.config.agent_version,
         )
         self._last_heartbeat_at = now
@@ -1001,16 +881,90 @@ class LocalAgentRuntime:
     async def _handle_job(self, agent_id: str, job: ClaimedJobPayload) -> None:
         self.running_job_ids.add(job.job_id)
         executor = self.executor or PlatformJobExecutor(client=self.client, config=self.config)
+        if self.local_repository is not None:
+            self.local_repository.start_collect_run(central_job_id=job.job_id, job_type=job.job_type)
+        if self.account_risk is not None:
+            try:
+                await self.account_risk.before_job(job.account_id)
+            except AccountRiskBudgetExceeded as exc:
+                failure = RuntimeFailure(
+                    ErrorCode.RATE_LIMITED,
+                    "account daily job budget exceeded",
+                    retryable=True,
+                    raw_context={
+                        "reason": exc.decision.reason,
+                        "jobs_used_today": exc.decision.jobs_used_today,
+                        "daily_job_budget": exc.decision.daily_job_budget,
+                    },
+                )
+                if self.local_repository is not None:
+                    self.local_repository.finish_collect_run(
+                        central_job_id=job.job_id,
+                        status=JobStatus.FAILED.value,
+                        error_summary={
+                            "code": failure.code.value,
+                            "message": failure.message,
+                            "retryable": failure.retryable,
+                        },
+                    )
+                await self.client.fail_job(job.job_id, agent_id, failure, job.checkpoint)
+                self.running_job_ids.discard(job.job_id)
+                return
         try:
             await self.client.start_job(job.job_id, agent_id)
             result = await executor.execute(agent_id=agent_id, job=job)
             if result.checkpoint:
                 await self.client.progress_job(job.job_id, agent_id, result.checkpoint, result.result_summary)
             await self.client.complete_job(job.job_id, agent_id, result.status, result.result_summary)
+            if self.account_risk is not None:
+                self.account_risk.record_success(job.account_id)
+            if self.local_repository is not None:
+                self.local_repository.finish_collect_run(
+                    central_job_id=job.job_id,
+                    status=result.status,
+                    item_count=int(
+                        result.result_summary.get("items_seen")
+                        or result.result_summary.get("normalized_items")
+                        or result.result_summary.get("comments_inserted")
+                        or 0
+                    ),
+                )
         except RuntimeFailure as exc:
+            if self.account_risk is not None:
+                self.account_risk.record_failure(
+                    job.account_id,
+                    error_code=exc.code,
+                    retryable=exc.retryable,
+                )
+            if self.local_repository is not None:
+                self.local_repository.finish_collect_run(
+                    central_job_id=job.job_id,
+                    status=JobStatus.FAILED.value,
+                    error_summary={
+                        "code": exc.code.value,
+                        "message": exc.message,
+                        "retryable": exc.retryable,
+                    },
+                )
             await self.client.fail_job(job.job_id, agent_id, exc, job.checkpoint)
         except Exception as exc:
             failure = RuntimeFailure(ErrorCode.INTERNAL_ENGINE_ERROR, str(exc), retryable=True)
+            if self.account_risk is not None:
+                self.account_risk.record_failure(
+                    job.account_id,
+                    error_code=failure.code,
+                    retryable=failure.retryable,
+                )
+            if self.local_repository is not None:
+                self.local_repository.finish_collect_run(
+                    central_job_id=job.job_id,
+                    status=JobStatus.FAILED.value,
+                    error_summary={
+                        "code": failure.code.value,
+                        "message": failure.message,
+                        "retryable": failure.retryable,
+                    },
+                )
             await self.client.fail_job(job.job_id, agent_id, failure, job.checkpoint)
         finally:
             self.running_job_ids.discard(job.job_id)

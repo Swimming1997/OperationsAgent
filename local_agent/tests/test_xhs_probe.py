@@ -4,7 +4,9 @@ from pathlib import Path
 
 from local_agent_runtime.connectors.xhs.normalizer import (
     candidate_field_report,
+    extract_xhs_card_image_urls,
     extract_xhs_content_id,
+    iter_xhs_api_cards,
     normalize_xhs_card,
     parse_visible_count,
 )
@@ -87,26 +89,67 @@ def test_xhs_selfinfo_payload_detects_ready_and_expired():
 def test_xhs_browser_markers_detect_ready_when_selfinfo_unavailable():
     ready = evaluate_xhs_browser_markers(
         url="https://www.xiaohongshu.com/explore",
-        visible_text="首页 推荐 消息 发布",
+        visible_text="首页 推荐 发布 通知 我",
         cookie_names=["a1", "web_session", "id_token"],
-        hrefs=["https://www.xiaohongshu.com/user/profile/613a04fe000000000201d25c"],
+        profile_nav_hrefs=["https://www.xiaohongshu.com/user/profile/613a04fe000000000201d25c"],
     )
     guest = evaluate_xhs_browser_markers(
         url="https://www.xiaohongshu.com/explore",
         visible_text="首页 推荐 消息 发布 登录 手机号 验证码",
         cookie_names=["a1", "web_session"],
-        hrefs=["https://www.xiaohongshu.com/user/profile/613a04fe000000000201d25c"],
+        profile_nav_hrefs=["https://www.xiaohongshu.com/user/profile/613a04fe000000000201d25c"],
+    )
+    feed_author_only = evaluate_xhs_browser_markers(
+        url="https://www.xiaohongshu.com/explore",
+        visible_text="首页 推荐 发布",
+        cookie_names=["a1", "web_session"],
+        profile_nav_hrefs=[],
     )
 
     assert ready[0] == SessionStatus.READY
     assert guest[0] == SessionStatus.EXPIRED
+    assert feed_author_only == (None, None)
 
 
 def test_xhs_helpers_parse_ids_and_counts():
     assert extract_xhs_content_id("https://www.xiaohongshu.com/explore/65abc123") == "65abc123"
     assert parse_visible_count("1.5万") == 15000
     assert parse_visible_count("2k") == 2000
+    assert parse_visible_count(345) == 345
     assert parse_visible_count("赞") is None
+
+
+def test_xhs_api_cards_filter_non_notes_and_extract_all_images():
+    payload = {
+        "items": [
+            {
+                "id": "note-1",
+                "model_type": "note",
+                "note_card": {
+                    "display_title": "论文经验",
+                    "image_list": [
+                        {"info_list": [{"image_scene": "WB_DFT", "url": "https://img.example/1.webp"}]},
+                        {"info_list": [{"image_scene": "WB_DFT", "url": "https://img.example/2.webp"}]},
+                    ],
+                },
+            },
+            {
+                "id": "query-1",
+                "model_type": "rec_query",
+                "rec_query": {"title": "相关搜索"},
+            },
+        ]
+    }
+
+    cards = iter_xhs_api_cards(payload)
+
+    assert len(cards) == 1
+    assert cards[0]["platform_content_id"] == "note-1"
+    assert cards[0]["image_urls"] == [
+        "https://img.example/1.webp",
+        "https://img.example/2.webp",
+    ]
+    assert extract_xhs_card_image_urls(cards[0]["api_raw"]) == cards[0]["image_urls"]
 
 
 def test_homefeed_normalizer_defaults_blank_xsec_source_to_pc_feed():

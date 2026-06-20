@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from intelligence_engine.db.models import AccountSession, Job, JobEvent, LocalAgent, PlatformAccount, utcnow
 from intelligence_engine.domain.enums import JobStatus, JobType
 from intelligence_engine.jobs.state_machine import assert_transition
+from shared_contracts.failure_policy import classify_failure
 
 
 def enum_value(value):
@@ -63,13 +64,32 @@ class JobRepository:
     def get(self, job_id: str) -> Job | None:
         return self.db.get(Job, job_id)
 
-    def fail_stale_running_jobs(self, *, max_running_seconds: int) -> int:
+    def _list_stale_running_jobs(self, *, max_running_seconds: int) -> list[Job]:
         now = utcnow()
         if now.tzinfo is None:
             now = now.replace(tzinfo=timezone.utc)
         cutoff = now - timedelta(seconds=max_running_seconds)
         jobs = list(self.db.scalars(select(Job).where(Job.status == JobStatus.RUNNING.value).where(Job.started_at.is_not(None))))
-        jobs = [job for job in jobs if _coerce_utc(job.started_at) < cutoff]
+        return [job for job in jobs if _coerce_utc(job.started_at) < cutoff]
+
+    def recover_stale_running_jobs(self, *, max_running_seconds: int) -> tuple[int, int]:
+        jobs = self._list_stale_running_jobs(max_running_seconds=max_running_seconds)
+        recovered = 0
+        for job in jobs:
+            self.mark_failed(
+                job,
+                error_code="job_execution_timeout",
+                error_message=f"job exceeded running timeout ({max_running_seconds}s)",
+                checkpoint=job.checkpoint_json,
+            )
+            if job.retry_count < job.max_retries:
+                self.retry_failed_job(job.id, reason="automatic_stale_running_recovery")
+                recovered += 1
+        self.db.flush()
+        return len(jobs), recovered
+
+    def fail_stale_running_jobs(self, *, max_running_seconds: int) -> int:
+        jobs = self._list_stale_running_jobs(max_running_seconds=max_running_seconds)
         for job in jobs:
             self.mark_failed(
                 job,
@@ -285,7 +305,17 @@ class JobRepository:
         self.add_event(job.id, "job_success" if target_status == JobStatus.SUCCESS else "job_partial_success", result_summary)
         return job
 
-    def mark_failed(self, job: Job, *, error_code: str, error_message: str, checkpoint: dict | None = None, agent_id: str | None = None) -> Job:
+    def mark_failed(
+        self,
+        job: Job,
+        *,
+        error_code: str,
+        error_message: str,
+        checkpoint: dict | None = None,
+        agent_id: str | None = None,
+        retryable: bool | None = None,
+        raw_context: dict | None = None,
+    ) -> Job:
         self._ensure_claim_owner(job, agent_id=agent_id)
         assert_transition(job.status, JobStatus.FAILED)
         job.status = JobStatus.FAILED.value
@@ -295,7 +325,19 @@ class JobRepository:
         job.retry_count += 1
         job.finished_at = utcnow()
         job.updated_at = job.finished_at
-        self.add_event(job.id, "job_failed", {"error_code": error_code, "error_message": error_message})
+        policy = classify_failure(error_code)
+        self.add_event(
+            job.id,
+            "job_failed",
+            {
+                "error_code": error_code,
+                "error_message": error_message,
+                "failure_category": policy.category,
+                "retryable": policy.retryable if retryable is None else retryable,
+                "account_health": policy.account_health,
+                "raw_context": raw_context or {},
+            },
+        )
         return job
 
     def pause(self, job: Job) -> Job:

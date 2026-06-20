@@ -12,8 +12,10 @@ if hasattr(sys.stderr, "reconfigure"):
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+REPOSITORY_ROOT = PROJECT_ROOT.parent
+for path in (PROJECT_ROOT, REPOSITORY_ROOT):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
 
 from local_agent_runtime.audit.xhs_engine_audit import XhsEngineAuditor
 from local_agent_runtime.connectors.xhs.api_client import format_self_info_terminal_lines
@@ -29,6 +31,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit-comments", type=int, default=20)
     parser.add_argument("--url")
     parser.add_argument("--creator-url")
+    parser.add_argument("--export-zip", action="store_true")
     return parser.parse_args()
 
 
@@ -49,6 +52,8 @@ async def main() -> int:
     print(f"总耗时: {summary.total_ms:.2f} ms")
     print(f"summary.json: {logger.summary_json_path}")
     print(f"summary.md: {logger.summary_md_path}")
+    if args.export_zip:
+        print(f"export.zip: {logger.export_bundle()}")
     if args.surface == "capabilities":
         for record in summary.records:
             for item in record.payload.get("capabilities", []):

@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from local_agent_runtime.local_bridge import LocalBridgeService
+import pytest
+
+from local_agent_runtime.local_bridge import LocalBridgeConfig, LocalBridgeServer, LocalBridgeService
 from local_agent_runtime.runtime import AgentRuntimeConfig
 
 
@@ -65,5 +67,61 @@ def test_local_bridge_requires_token_when_configured():
         assert service.require_token("demo-token") is True
         assert service.require_token(None) is False
         assert service.require_token("wrong") is False
+    finally:
+        service.loop.close()
+
+
+def test_local_bridge_rejects_cross_site_request_without_token():
+    service = LocalBridgeService(config=AgentRuntimeConfig(), loop=asyncio.new_event_loop())
+    try:
+        assert service.authorize_request(
+            token=None,
+            origin="https://attacker.example",
+            host="127.0.0.1:18765",
+            fetch_site="cross-site",
+        ) is False
+        assert service.authorize_request(
+            token=None,
+            origin="http://127.0.0.1:18765",
+            host="127.0.0.1:18765",
+            fetch_site="same-origin",
+        ) is True
+    finally:
+        service.loop.close()
+
+
+def test_local_bridge_token_allows_workspace_request_regardless_of_origin():
+    service = LocalBridgeService(
+        config=AgentRuntimeConfig(local_bridge_token="demo-token"),
+        loop=asyncio.new_event_loop(),
+    )
+    try:
+        assert service.authorize_request(
+            token="demo-token",
+            origin="https://attacker.example",
+            host="127.0.0.1:18765",
+            fetch_site="cross-site",
+        ) is True
+        assert service.authorize_request(
+            token="wrong",
+            origin="http://127.0.0.1:18765",
+            host="127.0.0.1:18765",
+            fetch_site="same-origin",
+        ) is False
+    finally:
+        service.loop.close()
+
+
+def test_local_bridge_server_rejects_mismatched_token_configuration():
+    service = LocalBridgeService(
+        config=AgentRuntimeConfig(local_bridge_token="runtime-token"),
+        loop=asyncio.new_event_loop(),
+    )
+    try:
+        with pytest.raises(ValueError, match="token must match"):
+            LocalBridgeServer(
+                bridge_config=LocalBridgeConfig(token="different-token"),
+                service=service,
+            )
     finally:
         service.loop.close()

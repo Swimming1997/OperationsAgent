@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import zipfile
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -518,3 +519,22 @@ class EngineAuditLogger:
             lines.extend(self_info_markdown_section(self_info_summary))
         lines.extend(artifacts_markdown_section(summary.artifacts))
         self.summary_md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def export_bundle(self) -> Path:
+        bundle_path = self.output_dir / f"engine_audit_{self.run_id}.zip"
+        files = sorted(
+            path
+            for path in self.output_dir.rglob("*")
+            if path.is_file() and path != bundle_path
+        )
+        manifest = {
+            "run_id": self.run_id,
+            "file_count": len(files),
+            "files": [path.relative_to(self.output_dir).as_posix() for path in files],
+        }
+        manifest_name = f"engine_audit_{self.run_id}.manifest.json"
+        with zipfile.ZipFile(bundle_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr(manifest_name, json.dumps(manifest, ensure_ascii=False, indent=2))
+            for path in files:
+                archive.write(path, path.relative_to(self.output_dir).as_posix())
+        return bundle_path

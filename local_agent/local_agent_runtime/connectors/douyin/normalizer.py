@@ -84,6 +84,21 @@ def extract_aweme_list(data: Any) -> list[dict[str, Any]]:
     return out
 
 
+def unwrap_aweme_detail(data: Any) -> dict[str, Any] | None:
+    if not isinstance(data, dict):
+        return None
+    detail = data.get("aweme_detail")
+    if isinstance(detail, dict):
+        return detail
+    nested = data.get("data")
+    if isinstance(nested, dict):
+        detail = nested.get("aweme_detail") or nested.get("aweme")
+        if isinstance(detail, dict):
+            return detail
+    items = extract_aweme_list(data)
+    return items[0] if items else None
+
+
 def normalize_douyin_suggestions(
     data: Any,
     *,
@@ -238,7 +253,12 @@ def normalize_douyin_aweme(
     )
 
 
-def normalize_douyin_detail(aweme: dict[str, Any] | None) -> DetailSnapshotInput:
+def normalize_douyin_detail(
+    aweme: dict[str, Any] | None,
+    *,
+    platform_content_id: str | None = None,
+    diagnostics: dict[str, Any] | None = None,
+) -> DetailSnapshotInput:
     aweme = aweme if isinstance(aweme, dict) else {}
     author = aweme.get("author") if isinstance(aweme.get("author"), dict) else {}
     statistics = aweme.get("statistics") if isinstance(aweme.get("statistics"), dict) else {}
@@ -257,7 +277,10 @@ def normalize_douyin_detail(aweme: dict[str, Any] | None) -> DetailSnapshotInput
         collect_count=_to_int(statistics.get("collect_count")),
         share_count=_to_int(statistics.get("share_count")),
         publish_time=_epoch_to_dt(aweme.get("create_time")),
-        raw_payload={"aweme_id": str(aweme.get("aweme_id") or "")},
+        raw_payload={
+            "aweme_id": str(aweme.get("aweme_id") or platform_content_id or ""),
+            "diagnostics": diagnostics or {},
+        },
     )
 
 
@@ -279,3 +302,46 @@ def normalize_douyin_comment(comment: dict[str, Any] | None) -> CommentSnapshotI
         created_time=_epoch_to_dt(comment.get("create_time")),
         raw_payload={"cid": comment_id},
     )
+
+
+def normalize_douyin_comments(data: Any, *, limit: int = 20) -> list[CommentSnapshotInput]:
+    """Normalize comment-list response payloads captured from Douyin XHR."""
+
+    payloads = data if isinstance(data, list) else [data]
+    normalized: list[CommentSnapshotInput] = []
+    seen: set[str] = set()
+    for payload in payloads:
+        if not isinstance(payload, dict):
+            continue
+        containers = [payload]
+        if isinstance(payload.get("data"), dict):
+            containers.append(payload["data"])
+        for container in containers:
+            comments = container.get("comments")
+            if not isinstance(comments, list):
+                continue
+            for raw in comments:
+                item = normalize_douyin_comment(raw)
+                if item is None or item.platform_comment_id in seen:
+                    continue
+                normalized.append(item)
+                seen.add(item.platform_comment_id)
+                if len(normalized) >= limit:
+                    return normalized
+    return normalized
+
+
+def normalize_douyin_creator_profile(user: dict[str, Any] | None) -> dict[str, Any]:
+    user = user if isinstance(user, dict) else {}
+    return {
+        "creator_platform_id": str(user.get("sec_uid") or user.get("uid") or "").strip() or None,
+        "creator_display_name": str(user.get("nickname") or "").strip() or None,
+        "avatar_url": _first_url(user.get("avatar_thumb")) or _first_url(user.get("avatar_medium")),
+        "signature": str(user.get("signature") or "").strip() or None,
+        "follower_count": _to_int(user.get("follower_count")),
+        "following_count": _to_int(user.get("following_count")),
+        "total_favorited": _to_int(user.get("total_favorited")),
+        "aweme_count": _to_int(user.get("aweme_count")),
+        "ip_location": str(user.get("ip_location") or "").strip() or None,
+        "verification": str(user.get("custom_verify") or user.get("enterprise_verify_reason") or "").strip() or None,
+    }

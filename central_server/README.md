@@ -52,6 +52,9 @@ Copy-Item .env.example .env
 
 `INTEL_ENGINE_DATABASE_URL` 未设置时即为 `sqlite:///./data/intelligence_engine.db`。万级列表 P95 压测脚本可在 SQLite 上做冒烟（见 `tests/test_intelligence_list_perf_smoke.py`）；计划中的 1 万条 P95 盖章需 PostgreSQL 时再启 `docker compose` 并改连接串，日常功能开发不必依赖。
 
+生产 PostgreSQL 的环境变量、迁移、备份校验和恢复演练见
+`docs/operations/postgresql-production.md`。
+
 ## 前端角色与导航
 
 | 页面 | 路径 | 可见角色 |

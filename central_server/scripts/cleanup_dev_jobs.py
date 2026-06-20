@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from intelligence_engine.db.session import SessionLocal
 from intelligence_engine.services.job_queue_diagnostics import collect_job_queue_report

@@ -97,7 +97,7 @@ def evaluate_xhs_browser_markers(
     url: str,
     visible_text: str,
     cookie_names: Sequence[str],
-    hrefs: Sequence[str],
+    profile_nav_hrefs: Sequence[str],
 ) -> tuple[SessionStatus | None, str | None]:
     """Use current web UI markers when selfinfo is temporarily unavailable."""
     url_lower = url.lower()
@@ -111,9 +111,10 @@ def evaluate_xhs_browser_markers(
 
     normalized_cookies = {name.lower() for name in cookie_names}
     has_session_cookie = bool({"web_session", "id_token"} & normalized_cookies)
-    has_profile_link = any("/user/profile/" in href.lower() for href in hrefs)
-    has_logged_in_nav = "消息" in visible_text and "发布" in visible_text
-    if has_session_cookie and has_profile_link and has_logged_in_nav:
+    has_profile_nav = any("/user/profile/" in href.lower() for href in profile_nav_hrefs)
+    # “我/个人主页”导航会直接指向当前账号；信息流里的作者主页链接已在浏览器探测层排除。
+    # 新版页面可能把“消息”改为“通知”，不再依赖易变化的导航文案组合。
+    if has_session_cookie and has_profile_nav:
         return SessionStatus.READY, "xhs session ready"
     return None, None
 
@@ -256,19 +257,26 @@ class XhsBrowserSessionProvider:
         try:
             cookies = await context.cookies(["https://www.xiaohongshu.com"])
             cookie_names = [str(cookie.get("name", "")) for cookie in cookies]
-            hrefs = await page.evaluate(
-                """() => Array.from(document.querySelectorAll('a[href]'))
+            profile_nav_hrefs = await page.evaluate(
+                """() => Array.from(document.querySelectorAll('a[href*="/user/profile/"]'))
+                    .filter((link) => {
+                        const text = (link.innerText || link.textContent || '').trim();
+                        const visible = Boolean(
+                            link.offsetWidth || link.offsetHeight || link.getClientRects().length
+                        );
+                        return visible && (text === '我' || text.includes('个人主页'));
+                    })
                     .map((link) => link.href || link.getAttribute('href') || '')
                     .filter(Boolean)
-                    .slice(0, 200)"""
+                    .slice(0, 10)"""
             )
         except Exception:
             return None, None
-        if not isinstance(hrefs, list):
-            hrefs = []
+        if not isinstance(profile_nav_hrefs, list):
+            profile_nav_hrefs = []
         return evaluate_xhs_browser_markers(
             url=page.url,
             visible_text=visible_text,
             cookie_names=cookie_names,
-            hrefs=[str(href) for href in hrefs],
+            profile_nav_hrefs=[str(href) for href in profile_nav_hrefs],
         )

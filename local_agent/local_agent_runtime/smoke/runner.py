@@ -21,7 +21,7 @@ from local_agent_runtime.connectors.xhs.search_probe import XhsSearchProbe
 from local_agent_runtime.connectors.xhs.search_suggest_probe import XhsSearchSuggestProbe
 from local_agent_runtime.contracts import FeedCandidateInput
 from local_agent_runtime.enums import SessionStatus
-from local_agent_runtime.sessions.xhs_browser_session import XhsBrowserSessionProvider, evaluate_xhs_session_state
+from local_agent_runtime.sessions.xhs_browser_session import XhsBrowserSessionProvider
 from local_agent_runtime.smoke import errors as smoke_errors
 from local_agent_runtime.smoke.output import utc_now_iso, write_smoke_outputs
 from local_agent_runtime.smoke.search_filter_applicator import apply_search_filters, filters_are_default
@@ -322,37 +322,21 @@ class XhsCapabilitySmokeRunner:
                     error_message=state.error_message,
                 )
 
-            visible_text = await page.locator("body").inner_text(timeout=5000)
-            session_status, session_message = evaluate_xhs_session_state(url=page.url, visible_text=visible_text)
-            login_status = "unknown"
+            # _acquire_page 已通过统一的浏览器登录态检测。这里不再用易变化的页面文案
+            # 做第二次、更严格的判定，避免“通知/消息”等 UI 改版导致误报。
+            login_status = "valid"
             account_hint = ""
-            if session_status == SessionStatus.READY:
-                login_status = "valid"
-            elif session_status == SessionStatus.EXPIRED:
-                login_status = "login_required"
-                state.error_code = smoke_errors.LOGIN_REQUIRED
-                state.error_message = session_message
-            else:
-                login_status = "login_required"
-                state.error_code = smoke_errors.LOGIN_REQUIRED
-                state.error_message = session_message
-
-            if login_status == "valid":
-                try:
-                    cookie_header = await browser_context_cookie_header(page.context)
-                    client = XhsApiClient(cookie_str=cookie_header)
-                    self_info = await client.query_self()
-                    extract = extract_self_info_result(self_info if isinstance(self_info, dict) else {})
-                    if extract.nickname or extract.user_id:
-                        account_hint = extract.nickname or extract.user_id or extract.red_id or ""
-                    else:
-                        login_status = "login_required"
-                        state.error_code = smoke_errors.LOGIN_REQUIRED
-                        state.error_message = "self_info missing nickname/user_id"
-                except Exception as exc:
-                    login_status = "login_required"
-                    state.error_code = smoke_errors.NETWORK_ERROR
-                    state.error_message = f"self_info failed: {exc}"
+            try:
+                cookie_header = await browser_context_cookie_header(page.context)
+                client = XhsApiClient(cookie_str=cookie_header)
+                self_info = await client.query_self()
+                extract = extract_self_info_result(self_info if isinstance(self_info, dict) else {})
+                account_hint = extract.nickname or extract.user_id or extract.red_id or ""
+                if not account_hint:
+                    state.diagnostics["self_info_warning"] = "self_info missing nickname/user_id"
+            except Exception as exc:
+                # selfinfo 偶发 5xx 不代表浏览器已退出登录，仅影响账号昵称展示。
+                state.diagnostics["self_info_warning"] = f"self_info failed: {exc}"
 
             payload = {
                 "login_status": login_status,

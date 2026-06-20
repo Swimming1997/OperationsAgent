@@ -5,6 +5,8 @@ from intelligence_engine.domain.enums import ErrorCode, JobStatus, JobType
 from intelligence_engine.domain.schemas import ErrorPayload, JobFailRequest
 from intelligence_engine.main import create_app
 from intelligence_engine.storage.repositories.job_repository import JobRepository
+from intelligence_engine.db.models import JobEvent
+from sqlalchemy import select
 
 
 def test_job_fail_api_accepts_runner_dto_payload(db_session):
@@ -36,6 +38,12 @@ def test_job_fail_api_accepts_runner_dto_payload(db_session):
     assert body["status"] == "failed"
     assert body["last_error_code"] == "missing_xsec_context"
     assert body["checkpoint"] == {"cursor": "0"}
+    failed_event = db_session.scalar(
+        select(JobEvent).where(JobEvent.job_id == job.id, JobEvent.event_type == "job_failed")
+    )
+    assert failed_event.event_payload_json["failure_category"] == "context"
+    assert failed_event.event_payload_json["retryable"] is False
+    assert failed_event.event_payload_json["raw_context"] == {"platform_context": {}}
 
 
 def test_job_fail_api_accepts_current_smoke_runner_failure_payload(db_session):

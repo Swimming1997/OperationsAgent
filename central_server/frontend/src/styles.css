@@ -86,6 +86,11 @@ button.compact { padding: 2px 8px; font-size: 11px; min-height: 24px; }
 .data-table { border: 1px solid var(--line); background: #0b1017; overflow: auto; }
 .table-row { display: grid; align-items: center; gap: 8px; width: 100%; min-height: 38px; border: 0; border-bottom: 1px solid #202938; background: transparent; color: var(--text); padding: 0 8px; text-align: left; border-radius: 0; }
 .table-row:last-child { border-bottom: 0; }
+.data-table > .table-row:not(.table-head) {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 64px;
+  contain: layout paint style;
+}
 .table-head { color: #97a3b5; background: #151c27; font-size: 12px; font-weight: 700; position: sticky; top: 0; z-index: 2; }
 .content-row { grid-template-columns: 62px minmax(190px, 1.7fr) 58px 90px 76px 112px 96px 120px 100px; }
 .intelligence-content-row { grid-template-columns: 62px minmax(180px, 1.6fr) 100px 88px minmax(100px, 1fr); }

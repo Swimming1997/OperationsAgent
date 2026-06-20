@@ -29,6 +29,9 @@ project_root = "."
 claim_interval_seconds = 5
 heartbeat_interval_seconds = 30
 max_concurrent_jobs = 1
+idle_poll_max_seconds = 30
+idle_poll_multiplier = 1.8
+idle_poll_jitter_ratio = 0.2
 
 # Intelligence job types (optional if only doing account login)
 supported_job_types = [
@@ -46,6 +49,28 @@ cdp_url = "http://127.0.0.1:9222"
 
 # Runtime declares supports_account_login=true automatically for Local Agent V1.
 # Central must see capabilities.supports_account_login for login session claim.
+
+# P2 Local-First storage. Normalized collection results are written here
+# before the current Central ingestion API is called.
+[local_storage]
+enabled = true
+database_path = "data/local_intelligence.db"
+
+# P2 account protection. State is persisted locally so restart cannot reset
+# the daily budget or failure cooldown.
+[risk_control]
+enabled = true
+state_path = "data/account_risk.db"
+min_interval_seconds = 3
+daily_job_budget = 200
+failure_backoff_base_seconds = 30
+failure_backoff_max_seconds = 1800
+manual_verify_backoff_seconds = 21600
+
+# Optional per-account override:
+# [risk_control.accounts."central-account-id"]
+# min_interval_seconds = 8
+# daily_job_budget = 80
 
 [accounts]
 # Optional legacy per-account CDP overrides. Current account login uses profile_key from central.

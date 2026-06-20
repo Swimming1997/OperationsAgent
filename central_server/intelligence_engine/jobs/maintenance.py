@@ -14,6 +14,7 @@ from intelligence_engine.storage.repositories.job_repository import JobRepositor
 class MaintenanceResult:
     expired_claim_count: int
     stale_running_failed_count: int
+    stale_running_requeued_count: int
     expired_login_session_count: int
     task_run_refreshed_count: int
     dry_run: bool = False
@@ -23,6 +24,7 @@ class MaintenanceResult:
             "dry_run": self.dry_run,
             "expired_claim_count": self.expired_claim_count,
             "stale_running_failed_count": self.stale_running_failed_count,
+            "stale_running_requeued_count": self.stale_running_requeued_count,
             "expired_login_session_count": self.expired_login_session_count,
             "task_run_refreshed_count": self.task_run_refreshed_count,
         }
@@ -37,6 +39,7 @@ class JobMaintenanceService:
             return MaintenanceResult(
                 expired_claim_count=0,
                 stale_running_failed_count=0,
+                stale_running_requeued_count=0,
                 expired_login_session_count=0,
                 task_run_refreshed_count=0,
                 dry_run=True,
@@ -44,13 +47,16 @@ class JobMaintenanceService:
         settings = get_settings()
         job_repo = JobRepository(self.db)
         expired_claims = job_repo.requeue_expired_claims()
-        stale_running = job_repo.fail_stale_running_jobs(max_running_seconds=settings.job_running_timeout_seconds)
+        stale_running, stale_requeued = job_repo.recover_stale_running_jobs(
+            max_running_seconds=settings.job_running_timeout_seconds
+        )
         expired_login_sessions = AccountLoginService(self.db).expire_stale_sessions()
         refreshed_runs = TaskMaterializationService(self.db).refresh_active_task_runs()
         self.db.flush()
         return MaintenanceResult(
             expired_claim_count=expired_claims,
             stale_running_failed_count=stale_running,
+            stale_running_requeued_count=stale_requeued,
             expired_login_session_count=expired_login_sessions,
             task_run_refreshed_count=refreshed_runs,
         )

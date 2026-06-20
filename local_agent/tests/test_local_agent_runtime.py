@@ -18,6 +18,8 @@ from local_agent_runtime.runtime import (
 from local_agent_runtime.contracts import FeedCandidateInput
 from local_agent_runtime.connectors.xhs.creator import XhsCreatorFetchError, XhsCreatorFetchResult, XhsCreatorItem, _current_account_profile_from_page
 from local_agent_runtime.enums import ContentType, ErrorCode, FeedType, JobStatus, JobType, Platform, SourceSurface
+from local_agent_runtime.engine.account_risk import AccountRiskController, AccountRiskPolicy
+from local_agent_runtime.engine.poll_backoff import IdlePollBackoff
 
 
 class FakeCenterClient:
@@ -94,6 +96,16 @@ max_concurrent_jobs = 1
 
 [accounts]
 "account-1" = { platform = "xhs", session_mode = "cdp", cdp_url = "http://127.0.0.1:9222" }
+
+[risk_control]
+enabled = true
+state_path = "data/test-risk.db"
+min_interval_seconds = 7
+daily_job_budget = 50
+
+[risk_control.accounts."account-1"]
+min_interval_seconds = 12
+daily_job_budget = 20
 """,
         encoding="utf-8",
     )
@@ -101,6 +113,10 @@ max_concurrent_jobs = 1
     assert config.center_base_url == "http://center.local"
     assert config.agent_id == "agent-x"
     assert config.account_sessions["account-1"]["cdp_url"] == "http://127.0.0.1:9222"
+    assert config.risk_control_enabled is True
+    assert config.default_risk_policy["min_interval_seconds"] == 7
+    assert config.default_risk_policy["daily_job_budget"] == 50
+    assert config.account_risk_policies["account-1"]["daily_job_budget"] == 20
 
 
 def test_runtime_claims_and_completes_job_lifecycle():
@@ -131,9 +147,63 @@ def test_runtime_reports_failure_with_existing_error_code():
     assert ("fail", "job-1", ErrorCode.MANUAL_VERIFY_REQUIRED.value, "manual verify required", {"cursor": "a"}) in client.events
 
 
+def test_runtime_rejects_claimed_job_when_account_daily_budget_is_exhausted(tmp_path):
+    jobs = [
+        ClaimedJobPayload(job_id="job-1", job_type=JobType.FEED_COLLECT.value, account_id="account-1", payload={}, checkpoint={}),
+        ClaimedJobPayload(job_id="job-2", job_type=JobType.FEED_COLLECT.value, account_id="account-1", payload={}, checkpoint={}),
+    ]
+    client = FakeCenterClient(jobs=jobs)
+    executor = FakeExecutor()
+    risk = AccountRiskController(
+        tmp_path / "risk.db",
+        default_policy=AccountRiskPolicy(min_interval_seconds=0, daily_job_budget=1),
+    )
+    runtime = LocalAgentRuntime(
+        config=AgentRuntimeConfig(agent_id="agent-1", max_jobs_per_claim=2),
+        client=client,
+        executor=executor,
+        account_risk=risk,
+    )
+
+    handled = asyncio.run(runtime.run_once())
+
+    assert handled == 2
+    assert executor.seen == [("agent-1", JobType.FEED_COLLECT.value)]
+    assert any(event[0] == "fail" and event[1] == "job-2" and event[2] == ErrorCode.RATE_LIMITED.value for event in client.events)
+
+
+def test_runtime_heartbeat_reports_account_risk_health(tmp_path):
+    risk = AccountRiskController(
+        tmp_path / "risk.db",
+        default_policy=AccountRiskPolicy(min_interval_seconds=0),
+    )
+    asyncio.run(risk.before_job("account-1"))
+    risk.record_failure("account-1", error_code=ErrorCode.RATE_LIMITED, retryable=True)
+    client = FakeCenterClient()
+    runtime = LocalAgentRuntime(
+        config=AgentRuntimeConfig(agent_id="agent-1"),
+        client=client,
+        account_risk=risk,
+    )
+
+    asyncio.run(runtime.run_once())
+
+    heartbeat = next(event for event in client.events if event[0] == "heartbeat")
+    assert heartbeat[3]["metadata"]["account_risk"]["account-1"]["health_status"] == "cooling_down"
+
+
 def test_runtime_run_forever_survives_transient_center_request_error(monkeypatch):
     calls = {"count": 0, "sleeps": 0}
-    runtime = LocalAgentRuntime(config=AgentRuntimeConfig(agent_id="agent-1", poll_interval_seconds=0.01), client=FakeCenterClient())
+    runtime = LocalAgentRuntime(
+        config=AgentRuntimeConfig(agent_id="agent-1", poll_interval_seconds=0.01),
+        client=FakeCenterClient(),
+        poll_backoff=IdlePollBackoff(
+            minimum_seconds=0.01,
+            maximum_seconds=0.1,
+            multiplier=2,
+            jitter_ratio=0,
+        ),
+    )
 
     async def flaky_run_once():
         calls["count"] += 1
@@ -153,6 +223,42 @@ def test_runtime_run_forever_survives_transient_center_request_error(monkeypatch
         pass
 
     assert calls == {"count": 2, "sleeps": 1}
+
+
+def test_runtime_run_forever_resets_idle_backoff_after_work(monkeypatch):
+    delays = []
+    results = [0, 0, 1]
+    calls = {"count": 0}
+    runtime = LocalAgentRuntime(
+        config=AgentRuntimeConfig(agent_id="agent-1", poll_interval_seconds=2),
+        client=FakeCenterClient(),
+        poll_backoff=IdlePollBackoff(
+            minimum_seconds=2,
+            maximum_seconds=10,
+            multiplier=2,
+            jitter_ratio=0,
+        ),
+    )
+
+    async def fake_run_once():
+        index = calls["count"]
+        calls["count"] += 1
+        if index >= len(results):
+            raise asyncio.CancelledError()
+        return results[index]
+
+    async def fake_sleep(seconds):
+        delays.append(seconds)
+
+    monkeypatch.setattr(runtime, "run_once", fake_run_once)
+    monkeypatch.setattr(runtime_module.asyncio, "sleep", fake_sleep)
+
+    try:
+        asyncio.run(runtime.run_forever())
+    except asyncio.CancelledError:
+        pass
+
+    assert delays == [2, 4, 2]
 
 
 def test_runtime_routes_creator_monitor_job_type():

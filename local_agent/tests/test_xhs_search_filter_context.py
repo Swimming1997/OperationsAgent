@@ -54,6 +54,7 @@ def test_search_probe_start_rank_slices_results():
     assert [c.platform_content_id for c in candidates] == ["note-2", "note-3", "note-4"]
     assert report["start_rank"] == 2
     assert report["filter_apply_status"] == "not_applicable"
+    assert report["source_path"] == "dom_fallback"
 
 
 def test_search_card_exposes_filter_apply_status():

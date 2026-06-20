@@ -65,10 +65,10 @@ class DouyinCommentProbe:
         page.on("response", on_resp)
         resolved_url = canonical_url or dy_field.build_video_url(aweme_id)
         await page.goto(resolved_url, wait_until="domcontentloaded", timeout=45000)
-        await self.pacing.human_pause("page_load")
+        await self.pacing.initial_dwell(page)
 
         opened = await self._open_comment_panel(page)
-        await self.pacing.human_pause("settle")
+        await page.wait_for_timeout(300)
 
         # Park the cursor over the (right-hand) comment column and paginate.
         vp = await page.evaluate("() => ({w: window.innerWidth, h: window.innerHeight})")
@@ -77,7 +77,7 @@ class DouyinCommentProbe:
         no_growth = 0
         actual_scrolls = 0
         for _ in range(self.max_scrolls):
-            await self.pacing.human_scroll(page, distance=1000)
+            await self.pacing.human_scroll(page)
             actual_scrolls += 1
             current = sum(len(r.get("comments") or []) for r in responses)
             if current == last_count:
@@ -89,7 +89,7 @@ class DouyinCommentProbe:
                 last_count = current
             if current >= limit:
                 break
-        await self.pacing.human_pause("settle")
+        await page.wait_for_timeout(300)
         try:
             page.remove_listener("response", on_resp)
         except Exception:

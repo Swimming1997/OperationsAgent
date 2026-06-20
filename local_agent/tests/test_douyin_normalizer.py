@@ -5,6 +5,8 @@ from local_agent_runtime.connectors.douyin.normalizer import (
     iter_stream_json,
     normalize_douyin_aweme,
     normalize_douyin_comment,
+    normalize_douyin_comments,
+    normalize_douyin_creator_profile,
     normalize_douyin_detail,
     normalize_douyin_suggestions,
 )
@@ -93,6 +95,27 @@ def test_normalize_detail_is_defensive_on_empty():
     assert detail.like_count is None
 
 
+def test_normalize_creator_profile_maps_unified_author_fields():
+    profile = normalize_douyin_creator_profile(
+        {
+            "sec_uid": "sec-1",
+            "nickname": "作者",
+            "signature": "简介",
+            "follower_count": 1234,
+            "following_count": 12,
+            "total_favorited": 5678,
+            "aweme_count": 88,
+            "ip_location": "上海",
+            "custom_verify": "优质创作者",
+            "avatar_thumb": {"url_list": ["https://img.test/avatar.jpg"]},
+        }
+    )
+    assert profile["creator_platform_id"] == "sec-1"
+    assert profile["creator_display_name"] == "作者"
+    assert profile["follower_count"] == 1234
+    assert profile["verification"] == "优质创作者"
+
+
 def test_normalize_comment_maps_fields():
     comment = normalize_douyin_comment(
         {
@@ -114,6 +137,24 @@ def test_normalize_comment_rejects_empty_text_or_id():
     assert normalize_douyin_comment({"cid": "c-1", "text": ""}) is None
     assert normalize_douyin_comment({"cid": "", "text": "hi"}) is None
     assert normalize_douyin_comment(None) is None
+
+
+def test_normalize_comments_handles_response_list_and_deduplicates():
+    payloads = [
+        {"comments": [{"cid": "c-1", "text": "怎么买", "user": {"nickname": "A"}}]},
+        {
+            "data": {
+                "comments": [
+                    {"cid": "c-1", "text": "重复"},
+                    {"cid": "c-2", "text": "多少钱", "user": {"nickname": "B"}},
+                ]
+            }
+        },
+    ]
+
+    comments = normalize_douyin_comments(payloads, limit=10)
+
+    assert [item.platform_comment_id for item in comments] == ["c-1", "c-2"]
 
 
 def test_iter_stream_json_parses_app_framed_stream():
