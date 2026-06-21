@@ -15,7 +15,7 @@ from intelligence_engine.storage.repositories.content_repository import ContentR
 from intelligence_engine.storage.repositories.job_repository import JobRepository
 from intelligence_engine.storage.repositories.reference_library_repository import ReferenceLibraryRepository
 from intelligence_engine.storage.repositories.workflow_repository import WorkflowRepository
-from intelligence_engine.db.models import AccountSession, ContentIdentity, CreatorMonitor, Job, TaskRun, XhsSearchSuggestion, utcnow
+from intelligence_engine.db.models import AccountSession, ContentIdentity, CreatorMonitor, Job, LocalAgent, TaskRun, XhsSearchSuggestion, utcnow
 from intelligence_engine.db.session import get_db
 from intelligence_engine.domain.enums import AccountStatus, JobStatus, JobType, Platform
 from intelligence_engine.domain.schemas import (
@@ -23,6 +23,8 @@ from intelligence_engine.domain.schemas import (
     AccountCreateResponse,
     AccountSessionCreateRequest,
     AccountSessionRead,
+    AgentAccountSnapshotReportRequest,
+    AgentAccountSnapshotReportResponse,
     AgentHeartbeatRequest,
     AgentRegisterRequest,
     AgentRegisterResponse,
@@ -107,6 +109,22 @@ def heartbeat(agent_id: str, request: AgentHeartbeatRequest, db: Session = Depen
     )
     db.commit()
     return {"accepted": True, "server_time": datetime.now(timezone.utc).isoformat()}
+
+
+@router.post("/agents/{agent_id}/account-snapshots", response_model=AgentAccountSnapshotReportResponse)
+def report_account_snapshots(
+    agent_id: str,
+    request: AgentAccountSnapshotReportRequest,
+    db: Session = Depends(get_db),
+):
+    if not db.get(LocalAgent, agent_id):
+        raise HTTPException(status_code=404, detail="agent not found")
+    stored = AccountRepository(db).replace_agent_account_snapshots(
+        agent_id=agent_id,
+        snapshots=request.accounts,
+    )
+    db.commit()
+    return AgentAccountSnapshotReportResponse(agent_id=agent_id, stored=stored)
 
 
 @router.post("/accounts", response_model=AccountCreateResponse)

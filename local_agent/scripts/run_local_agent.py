@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import logging
+import os
 import secrets
 import sys
 from dataclasses import replace
@@ -40,11 +41,16 @@ def configure_logging(log_dir: str) -> None:
     path = Path(log_dir)
     path.mkdir(parents=True, exist_ok=True)
     log_file = path / "local_agent.log"
+    # Developer mode: set LOCAL_AGENT_LOG_LEVEL=DEBUG to surface per-item / per-worker
+    # detail (real-time feedback + logging principles, see 技术方案 §8).
+    level_name = os.environ.get("LOCAL_AGENT_LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
     logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [Local Agent] %(levelname)s %(message)s",
+        level=level,
+        format="%(asctime)s [Local Agent] %(levelname)s %(name)s %(message)s",
         handlers=[logging.FileHandler(log_file, encoding="utf-8"), logging.StreamHandler()],
     )
+    logging.getLogger("local_agent").info("logging configured level=%s file=%s", level_name, log_file)
 
 
 def print_startup_banner(config: AgentRuntimeConfig, *, config_path: str) -> None:
@@ -138,27 +144,38 @@ async def main() -> None:
     scheduler_task: asyncio.Task | None = None
     agent_id: str | None = None
     try:
-        collection_service = (
-            LocalCollectionService(config=config, repository=runtime.local_repository)
-            if runtime.local_repository is not None
-            else None
-        )
-        action_service = (
-            LocalContentActionService(config=config, repository=runtime.local_repository)
-            if runtime.local_repository is not None
-            else None
-        )
-        if collection_service is not None:
-            scheduler = LocalTaskScheduler(collection_service)
-            scheduler_task = asyncio.create_task(scheduler.run_forever())
+        bridge_service: LocalBridgeService | None = None
+        account_service = None
         if config.local_bridge_enabled:
+            # Build the bridge service first so its collection service carries the
+            # local-account CDP resolver (F4) and the scheduler reuses the same
+            # instance. Avoids the resolver being bypassed by an externally built
+            # collection service.
             bridge_service = LocalBridgeService(
                 config=config,
                 loop=asyncio.get_running_loop(),
                 repository=runtime.local_repository,
-                collection_service=collection_service,
-                action_service=action_service,
             )
+            collection_service = bridge_service.local_collection
+            action_service = bridge_service.local_actions
+            account_service = bridge_service.local_accounts
+        else:
+            collection_service = (
+                LocalCollectionService(config=config, repository=runtime.local_repository)
+                if runtime.local_repository is not None
+                else None
+            )
+            action_service = (
+                LocalContentActionService(config=config, repository=runtime.local_repository)
+                if runtime.local_repository is not None
+                else None
+            )
+        if account_service is not None:
+            runtime.account_snapshot_provider = lambda: account_service.list_accounts().get("items", [])
+        if collection_service is not None:
+            scheduler = LocalTaskScheduler(collection_service)
+            scheduler_task = asyncio.create_task(scheduler.run_forever())
+        if bridge_service is not None:
             bridge_server = LocalBridgeServer(
                 bridge_config=LocalBridgeConfig(
                     enabled=config.local_bridge_enabled,

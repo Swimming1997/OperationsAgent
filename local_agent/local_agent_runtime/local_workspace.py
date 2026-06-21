@@ -51,6 +51,32 @@ class LocalWorkspaceServiceMixin:
     def submit_search(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self.submit_collection_task({"task_type": "search", **payload})
 
+    def submit_search_batch(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.submit_collection_task({"task_type": "search_batch", **payload})
+
+    def submit_search_suggest(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if self.local_collection is None:
+            raise RuntimeError("local storage is disabled")
+        return self._run_async(
+            self.local_collection.fetch_suggestions(
+                keyword=str(payload.get("keyword") or ""),
+                account_id=str(payload.get("account_id") or "").strip() or None,
+            )
+        )
+
+    def submit_detail_batch(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if self.local_actions is None:
+            raise RuntimeError("local storage is disabled")
+        return self.local_actions.submit_detail_batch(loop=self.loop, payload=payload)
+
+    def search_comments(self, query: dict[str, list[str]]) -> dict[str, Any]:
+        return self._require_repository().search_comments(
+            keyword=_query_text(query, "keyword"),
+            platform=_query_text(query, "platform"),
+            limit=_query_int(query.get("limit", [None])[0]) or 50,
+            offset=_query_int(query.get("offset", [None])[0]) or 0,
+        )
+
     def submit_collection_task(self, payload: dict[str, Any]) -> dict[str, Any]:
         if self.local_collection is None:
             raise RuntimeError("local storage is disabled")

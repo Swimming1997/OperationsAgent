@@ -26,9 +26,24 @@ button { cursor: pointer; }
 .topbar p { margin: 4px 0 0; color: #c6d4cf; font-size: 12px; }
 .top-actions { display: flex; gap: 8px; }
 
-main { min-height: calc(100vh - 72px); }
+.primary-nav { display: flex; gap: 6px; padding: 0 24px; background: #11302a; }
+.primary-nav button {
+  min-height: 40px;
+  padding: 8px 18px;
+  color: #c6d4cf;
+  background: transparent;
+  border: 0;
+  border-bottom: 3px solid transparent;
+  border-radius: 0;
+  font-weight: 650;
+}
+.primary-nav button:hover { color: #fff; background: rgba(255,255,255,.05); }
+.primary-nav button.active { color: #fff; border-bottom-color: #d4a72c; }
+
+main { min-height: calc(100vh - 112px); }
 .search-band { padding: 18px 24px; background: #fff; border-bottom: 1px solid #d9dfdc; }
 .search-band form { max-width: 900px; }
+.collect-account { margin-bottom: 12px; max-width: 360px; }
 label { display: block; margin-bottom: 7px; color: #4b5752; font-size: 12px; font-weight: 650; }
 .search-row { display: grid; grid-template-columns: minmax(220px, 1fr) 110px 108px; gap: 8px; }
 input, select, textarea {
@@ -62,7 +77,7 @@ button.full { width: 100%; }
 .workspace {
   display: grid;
   grid-template-columns: 240px minmax(420px, 1fr) minmax(520px, 1fr);
-  min-height: calc(100vh - 171px);
+  min-height: calc(100vh - 211px);
 }
 .filters, .results, .detail-panel { min-width: 0; }
 .filters { padding: 18px; background: #f8faf9; border-right: 1px solid #d9dfdc; }
@@ -118,7 +133,6 @@ button.full { width: 100%; }
   background: #f4f7f5;
   border: 1px solid #d9dfdc;
 }
-.batch-toolbar[hidden] { display: none; }
 .batch-toolbar button { min-height: 30px; padding: 4px 9px; font-size: 12px; }
 .batch-toolbar > span { margin-right: auto; color: #69746f; font-size: 12px; }
 .select-all { margin: 0; display: flex; align-items: center; gap: 5px; color: #3d4944; font-weight: 500; }
@@ -131,7 +145,6 @@ button.full { width: 100%; }
   justify-content: center;
   gap: 12px;
 }
-.pagination[hidden] { display: none; }
 .pagination button { min-height: 32px; padding: 5px 12px; }
 .pagination span { min-width: 86px; color: #69746f; font-size: 12px; text-align: center; }
 .content-row {
@@ -184,7 +197,6 @@ button.full { width: 100%; }
 .metrics { padding-top: 22px; color: #3d4944; font-size: 12px; text-align: right; }
 .metrics span { display: block; margin: 3px 0; }
 .empty-state, .detail-placeholder { min-height: 180px; display: grid; place-content: center; gap: 7px; color: #75807b; text-align: center; }
-.empty-state[hidden] { display: none; }
 .empty-state strong, .detail-placeholder strong { color: #46514c; }
 
 .detail-panel { padding: 24px 28px; background: #f8faf9; border-left: 1px solid #d9dfdc; overflow-y: auto; }
@@ -247,7 +259,7 @@ button.danger-outline:hover { color: #fff; background: #a43a32; }
 .media-prev { left: 8px; }
 .media-next { right: 8px; }
 .media-counter { position: absolute; right: 10px; bottom: 9px; padding: 3px 8px; color: #fff; background: rgba(20, 28, 25, .58); border-radius: 12px; font-size: 11px; }
-.toast { position: fixed; right: 20px; bottom: 20px; max-width: 360px; padding: 11px 14px; color: #fff; background: #26332e; border-radius: 4px; box-shadow: 0 8px 24px rgba(0,0,0,.18); }
+.toast { position: fixed; right: 20px; bottom: 20px; max-width: 360px; padding: 11px 14px; color: #fff; background: #26332e; border-radius: 4px; box-shadow: 0 8px 24px rgba(0,0,0,.18); z-index: 20; }
 dialog {
   width: min(430px, calc(100vw - 28px));
   padding: 0;
@@ -271,10 +283,46 @@ dialog::backdrop { background: rgba(20, 29, 25, .45); }
 }
 .icon-close:hover { color: #18201d; background: #e8eeeb; }
 
+.accounts-page { padding: 24px; max-width: 880px; margin: 0 auto; }
+.accounts-page h2 { margin: 0 0 4px; font-size: 18px; }
+.account-hint { margin: 0 0 18px; color: #69746f; font-size: 12px; line-height: 1.6; }
+.account-add-row { display: grid; grid-template-columns: 140px minmax(0, 1fr) 120px; gap: 8px; margin-bottom: 20px; }
+.account-list { display: grid; gap: 8px; }
+.account-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  background: #fff;
+  border: 1px solid #d9dfdc;
+  border-radius: 5px;
+}
+.account-main { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.account-platform {
+  flex: 0 0 auto;
+  padding: 4px 9px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 650;
+}
+.account-platform-xhs { color: #b3243b; background: #fde8ec; }
+.account-platform-douyin { color: #1b1b1b; background: #e9e9ec; }
+.account-copy { min-width: 0; }
+.account-copy strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.account-badge { display: inline-block; margin-top: 4px; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 650; }
+.account-not_logged_in { color: #707874; background: #e6e9e7; }
+.account-login_pending { color: #806115; background: #fff1bd; }
+.account-active { color: #116749; background: #dcefe7; }
+.account-error { color: #a43a32; background: #f7e1de; }
+.account-expired { color: #6c5a2a; background: #fff6dc; }
+.account-actions { display: flex; gap: 7px; flex: 0 0 auto; }
+.account-actions button { min-height: 32px; padding: 5px 12px; font-size: 13px; }
+.account-empty { display: block; padding: 24px; color: #75807b; text-align: center; }
+
 @media (max-width: 980px) {
   .workspace { grid-template-columns: 190px minmax(0, 1fr); }
-  .detail-panel { position: fixed; inset: 72px 0 0 auto; width: min(440px, 92vw); z-index: 5; box-shadow: -8px 0 24px rgba(0,0,0,.14); }
-  .detail-panel:has(.detail-placeholder) { display: none; }
+  .detail-panel { position: fixed; inset: 112px 0 0 auto; width: min(440px, 92vw); z-index: 5; box-shadow: -8px 0 24px rgba(0,0,0,.14); }
 }
 
 @media (max-width: 680px) {
@@ -296,4 +344,43 @@ dialog::backdrop { background: rgba(20, 29, 25, .45); }
   .cover { width: 60px; height: 60px; }
   .metrics { display: none; }
   .detail-panel { inset: 64px 0 0 0; width: 100%; }
+  .account-add-row { grid-template-columns: 1fr; }
+  .collect-controls { flex-wrap: wrap; }
+}
+
+/* 采集控制行：账号 / 排序 / 类型 / 发布时间 / 数量 */
+.collect-controls { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 12px; }
+.collect-controls .collect-account { margin-bottom: 0; max-width: none; min-width: 130px; flex: 1 1 130px; }
+.auto-detail { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-weight: 500; color: #4b5752; }
+.auto-detail input { width: auto; min-height: 0; }
+
+/* 长尾词联想 */
+.suggest-band { max-width: 900px; margin-top: 14px; padding: 12px 14px; background: #f1f6f3; border: 1px solid #d9dfdc; border-radius: 8px; }
+.suggest-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.suggest-head > span { font-size: 12px; font-weight: 650; color: #4b5752; }
+.suggest-actions { display: flex; gap: 8px; }
+.suggest-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.suggest-chip { display: inline-flex; align-items: center; gap: 6px; padding: 5px 11px; background: #fff; border: 1px solid #ccd5d0; border-radius: 16px; cursor: pointer; font-size: 13px; color: #2c3733; }
+.suggest-chip.on { background: #23735b; border-color: #23735b; color: #fff; }
+.suggest-chip input { width: auto; min-height: 0; margin: 0; }
+
+/* 评论搜索页 */
+.comments-page { padding: 22px 28px; max-width: 980px; }
+.comments-search { display: grid; grid-template-columns: minmax(260px, 1fr) 150px 120px; gap: 10px; margin-bottom: 14px; }
+.comments-summary { margin-bottom: 12px; color: #69746f; font-size: 13px; }
+.comments-list { display: grid; gap: 12px; }
+.comment-card { padding: 12px 14px; background: #fff; border: 1px solid #d9dfdc; border-radius: 8px; }
+.comment-body { color: #18201d; line-height: 1.6; }
+.comment-meta { margin-top: 8px; display: flex; gap: 12px; color: #69746f; font-size: 12px; }
+.comment-source { margin-top: 8px; color: #8a938f; font-size: 12px; }
+.comment-source a { margin-left: 8px; }
+
+/* 详情面板全部评论 */
+.comment-thread { display: grid; gap: 10px; }
+.comment-line { padding-bottom: 8px; border-bottom: 1px dashed #e0e6e3; }
+.comment-line-text { color: #2c3733; line-height: 1.55; }
+.comment-line-meta { margin-top: 4px; color: #8a938f; font-size: 12px; }
+
+@media (max-width: 720px) {
+  .comments-search { grid-template-columns: 1fr; }
 }

@@ -373,6 +373,202 @@ class LocalIntelligenceRepository(LocalWorkspaceRepositoryMixin):
             connection.commit()
         return {"inserted": inserted, "updated": updated}
 
+    def upsert_comments_full(
+        self,
+        *,
+        content_id: int,
+        comments: list[Any],
+        keywords: list[str] | tuple[str, ...] = DEFAULT_ACQUISITION_KEYWORDS,
+        replace: bool = True,
+    ) -> dict[str, int]:
+        """Store every fetched comment (not just acquisition hits) so they are searchable.
+
+        Full comments land in the ``comment`` table; acquisition hits are still
+        refreshed via :meth:`upsert_local_comment_hits` so the existing
+        获客信号 surface keeps working.
+        """
+        now = _now_iso()
+        stored = 0
+        with self.connection() as connection:
+            content = connection.execute(
+                "SELECT id FROM content WHERE id = ?",
+                (content_id,),
+            ).fetchone()
+            if content is None:
+                raise ValueError("local content not found")
+            if replace:
+                connection.execute(
+                    "DELETE FROM comment WHERE content_id = ?",
+                    (content_id,),
+                )
+            for comment in comments:
+                comment_id = getattr(comment, "platform_comment_id", None)
+                if not comment_id:
+                    continue
+                connection.execute(
+                    """
+                    INSERT INTO comment(
+                        content_id, platform_comment_id, parent_platform_comment_id,
+                        comment_text, comment_author, author_platform_id, like_count,
+                        published_at, fetched_at, raw_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(content_id, platform_comment_id) DO UPDATE SET
+                        parent_platform_comment_id = excluded.parent_platform_comment_id,
+                        comment_text = excluded.comment_text,
+                        comment_author = excluded.comment_author,
+                        author_platform_id = excluded.author_platform_id,
+                        like_count = excluded.like_count,
+                        published_at = excluded.published_at,
+                        fetched_at = excluded.fetched_at,
+                        raw_json = excluded.raw_json
+                    """,
+                    (
+                        content_id,
+                        comment_id,
+                        getattr(comment, "parent_platform_comment_id", None),
+                        getattr(comment, "body_text", ""),
+                        getattr(comment, "author_name", None),
+                        getattr(comment, "author_platform_id", None),
+                        getattr(comment, "like_count", None),
+                        _iso(getattr(comment, "created_time", None)),
+                        now,
+                        _json(getattr(comment, "raw_payload", None) or {}),
+                    ),
+                )
+                stored += 1
+            total = connection.execute(
+                "SELECT COUNT(*) FROM comment WHERE content_id = ?",
+                (content_id,),
+            ).fetchone()[0]
+            connection.execute(
+                """
+                UPDATE content
+                SET comment_count = COALESCE(?, comment_count),
+                    comments_fetched_at = ?, last_seen_at = ?
+                WHERE id = ?
+                """,
+                (total, now, now, content_id),
+            )
+            connection.commit()
+        hits = self.upsert_local_comment_hits(
+            content_id=content_id,
+            comments=comments,
+            keywords=keywords,
+            replace=True,
+        )
+        return {"stored": stored, "total": int(total), **hits}
+
+    def search_comments(
+        self,
+        *,
+        keyword: str | None = None,
+        platform: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        conditions: list[str] = []
+        params: list[Any] = []
+        if keyword:
+            conditions.append("LOWER(cm.comment_text) LIKE ?")
+            params.append(f"%{keyword.lower()}%")
+        if platform:
+            conditions.append("c.platform = ?")
+            params.append(platform)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        with self.connection() as connection:
+            total = connection.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM comment cm
+                JOIN content c ON c.id = cm.content_id
+                {where}
+                """,
+                params,
+            ).fetchone()[0]
+            rows = connection.execute(
+                f"""
+                SELECT
+                    cm.id, cm.content_id, cm.comment_text, cm.comment_author,
+                    cm.like_count, cm.published_at, cm.fetched_at,
+                    c.platform, c.platform_content_id, c.title AS content_title,
+                    c.canonical_url, cr.nickname AS content_author
+                FROM comment cm
+                JOIN content c ON c.id = cm.content_id
+                LEFT JOIN creator cr ON cr.id = c.creator_id
+                {where}
+                ORDER BY cm.like_count DESC, cm.id DESC
+                LIMIT ? OFFSET ?
+                """,
+                [*params, max(1, min(limit, 100)), max(0, offset)],
+            ).fetchall()
+            return {
+                "items": [dict(row) for row in rows],
+                "total": int(total),
+                "limit": limit,
+                "offset": offset,
+            }
+
+    def list_content_comments(self, content_id: int, *, limit: int = 200) -> list[dict[str, Any]]:
+        with self.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT platform_comment_id, comment_text, comment_author,
+                    like_count, published_at, fetched_at
+                FROM comment WHERE content_id = ?
+                ORDER BY like_count DESC, id DESC
+                LIMIT ?
+                """,
+                (content_id, max(1, min(limit, 500))),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def list_pending_detail_contents(
+        self,
+        *,
+        platform: str | None = None,
+        content_ids: list[int] | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """Notes that still need detail (body) or comments fetched.
+
+        Used by the multi-account detail dispatcher to decide what to pull.
+        """
+        conditions = ["c.processing_status != 'discarded'"]
+        params: list[Any] = []
+        if content_ids:
+            normalized = sorted({int(item) for item in content_ids if int(item) > 0})
+            if not normalized:
+                return []
+            placeholders = ",".join("?" for _ in normalized)
+            conditions.append(f"c.id IN ({placeholders})")
+            params.extend(normalized)
+        else:
+            conditions.append("(c.detail_fetched_at IS NULL OR c.comments_fetched_at IS NULL)")
+        if platform:
+            conditions.append("c.platform = ?")
+            params.append(platform)
+        where = " AND ".join(conditions)
+        with self.connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT c.id, c.platform, c.platform_content_id, c.canonical_url,
+                    c.platform_context_json, c.detail_fetched_at, c.comments_fetched_at,
+                    cr.nickname AS author_name
+                FROM content c
+                LEFT JOIN creator cr ON cr.id = c.creator_id
+                WHERE {where}
+                ORDER BY c.first_seen_at DESC, c.id DESC
+                LIMIT ?
+                """,
+                [*params, max(1, min(limit, 500))],
+            ).fetchall()
+            results = []
+            for row in rows:
+                item = dict(row)
+                item["platform_context"] = json.loads(item.pop("platform_context_json") or "{}")
+                results.append(item)
+            return results
+
     def upsert_creator_monitor(self, request: CreatorMonitorIngestionRequest) -> list[dict[str, Any]]:
         feed_request = FeedCandidateIngestionRequest(
             job_id=request.job_id,
@@ -511,6 +707,31 @@ class LocalIntelligenceRepository(LocalWorkspaceRepositoryMixin):
             )
             connection.commit()
 
+    def update_collect_run_progress(
+        self,
+        *,
+        central_job_id: str,
+        item_count: int,
+        error_summary: dict[str, Any] | None = None,
+    ) -> None:
+        """Write incremental progress for a running run so the UI can poll it.
+
+        Real-time feedback principle (see 技术方案 §8.1): long tasks must persist
+        progress per item instead of only at the end.
+        """
+        with self.connection() as connection:
+            if error_summary is None:
+                connection.execute(
+                    "UPDATE collect_run SET item_count = ? WHERE central_job_id = ?",
+                    (int(item_count), central_job_id),
+                )
+            else:
+                connection.execute(
+                    "UPDATE collect_run SET item_count = ?, error_summary_json = ? WHERE central_job_id = ?",
+                    (int(item_count), _json(error_summary), central_job_id),
+                )
+            connection.commit()
+
     def finish_collect_run(
         self,
         *,
@@ -536,6 +757,7 @@ class LocalIntelligenceRepository(LocalWorkspaceRepositoryMixin):
             "content",
             "content_source",
             "comment_hit",
+            "comment",
             "search_suggestion",
             "collect_task",
             "collect_run",

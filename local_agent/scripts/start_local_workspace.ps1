@@ -35,6 +35,22 @@ if (!(Test-Path -LiteralPath $Config)) {
 }
 
 New-Item -ItemType Directory -Force -Path $LogsDir, $RuntimeDir | Out-Null
+
+$FrontendDir = Join-Path $LocalAgentRoot "frontend"
+$DistIndex = Join-Path $LocalAgentRoot "local_agent_runtime\web\dist\index.html"
+if (!(Test-Path -LiteralPath $DistIndex)) {
+    if (!(Get-Command npm -ErrorAction SilentlyContinue)) {
+        throw "本地工作台前端尚未构建，且未找到 npm。请安装 Node.js 后重试，或在 local_agent/frontend 手动执行：npm install; npm run build。"
+    }
+    Write-Host "首次启动：正在构建本地工作台前端（npm install + build），请稍候…" -ForegroundColor Yellow
+    if (!(Test-Path -LiteralPath (Join-Path $FrontendDir "node_modules"))) {
+        & npm --prefix $FrontendDir install
+        if ($LASTEXITCODE -ne 0) { throw "前端依赖安装失败。" }
+    }
+    & npm --prefix $FrontendDir run build
+    if ($LASTEXITCODE -ne 0) { throw "前端构建失败。" }
+}
+
 Stop-LocalAgentStack | Out-Null
 
 if (!(Get-BridgePortListenerPid -BindHost "127.0.0.1" -Port $ChromePort)) {
@@ -70,9 +86,15 @@ for ($attempt = 0; $attempt -lt 60; $attempt++) {
     }
     if (Test-Path -LiteralPath $StdoutPath) {
         $output = Get-Content -LiteralPath $StdoutPath -Raw -ErrorAction SilentlyContinue
-        if ($output -match "local_workspace=(http://[^\s]+)") {
-            $workspaceUrl = $Matches[1]
-            break
+        if ($output) {
+            # Use [regex]::Match instead of the -match operator: when $output is read
+            # as an array, -match acts as a filter and never populates $Matches, which
+            # caused the intermittent "Cannot index into a null array" failure.
+            $match = [regex]::Match([string]$output, "local_workspace=(http://\S+)")
+            if ($match.Success) {
+                $workspaceUrl = $match.Groups[1].Value.Trim()
+                break
+            }
         }
     }
     Start-Sleep -Milliseconds 250

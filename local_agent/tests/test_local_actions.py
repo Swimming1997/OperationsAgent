@@ -8,6 +8,7 @@ import local_agent_runtime.local_actions as actions_module
 from local_agent_runtime.connectors.xhs.comment_probe import XhsCommentFetchResult
 from local_agent_runtime.contracts import (
     CommentSnapshotInput,
+    DetailSnapshotInput,
     FeedCandidateIngestionRequest,
     FeedCandidateInput,
 )
@@ -52,12 +53,22 @@ class FakeCentralSession:
     def status(self):
         return {"authenticated": self.logged_in, "user": {"username": "operator"} if self.logged_in else None}
 
+    async def promote_content(self, *, candidate, detail):
+        self.promoted = {"candidate": candidate, "detail": detail}
+        return {"content_id": "central-promoted-1", "is_new": True}
+
     async def create_reference_library_item(self, *, central_content_id, payload):
         if self.fail:
             raise RuntimeError("central unavailable")
         assert central_content_id == "central-1"
         assert payload["matched_keywords"] == ["多少钱", "怎么买"]
         return {"id": "reference-1", "content_id": central_content_id, **payload}
+
+
+class FakePromoteCentralSession(FakeCentralSession):
+    async def create_reference_library_item(self, *, central_content_id, payload):
+        assert central_content_id == "central-promoted-1"
+        return {"id": "reference-2", "content_id": central_content_id, **payload}
 
 
 class FakeHttpResponse:
@@ -170,6 +181,124 @@ def test_acquisition_check_fetches_comments_and_persists_hits(tmp_path, monkeypa
     assert repository.get_collect_task(task_id)["status"] == "success"
 
 
+def _seed_named(repository: LocalIntelligenceRepository, note_id: str) -> int:
+    repository.upsert_feed_candidates(
+        FeedCandidateIngestionRequest(
+            job_id=f"seed-{note_id}",
+            candidates=[
+                FeedCandidateInput(
+                    platform=Platform.XHS,
+                    platform_content_id=note_id,
+                    canonical_url=f"https://www.xiaohongshu.com/explore/{note_id}",
+                    content_type=ContentType.IMAGE_TEXT,
+                    title_or_summary=f"内容 {note_id}",
+                    source_surface=SourceSurface.SEARCH,
+                    discovered_at=datetime.now(timezone.utc),
+                    platform_context={
+                        "note_id": note_id,
+                        "xsec_token": "token",
+                        "xsec_source": "pc_search",
+                        "api_comment_ready": True,
+                    },
+                )
+            ],
+        )
+    )
+    return repository.get_content(platform="xhs", platform_content_id=note_id)["id"]
+
+
+def test_detail_batch_uses_multiple_accounts_and_stores_full_comments(tmp_path, monkeypatch):
+    acquired_cdp_urls: list[str] = []
+
+    class TrackingRegistry:
+        def create(self, platform):
+            assert platform == "xhs"
+
+            class _Factory:
+                async def acquire(self_inner, *, session_meta):
+                    acquired_cdp_urls.append(session_meta["cdp_url"])
+                    return FakeSession()
+
+            return _Factory()
+
+    class FakeDetailProbe:
+        async def fetch_detail(self, page, **kwargs):
+            return DetailSnapshotInput(body_text="正文内容", like_count=10)
+
+    class FakeCommentProbe:
+        async def fetch_comments_result(self, page, **kwargs):
+            return XhsCommentFetchResult(
+                comments=[
+                    CommentSnapshotInput(
+                        platform_comment_id="c-1",
+                        body_text="求推荐，链接发我",
+                        author_name="买家",
+                        like_count=5,
+                    ),
+                    CommentSnapshotInput(
+                        platform_comment_id="c-2",
+                        body_text="普通评论",
+                        author_name="路人",
+                    ),
+                ],
+                surface_status="ok",
+            )
+
+    monkeypatch.setattr(actions_module, "default_session_registry", TrackingRegistry())
+    monkeypatch.setattr(actions_module, "XhsDetailProbe", FakeDetailProbe)
+    monkeypatch.setattr(actions_module, "XhsCommentProbe", FakeCommentProbe)
+
+    repository = LocalIntelligenceRepository(tmp_path / "local.db")
+    id_a = _seed_named(repository, "note-a")
+    id_b = _seed_named(repository, "note-b")
+
+    sessions = [
+        {"account_id": "acct-1", "cdp_url": "http://127.0.0.1:9301"},
+        {"account_id": "acct-2", "cdp_url": "http://127.0.0.1:9302"},
+    ]
+    service = LocalContentActionService(
+        config=AgentRuntimeConfig(),
+        repository=repository,
+        central_session=FakeCentralSession(),
+        account_sessions_provider=lambda: sessions,
+    )
+
+    targets = repository.list_pending_detail_contents(platform="xhs")
+    assert {item["id"] for item in targets} == {id_a, id_b}
+
+    task_id = repository.create_collect_task(task_type="detail_batch", target="2", params={})
+    asyncio.run(
+        service._run_detail_batch(
+            task_id=task_id,
+            targets=targets,
+            sessions=service._resolve_batch_sessions(None),
+            max_comments=30,
+        )
+    )
+
+    assert sorted(set(acquired_cdp_urls)) == ["http://127.0.0.1:9301", "http://127.0.0.1:9302"]
+    detail_a = repository.get_content_detail(id_a)
+    assert detail_a["body_text"] == "正文内容"
+    assert len(detail_a["comments"]) == 2
+    found = repository.search_comments(keyword="求推荐")
+    assert found["total"] == 2
+    assert any(item["content_id"] in {id_a, id_b} for item in found["items"])
+
+
+def test_resolve_batch_sessions_falls_back_to_default_browser(tmp_path):
+    repository = LocalIntelligenceRepository(tmp_path / "local.db")
+    service = LocalContentActionService(
+        config=AgentRuntimeConfig(cdp_url="http://127.0.0.1:9222"),
+        repository=repository,
+        central_session=FakeCentralSession(),
+        account_sessions_provider=lambda: [],
+    )
+    sessions = service._resolve_batch_sessions(None)
+    assert sessions == [
+        {"account_id": None, "cdp_url": "http://127.0.0.1:9222", "label": "默认浏览器"}
+    ]
+
+
 def test_material_export_syncs_and_keeps_matched_keywords(tmp_path):
     repository = LocalIntelligenceRepository(tmp_path / "local.db")
     content_id = _seed(repository)
@@ -205,6 +334,53 @@ def test_material_export_syncs_and_keeps_matched_keywords(tmp_path):
     export = repository.get_material_export(content_id)
     assert export["status"] == "synced"
     assert export["central_reference_item_id"] == "reference-1"
+
+
+def _seed_without_central_mapping(repository: LocalIntelligenceRepository) -> int:
+    repository.upsert_feed_candidates(
+        FeedCandidateIngestionRequest(
+            job_id="seed-local-only",
+            candidates=[
+                FeedCandidateInput(
+                    platform=Platform.XHS,
+                    platform_content_id="note-local",
+                    canonical_url="https://www.xiaohongshu.com/explore/note-local",
+                    content_type=ContentType.IMAGE_TEXT,
+                    title_or_summary="本地内容",
+                    source_surface=SourceSurface.SEARCH,
+                    discovered_at=datetime.now(timezone.utc),
+                    platform_context={"note_id": "note-local"},
+                )
+            ],
+        )
+    )
+    return repository.get_content(platform="xhs", platform_content_id="note-local")["id"]
+
+
+def test_material_export_promotes_local_content_before_creating_entry(tmp_path):
+    repository = LocalIntelligenceRepository(tmp_path / "local.db")
+    content_id = _seed_without_central_mapping(repository)
+    session = FakePromoteCentralSession()
+    service = LocalContentActionService(
+        config=AgentRuntimeConfig(),
+        repository=repository,
+        central_session=session,
+    )
+
+    result = asyncio.run(
+        service.add_to_material_library(
+            content_id=content_id,
+            payload={"library_type": "uncategorized", "material_tags": []},
+        )
+    )
+
+    assert result["status"] == "synced"
+    assert session.promoted["candidate"]["platform_content_id"] == "note-local"
+    assert session.promoted["candidate"]["source_surface"] == "manual_import"
+    export = repository.get_material_export(content_id)
+    assert export["status"] == "synced"
+    assert export["central_content_id"] == "central-promoted-1"
+    assert export["central_reference_item_id"] == "reference-2"
 
 
 def test_material_export_failure_preserves_pending_intent(tmp_path):

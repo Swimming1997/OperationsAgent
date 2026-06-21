@@ -1,7 +1,31 @@
 from intelligence_engine.api.product_common import *
+from intelligence_engine.domain.schemas import LocalContentPromoteRequest, LocalContentPromoteResponse
 
 
 router = APIRouter(prefix="/api")
+
+
+@router.post("/intelligence/contents/promote", response_model=LocalContentPromoteResponse)
+def promote_local_content(
+    request: LocalContentPromoteRequest,
+    db: Session = Depends(get_db),
+    _principal: Principal = Depends(
+        require_any_role(UserRoleName.ADMIN, UserRoleName.SUPERVISOR, UserRoleName.OPERATOR)
+    ),
+) -> LocalContentPromoteResponse:
+    """Local-first: persist a selected content into central before building a material entry.
+
+    Central only stores filtered material, so collected content lives locally until
+    an operator promotes it. This upserts the content identity + a detail snapshot
+    (no job / discovery event needed) and returns the central content id.
+    """
+    repo = ContentRepository(db)
+    content, is_new = repo.upsert_identity_from_candidate(request.candidate)
+    WorkflowRepository(db).ensure_state(content.id)
+    if request.detail is not None:
+        repo.create_snapshot(content_id=content.id, account_id=None, snapshot=request.detail)
+    db.commit()
+    return LocalContentPromoteResponse(content_id=content.id, is_new=is_new)
 
 
 @router.get("/intelligence/contents/product", response_model=IntelligenceContentProductList)

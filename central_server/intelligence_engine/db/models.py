@@ -5,6 +5,7 @@ from intelligence_engine.db.account_models import (
     AccountAgentBinding,
     AccountLoginSession,
     AccountSession,
+    AgentAccountSnapshot,
     LocalAgent,
     PlatformAccount,
 )
@@ -75,6 +76,7 @@ Index("idx_platform_accounts_business_type_id", PlatformAccount.business_account
 Index("idx_account_agent_bindings_account", AccountAgentBinding.account_id)
 Index("idx_account_agent_bindings_agent", AccountAgentBinding.agent_id)
 Index("idx_account_agent_bindings_employee", AccountAgentBinding.employee_id)
+Index("idx_agent_account_snapshots_agent", AgentAccountSnapshot.agent_id)
 Index("idx_benchmark_groups_enabled", BenchmarkGroup.enabled)
 Index("idx_benchmark_members_group_id", BenchmarkGroupMember.benchmark_group_id)
 Index("idx_task_templates_type_enabled", TaskTemplate.template_type, TaskTemplate.enabled)

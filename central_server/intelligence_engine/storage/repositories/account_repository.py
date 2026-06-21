@@ -1,7 +1,15 @@
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from intelligence_engine.db.models import AccountAgentBinding, AccountSession, Employee, LocalAgent, PlatformAccount, utcnow
+from intelligence_engine.db.models import (
+    AccountAgentBinding,
+    AccountSession,
+    AgentAccountSnapshot,
+    Employee,
+    LocalAgent,
+    PlatformAccount,
+    utcnow,
+)
 from intelligence_engine.domain.enums import AccountStatus, AgentStatus
 
 
@@ -111,6 +119,53 @@ class AccountRepository:
         if capabilities:
             agent.capabilities_json = capabilities
         return agent
+
+    def replace_agent_account_snapshots(self, *, agent_id: str, snapshots) -> int:
+        """Reconcile a local agent's account snapshot mirror (read-only monitoring).
+
+        Upserts every reported account and removes snapshots no longer present
+        locally, so central always reflects the local-first source of truth.
+        """
+        existing = {
+            row.local_account_id: row
+            for row in self.db.scalars(
+                select(AgentAccountSnapshot).where(AgentAccountSnapshot.agent_id == agent_id)
+            )
+        }
+        seen: set[str] = set()
+        for item in snapshots:
+            local_account_id = str(item.local_account_id)
+            seen.add(local_account_id)
+            row = existing.get(local_account_id)
+            if row is None:
+                row = AgentAccountSnapshot(agent_id=agent_id, local_account_id=local_account_id)
+                self.db.add(row)
+            row.platform = item.platform
+            row.display_name = item.display_name or ""
+            row.platform_nickname = item.platform_nickname
+            row.external_account_id = item.external_account_id
+            row.account_role = item.account_role
+            row.status = item.status
+            row.auth_status = item.auth_status
+            row.health_status = item.health_status
+            row.consecutive_failures = item.consecutive_failures
+            row.last_verified_at = item.last_verified_at
+            row.reported_at = utcnow()
+            row.metadata_json = item.metadata or {}
+        for local_account_id, row in existing.items():
+            if local_account_id not in seen:
+                self.db.delete(row)
+        self.db.flush()
+        return len(seen)
+
+    def list_agent_account_snapshots(self) -> list[AgentAccountSnapshot]:
+        return list(
+            self.db.scalars(
+                select(AgentAccountSnapshot).order_by(
+                    AgentAccountSnapshot.agent_id, AgentAccountSnapshot.platform
+                )
+            )
+        )
 
     def create_account(
         self,

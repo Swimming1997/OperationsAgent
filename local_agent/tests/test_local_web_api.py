@@ -383,15 +383,16 @@ def test_local_web_requires_bridge_token_and_rejects_untrusted_cors(tmp_path):
         loop.close()
 
 
-def test_local_workspace_assets_keep_token_in_memory_and_hide_nonempty_state():
-    web_root = Path(__file__).resolve().parents[1] / "local_agent_runtime" / "web"
-    app_js = (web_root / "app.js").read_text(encoding="utf-8")
-    styles = (web_root / "styles.css").read_text(encoding="utf-8")
+def test_local_workspace_assets_keep_token_in_memory():
+    src_root = Path(__file__).resolve().parents[1] / "frontend" / "src"
+    bridge = (src_root / "bridge.ts").read_text(encoding="utf-8")
+    login = (src_root / "workspace" / "CentralLoginDialog.tsx").read_text(encoding="utf-8")
 
-    assert 'fragment.get("token")' in app_js
-    assert 'fetch("/bridge/session"' in app_js
-    assert 'el("centralServerUrl").value' in app_js
-    assert "window.history.replaceState" in app_js
-    assert "localStorage" not in app_js
-    assert "sessionStorage" not in app_js
-    assert ".empty-state[hidden] { display: none; }" in styles
+    assert "fragment.get('token')" in bridge
+    assert "fetch('/bridge/session'" in bridge
+    assert "window.history.replaceState" in bridge
+    assert "centralServerUrl" in login
+
+    combined = "".join(path.read_text(encoding="utf-8") for path in src_root.rglob("*.ts*"))
+    assert "localStorage" not in combined
+    assert "sessionStorage" not in combined

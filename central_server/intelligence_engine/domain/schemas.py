@@ -50,6 +50,30 @@ class AgentHeartbeatRequest(ApiModel):
     capabilities: dict[str, Any] | None = None
 
 
+class AgentAccountSnapshotItem(ApiModel):
+    local_account_id: str
+    platform: str
+    display_name: str = ""
+    platform_nickname: str | None = None
+    external_account_id: str | None = None
+    account_role: str = "intelligence_collector"
+    status: str = "active"
+    auth_status: str = "not_logged_in"
+    health_status: str = "unknown"
+    consecutive_failures: int = 0
+    last_verified_at: datetime | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentAccountSnapshotReportRequest(ApiModel):
+    accounts: list[AgentAccountSnapshotItem] = Field(default_factory=list)
+
+
+class AgentAccountSnapshotReportResponse(ApiModel):
+    agent_id: str
+    stored: int
+
+
 class AccountCreateRequest(ApiModel):
     employee_id: str | None = None
     platform: Platform
@@ -238,6 +262,18 @@ class DetailIngestionResponse(ApiModel):
     snapshot_id: str
     candidate_decision_enqueued: bool
     comment_job_enqueued: bool
+
+
+class LocalContentPromoteRequest(ApiModel):
+    """Promote a single local-first content into central (only when selected as material)."""
+
+    candidate: FeedCandidateInput
+    detail: DetailSnapshotInput | None = None
+
+
+class LocalContentPromoteResponse(ApiModel):
+    content_id: str
+    is_new: bool
 
 
 class CommentSnapshotInput(ApiModel):

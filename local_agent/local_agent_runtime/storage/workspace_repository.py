@@ -365,8 +365,19 @@ class LocalWorkspaceRepositoryMixin:
                     """,
                     (content_id,),
                 ).fetchall()
+                comments = connection.execute(
+                    """
+                    SELECT platform_comment_id, comment_text, comment_author, like_count,
+                        published_at, fetched_at
+                    FROM comment WHERE content_id = ?
+                    ORDER BY like_count DESC, id DESC
+                    LIMIT 200
+                    """,
+                    (content_id,),
+                ).fetchall()
                 result["sources"] = [dict(item) for item in sources]
                 result["comment_hits"] = [dict(item) for item in hits]
+                result["comments"] = [dict(item) for item in comments]
                 material = connection.execute(
                     "SELECT * FROM material_export WHERE content_id = ?",
                     (content_id,),
@@ -494,6 +505,18 @@ class LocalWorkspaceRepositoryMixin:
                     WHERE content_id = ?
                     """,
                     (error, _now_iso(), content_id),
+                )
+                connection.commit()
+
+        def set_content_central_id(self, *, content_id: int, central_content_id: str) -> None:
+            with self.connection() as connection:
+                connection.execute(
+                    "UPDATE content SET central_content_id = ? WHERE id = ?",
+                    (central_content_id, content_id),
+                )
+                connection.execute(
+                    "UPDATE material_export SET central_content_id = ? WHERE content_id = ?",
+                    (central_content_id, content_id),
                 )
                 connection.commit()
 

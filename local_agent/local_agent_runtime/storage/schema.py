@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 5
 
 
 def initialize_schema(connection: sqlite3.Connection) -> None:
@@ -13,6 +13,34 @@ def initialize_schema(connection: sqlite3.Connection) -> None:
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS platform_account (
+            id TEXT PRIMARY KEY,
+            platform TEXT NOT NULL,
+            display_name TEXT NOT NULL DEFAULT '',
+            external_account_id TEXT,
+            account_role TEXT NOT NULL DEFAULT 'intelligence_collector',
+            status TEXT NOT NULL DEFAULT 'active',
+            auth_status TEXT NOT NULL DEFAULT 'not_logged_in',
+            health_status TEXT NOT NULL DEFAULT 'unknown',
+            profile_key TEXT NOT NULL,
+            cdp_port INTEGER,
+            platform_nickname TEXT,
+            platform_home_url TEXT,
+            last_verified_at TEXT,
+            last_success_at TEXT,
+            last_failure_at TEXT,
+            consecutive_failures INTEGER NOT NULL DEFAULT 0,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS ix_platform_account_platform
+            ON platform_account(platform);
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_platform_account_external
+            ON platform_account(platform, external_account_id)
+            WHERE external_account_id IS NOT NULL;
 
         CREATE TABLE IF NOT EXISTS local_setting (
             key TEXT PRIMARY KEY,
@@ -106,6 +134,24 @@ def initialize_schema(connection: sqlite3.Connection) -> None:
             UNIQUE(content_id, platform_comment_id, matched_keyword)
         );
 
+        CREATE TABLE IF NOT EXISTS comment (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            content_id INTEGER NOT NULL REFERENCES content(id) ON DELETE CASCADE,
+            platform_comment_id TEXT NOT NULL,
+            parent_platform_comment_id TEXT,
+            comment_text TEXT NOT NULL,
+            comment_author TEXT,
+            author_platform_id TEXT,
+            like_count INTEGER,
+            published_at TEXT,
+            fetched_at TEXT NOT NULL,
+            raw_json TEXT NOT NULL DEFAULT '{}',
+            UNIQUE(content_id, platform_comment_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS ix_comment_content ON comment(content_id);
+        CREATE INDEX IF NOT EXISTS ix_comment_fetched_at ON comment(fetched_at);
+
         CREATE TABLE IF NOT EXISTS search_suggestion (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             platform TEXT NOT NULL,
@@ -185,6 +231,8 @@ def initialize_schema(connection: sqlite3.Connection) -> None:
         connection.execute(
             "ALTER TABLE content ADD COLUMN processing_status TEXT NOT NULL DEFAULT 'pending'"
         )
+    if "comments_fetched_at" not in columns:
+        connection.execute("ALTER TABLE content ADD COLUMN comments_fetched_at TEXT")
     connection.execute(
         "CREATE INDEX IF NOT EXISTS ix_content_processing_status ON content(processing_status)"
     )

@@ -35,6 +35,7 @@ class LocalBridgeService(LocalWorkspaceServiceMixin):
         repository: LocalIntelligenceRepository | None = None,
         collection_service: Any | None = None,
         action_service: Any | None = None,
+        account_service: Any | None = None,
     ):
         self.config = config
         self.loop = loop
@@ -47,7 +48,11 @@ class LocalBridgeService(LocalWorkspaceServiceMixin):
         elif repository is not None:
             from local_agent_runtime.local_tasks import LocalCollectionService
 
-            self.local_collection = LocalCollectionService(config=config, repository=repository)
+            self.local_collection = LocalCollectionService(
+                config=config,
+                repository=repository,
+                account_session_resolver=self._resolve_account_session_meta,
+            )
         else:
             self.local_collection = None
         if action_service is not None:
@@ -55,11 +60,57 @@ class LocalBridgeService(LocalWorkspaceServiceMixin):
         elif repository is not None:
             from local_agent_runtime.local_actions import LocalContentActionService
 
-            self.local_actions = LocalContentActionService(config=config, repository=repository)
+            self.local_actions = LocalContentActionService(
+                config=config,
+                repository=repository,
+                account_sessions_provider=self._list_collection_account_sessions,
+            )
         else:
             self.local_actions = None
         # account_id -> cdp_url，由本进程 chrome/start 或前端传入端口写入
         self._runtime_account_cdp: dict[str, str] = {}
+        if account_service is not None:
+            self.local_accounts = account_service
+        else:
+            from local_agent_runtime.local_accounts import LocalAccountService
+            from local_agent_runtime.storage.account_repository import LocalAccountRepository
+
+            account_repository = LocalAccountRepository(self._resolve_local_database_path())
+            self.local_accounts = LocalAccountService(
+                project_root=self.project_root,
+                repository=account_repository,
+                loop=self.loop,
+                on_cdp_resolved=self.remember_account_cdp,
+            )
+
+    def _resolve_local_database_path(self) -> Path:
+        if self.repository is not None:
+            return Path(self.repository.database_path)
+        configured = getattr(self.config, "local_database_path", None)
+        database_path = Path(configured) if configured else self.project_root / "data" / "local_intelligence.db"
+        if not database_path.is_absolute():
+            database_path = self.project_root / database_path
+        return database_path
+
+    # ---- platform account management (local-first) -------------------------
+
+    def list_accounts(self, query: dict[str, list[str]] | None = None) -> dict[str, Any]:
+        return self.local_accounts.list_accounts(query)
+
+    def get_account(self, account_id: str) -> dict[str, Any] | None:
+        return self.local_accounts.get_account(account_id)
+
+    def create_account(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.local_accounts.create_account(payload)
+
+    def update_account_record(self, account_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.local_accounts.update_account(account_id, payload)
+
+    def delete_account(self, account_id: str) -> dict[str, Any]:
+        return self.local_accounts.delete_account(account_id)
+
+    def start_account_login(self, account_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.local_accounts.start_login(account_id, payload or {})
 
     def require_token(self, token: str | None) -> bool:
         expected = self.config.local_bridge_token
@@ -143,6 +194,65 @@ class LocalBridgeService(LocalWorkspaceServiceMixin):
         if meta_url:
             return meta_url
         return None
+
+    def _list_collection_account_sessions(self) -> list[dict[str, Any]]:
+        """Logged-in local accounts usable for parallel collection (local-first).
+
+        Each entry is {account_id, cdp_url, label}. Only XHS accounts whose login
+        browser CDP can be resolved are returned, so the detail dispatcher can run
+        one worker per account in parallel.
+        """
+        accounts = getattr(self, "local_accounts", None)
+        if accounts is None:
+            return []
+        try:
+            records = accounts.list_accounts({"platform": ["xhs"]}).get("items", [])
+        except Exception:  # pragma: no cover - defensive
+            return []
+        sessions: list[dict[str, Any]] = []
+        for record in records:
+            if str(record.get("auth_status") or "") != "active":
+                continue
+            account_id = str(record.get("id") or "").strip()
+            if not account_id:
+                continue
+            cdp_port = record.get("cdp_port")
+            resolved = self.resolve_cdp_url(
+                account_id,
+                cdp_port=int(cdp_port) if cdp_port else None,
+            )
+            if not resolved:
+                continue
+            sessions.append(
+                {
+                    "account_id": account_id,
+                    "cdp_url": resolved,
+                    "label": record.get("platform_nickname") or record.get("display_name"),
+                }
+            )
+        return sessions
+
+    def _resolve_account_session_meta(self, account_id: str) -> dict[str, Any] | None:
+        """Resolve a local account id to a collection session_meta (local-first).
+
+        Looks up the account's own managed Chrome CDP endpoint (the one started
+        during local login), so collection runs against the account's profile
+        without any central ready-session handshake.
+        """
+        account_id = str(account_id or "").strip()
+        if not account_id:
+            return None
+        cdp_port: int | None = None
+        account = getattr(self, "local_accounts", None)
+        if account is not None:
+            try:
+                record = account.get_account(account_id)
+            except Exception:  # pragma: no cover - defensive
+                record = None
+            if record and record.get("cdp_port"):
+                cdp_port = int(record["cdp_port"])
+        resolved = self.resolve_cdp_url(account_id, cdp_port=cdp_port)
+        return {"cdp_url": resolved} if resolved else None
 
     def probe_account_session(
         self,

@@ -1,5 +1,6 @@
 from fastapi import APIRouter
 
+from intelligence_engine.api.product_account_monitor_routes import router as account_monitor_router
 from intelligence_engine.api.product_account_routes import router as account_router
 from intelligence_engine.api.product_benchmark_routes import router as benchmark_router
 from intelligence_engine.api.product_intelligence_routes import router as intelligence_router
@@ -17,6 +18,7 @@ for subrouter in (
     organization_router,
     me_router,
     account_router,
+    account_monitor_router,
     benchmark_router,
     task_router,
     keyword_rule_router,

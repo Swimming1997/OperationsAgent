@@ -85,6 +85,89 @@ def test_local_search_executes_and_updates_task(tmp_path, monkeypatch):
     assert repository.list_contents(keyword="考研")["total"] == 1
 
 
+def test_search_batch_collects_each_keyword(tmp_path, monkeypatch):
+    seen_keywords: list[str] = []
+
+    class FakeProbe:
+        def __init__(self, **kwargs):
+            self.keyword = kwargs["keywords"][0]
+            assert kwargs["search_sort"] == "most_liked"
+
+        async def collect(self, page):
+            seen_keywords.append(self.keyword)
+            return [
+                FeedCandidateInput(
+                    platform=Platform.XHS,
+                    platform_content_id=f"note-{self.keyword}",
+                    content_type=ContentType.IMAGE_TEXT,
+                    title_or_summary=f"{self.keyword} 内容",
+                    source_surface=SourceSurface.SEARCH,
+                    discovered_at=datetime.now(timezone.utc),
+                    raw_payload={},
+                )
+            ], {"total_items_seen": 1}
+
+    monkeypatch.setattr(tasks_module, "default_session_registry", FakeRegistry())
+    monkeypatch.setattr(tasks_module, "XhsSearchProbe", FakeProbe)
+    repository = LocalIntelligenceRepository(tmp_path / "local.db")
+    service = LocalCollectionService(
+        config=AgentRuntimeConfig(cdp_url="http://127.0.0.1:9222"),
+        repository=repository,
+    )
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    try:
+        result = service.submit(
+            loop=loop,
+            payload={
+                "task_type": "search_batch",
+                "keywords": ["套娃", "套娃推荐", "套娃测评"],
+                "sort": "most_liked",
+                "max_items": 20,
+            },
+        )
+        task_id = result["task_id"]
+        deadline = time.time() + 5
+        while repository.get_collect_task(task_id)["status"] not in {"success", "failed"} and time.time() < deadline:
+            time.sleep(0.05)
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=2)
+        loop.close()
+
+    assert sorted(seen_keywords) == ["套娃", "套娃推荐", "套娃测评"]
+    assert repository.get_collect_task(task_id)["status"] == "success"
+    assert repository.list_contents()["total"] == 3
+
+
+def test_fetch_suggestions_persists_and_returns_items(tmp_path, monkeypatch):
+    class FakeSuggestProbe:
+        def __init__(self, *, core_keyword):
+            assert core_keyword == "套娃"
+
+        async def collect(self, page):
+            items = [
+                {"core_keyword": "套娃", "suggested_keyword": "套娃推荐", "suggestion_rank": 1, "raw_payload": {}, "fetched_at": "2026-01-01T00:00:00+00:00"},
+                {"core_keyword": "套娃", "suggested_keyword": "套娃测评", "suggestion_rank": 2, "raw_payload": {}, "fetched_at": "2026-01-01T00:00:00+00:00"},
+            ]
+            return items, {"suggestion_count": 2}
+
+    monkeypatch.setattr(tasks_module, "default_session_registry", FakeRegistry())
+    monkeypatch.setattr(tasks_module, "XhsSearchSuggestProbe", FakeSuggestProbe)
+    repository = LocalIntelligenceRepository(tmp_path / "local.db")
+    service = LocalCollectionService(
+        config=AgentRuntimeConfig(cdp_url="http://127.0.0.1:9222"),
+        repository=repository,
+    )
+
+    result = asyncio.run(service.fetch_suggestions(keyword="套娃"))
+
+    assert result["core_keyword"] == "套娃"
+    assert [item["suggested_keyword"] for item in result["items"]] == ["套娃推荐", "套娃测评"]
+    assert repository.table_count("search_suggestion") == 2
+
+
 def test_creator_monitor_tracks_new_content_and_mark_viewed(tmp_path, monkeypatch):
     async def fake_fetch(self, page, **kwargs):
         return XhsCreatorFetchResult(
@@ -314,3 +397,49 @@ def test_normalize_creator_profile_from_initial_state_shape():
     assert profile["total_liked_collected"] == 56000
     assert profile["works_count"] == 128
     assert profile["verify_type"] == "摄影博主"
+
+
+def test_session_meta_prefers_local_account_resolver(tmp_path):
+    repository = LocalIntelligenceRepository(tmp_path / "local.db")
+    calls: list[str] = []
+
+    def resolver(account_id: str):
+        calls.append(account_id)
+        return {"cdp_url": "http://127.0.0.1:18900"}
+
+    service = LocalCollectionService(
+        config=AgentRuntimeConfig(cdp_url="http://127.0.0.1:9222"),
+        repository=repository,
+        account_session_resolver=resolver,
+    )
+
+    meta = service._session_meta("acc-local")
+    assert meta == {"cdp_url": "http://127.0.0.1:18900"}
+    assert calls == ["acc-local"]
+
+
+def test_session_meta_without_account_falls_back_to_default_chrome(tmp_path):
+    repository = LocalIntelligenceRepository(tmp_path / "local.db")
+    service = LocalCollectionService(
+        config=AgentRuntimeConfig(cdp_url="http://127.0.0.1:9222"),
+        repository=repository,
+        account_session_resolver=lambda account_id: None,
+    )
+
+    assert service._session_meta(None) == {"cdp_url": "http://127.0.0.1:9222"}
+
+
+def test_session_meta_raises_when_chosen_account_has_no_session(tmp_path):
+    repository = LocalIntelligenceRepository(tmp_path / "local.db")
+    service = LocalCollectionService(
+        config=AgentRuntimeConfig(cdp_url="http://127.0.0.1:9222"),
+        repository=repository,
+        account_session_resolver=lambda account_id: None,
+    )
+
+    try:
+        service._session_meta("acc-not-logged-in")
+    except RuntimeError as exc:
+        assert "账号" in str(exc)
+    else:  # pragma: no cover - explicit failure
+        raise AssertionError("expected RuntimeError for unresolved account session")

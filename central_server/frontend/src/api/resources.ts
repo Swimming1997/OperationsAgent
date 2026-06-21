@@ -1,5 +1,6 @@
 import { apiRequest } from './client';
 import type {
+  AccountMonitorList,
   BehaviorProfile,
   BenchmarkGroup,
   BenchmarkGroupBusinessType,
@@ -19,6 +20,10 @@ import type {
 
 export function listEmployees(role: Role, userId?: string) {
   return apiRequest<Employee[]>('/api/employees', { role, userId });
+}
+
+export function listAccountMonitor(role: Role, userId?: string) {
+  return apiRequest<AccountMonitorList>('/api/product/account-monitor', { role, userId });
 }
 
 export function listAccounts(role: Role, userId?: string) {

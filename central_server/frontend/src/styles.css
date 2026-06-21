@@ -280,6 +280,8 @@ button.linkish { background: transparent; border-color: transparent; color: var(
 .rule-set-row { grid-template-columns: minmax(150px, 1fr) 80px 60px minmax(130px, 0.9fr) minmax(150px, 1fr) minmax(120px, 0.8fr) 46px; }
 .operation-rule-row { grid-template-columns: minmax(150px, 1fr) 110px 80px 70px 46px; }
 .agent-row { grid-template-columns: minmax(150px, 1fr) 110px 80px 90px 150px minmax(130px, 1fr) 70px; }
+.account-monitor-row { grid-template-columns: minmax(140px, 1fr) 80px minmax(120px, 1fr) 90px 80px 80px minmax(140px, 1fr) minmax(140px, 1fr); }
+.account-monitor-row .muted-line { display: block; color: var(--muted); font-size: 11px; }
 .content-row:hover, .task-row:hover, .account-row:hover, .member-row:hover, .rule-set-row:hover, .operation-rule-row:hover, .agent-row:hover,
 .content-row.selected, .task-row.selected, .account-row.selected, .member-row.selected, .rule-set-row.selected, .operation-rule-row.selected, .agent-row.selected { background: #182231; }
 .thumb-image { width: 32px; height: 32px; min-width: 32px; min-height: 32px; flex-shrink: 0; display: block; object-fit: cover; object-position: center; border-radius: 4px; border: 1px solid var(--line); background: #0b1017; }

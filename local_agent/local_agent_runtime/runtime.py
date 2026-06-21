@@ -5,7 +5,7 @@ import logging
 import socket
 import time
 from dataclasses import dataclass, field, replace
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 import httpx
 
@@ -206,6 +206,13 @@ class CenterClient:
         response = await self._client.post(
             f"{self.base_url}/api/agents/{agent_id}/heartbeat",
             json=payload,
+        )
+        response.raise_for_status()
+
+    async def report_account_snapshots(self, agent_id: str, accounts: list[dict[str, Any]]) -> None:
+        response = await self._client.post(
+            f"{self.base_url}/api/agents/{agent_id}/account-snapshots",
+            json={"accounts": accounts},
         )
         response.raise_for_status()
 
@@ -776,7 +783,11 @@ class LocalAgentRuntime:
             jitter_ratio=config.idle_poll_jitter_ratio,
         )
         self._last_heartbeat_at = 0.0
+        self._last_account_report_at = 0.0
         self._registered_this_process = False
+        # Returns local platform-account dicts (Cookie-free) to mirror to central
+        # for read-only monitoring. Wired in by run_local_agent when available.
+        self.account_snapshot_provider: Callable[[], list[dict[str, Any]]] | None = None
 
     async def ensure_registered(self) -> str:
         if not self._registered_this_process:
@@ -803,6 +814,7 @@ class LocalAgentRuntime:
     async def run_once(self) -> int:
         agent_id = await self.ensure_registered()
         await self._heartbeat_if_due(agent_id)
+        await self._report_account_snapshots_if_due(agent_id)
         if hasattr(self.client, "flush_pending_outbox"):
             replay = await self.client.flush_pending_outbox(limit=20)
             if replay["sent"] or replay["failed"]:
@@ -874,6 +886,48 @@ class LocalAgentRuntime:
             agent_id,
             self.config.device_name,
         )
+
+    def _build_account_snapshots(self) -> list[dict[str, Any]]:
+        provider = self.account_snapshot_provider
+        if provider is None:
+            return []
+        snapshots: list[dict[str, Any]] = []
+        for account in provider() or []:
+            account_id = account.get("id")
+            if not account_id:
+                continue
+            # Cookie-free monitoring fields only; never forward profiles/cookies.
+            snapshots.append(
+                {
+                    "local_account_id": str(account_id),
+                    "platform": account.get("platform") or "",
+                    "display_name": account.get("display_name") or "",
+                    "platform_nickname": account.get("platform_nickname"),
+                    "external_account_id": account.get("external_account_id"),
+                    "account_role": account.get("account_role") or "intelligence_collector",
+                    "status": account.get("status") or "active",
+                    "auth_status": account.get("auth_status") or "not_logged_in",
+                    "health_status": account.get("health_status") or "unknown",
+                    "consecutive_failures": int(account.get("consecutive_failures") or 0),
+                    "last_verified_at": account.get("last_verified_at"),
+                }
+            )
+        return snapshots
+
+    async def _report_account_snapshots_if_due(self, agent_id: str) -> None:
+        if self.account_snapshot_provider is None:
+            return
+        now = time.monotonic()
+        if self._last_account_report_at and now - self._last_account_report_at < self.config.heartbeat_interval_seconds:
+            return
+        try:
+            snapshots = self._build_account_snapshots()
+            await self.client.report_account_snapshots(agent_id, snapshots)
+            self._last_account_report_at = now
+        except httpx.HTTPError as exc:
+            logging.getLogger("local_agent").warning("account snapshot report failed: %s", exc)
+        except Exception as exc:  # pragma: no cover - provider/serialization safety
+            logging.getLogger("local_agent").warning("account snapshot build failed: %s", exc)
 
     async def mark_offline(self, agent_id: str) -> None:
         await self.client.heartbeat(agent_id, [], status="offline")

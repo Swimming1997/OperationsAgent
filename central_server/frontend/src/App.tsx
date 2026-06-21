@@ -3,6 +3,7 @@ import { AuthProvider, useAuth } from './auth/AuthContext';
 import { TaskRunRefreshProvider } from './context/TaskRunRefreshContext';
 import { Shell } from './components/Shell';
 import { LoadingState } from './components/Status';
+import { AccountMonitorPage } from './pages/AccountMonitorPage';
 import { AccountsPage } from './pages/AccountsPage';
 import { AgentsPage } from './pages/AgentsPage';
 import { BenchmarksPage } from './pages/BenchmarksPage';
@@ -18,7 +19,7 @@ import { TasksPage } from './pages/TasksPage';
 import { canAccessRoute } from './utils/roleLabels';
 import './styles.css';
 
-const routes = ['intelligence', 'reference-library', 'tasks', 'my-runs', 'operations', 'accounts', 'benchmarks', 'rules', 'agents', 'organization'];
+const routes = ['intelligence', 'reference-library', 'tasks', 'my-runs', 'operations', 'accounts', 'account-monitor', 'benchmarks', 'rules', 'agents', 'organization'];
 
 function routeFromPath() {
   const segment = window.location.pathname.replace(/^\//, '').split('/')[0];
@@ -102,6 +103,7 @@ function AuthenticatedApp() {
         />
       )}
       {route === 'accounts' && <AccountsPage role={role} userId={userId} />}
+      {route === 'account-monitor' && <AccountMonitorPage role={role} userId={userId} />}
       {route === 'benchmarks' && <BenchmarksPage role={role} userId={userId} />}
       {route === 'rules' && <RulesPage role={role} userId={userId} />}
       {route === 'agents' && <AgentsPage role={role} userId={userId} />}

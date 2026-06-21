@@ -1220,3 +1220,27 @@ class IntelligenceDataQualityOverview(ApiModel):
     abnormal_account_count: int
     runaway_detail_fetch_risk: bool
     filter_context_note: str
+
+
+class AccountMonitorRow(ApiModel):
+    id: str
+    agent_id: str
+    agent_device_name: str | None = None
+    agent_status: str | None = None
+    employee_display_name: str | None = None
+    local_account_id: str
+    platform: str
+    display_name: str
+    platform_nickname: str | None = None
+    account_role: str
+    status: str
+    auth_status: str
+    health_status: str
+    consecutive_failures: int = 0
+    last_verified_at: datetime | None = None
+    reported_at: datetime
+
+
+class AccountMonitorList(ApiModel):
+    items: list[AccountMonitorRow]
+    total: int

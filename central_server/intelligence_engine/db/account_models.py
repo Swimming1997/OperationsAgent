@@ -101,6 +101,36 @@ class AccountAgentBinding(Base, TimestampMixin):
     last_claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class AgentAccountSnapshot(Base, TimestampMixin):
+    """Read-only mirror of a local agent's platform accounts (local-first).
+
+    The local agent owns its accounts; it periodically reports a Cookie-free
+    snapshot so central can monitor login / health status. Central never writes
+    these rows except through the agent report endpoint.
+    """
+
+    __tablename__ = "agent_account_snapshots"
+    __table_args__ = (
+        UniqueConstraint("agent_id", "local_account_id", name="uq_agent_account_snapshot"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    agent_id: Mapped[str] = mapped_column(String(36), ForeignKey("local_agents.id"), nullable=False)
+    local_account_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    platform: Mapped[str] = mapped_column(String(32), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    platform_nickname: Mapped[str | None] = mapped_column(String(255))
+    external_account_id: Mapped[str | None] = mapped_column(String(255))
+    account_role: Mapped[str] = mapped_column(String(64), default="intelligence_collector", nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="active", nullable=False)
+    auth_status: Mapped[str] = mapped_column(String(32), default="not_logged_in", nullable=False)
+    health_status: Mapped[str] = mapped_column(String(32), default="unknown", nullable=False)
+    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    metadata_json: Mapped[dict] = mapped_column(JsonType, default=dict, nullable=False)
+
+
 def _get_default_agent_id(account: PlatformAccount) -> str | None:
     session = object_session(account)
     if not session:

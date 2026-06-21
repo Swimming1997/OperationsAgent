@@ -609,6 +609,30 @@ export type RiskPolicy = {
   config: Record<string, unknown>;
 };
 
+export type AccountMonitorRow = {
+  id: string;
+  agent_id: string;
+  agent_device_name: string | null;
+  agent_status: string | null;
+  employee_display_name: string | null;
+  local_account_id: string;
+  platform: string;
+  display_name: string;
+  platform_nickname: string | null;
+  account_role: string;
+  status: string;
+  auth_status: string;
+  health_status: string;
+  consecutive_failures: number;
+  last_verified_at: string | null;
+  reported_at: string;
+};
+
+export type AccountMonitorList = {
+  items: AccountMonitorRow[];
+  total: number;
+};
+
 export type ApiError = Error & {
   status?: number;
   detail?: unknown;

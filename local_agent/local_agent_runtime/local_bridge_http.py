@@ -9,6 +9,37 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 
 
+_STATIC_CONTENT_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".mjs": "text/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".map": "application/json; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".ico": "image/x-icon",
+    ".woff": "font/woff",
+    ".woff2": "font/woff2",
+    ".ttf": "font/ttf",
+}
+
+# Served when the SPA bundle has not been built yet (e.g. in CI / fresh checkout).
+# Must keep the workspace title so smoke checks and humans recognise the page.
+_SPA_FALLBACK_HTML = (
+    "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
+    "<title>运营情报工作台</title></head><body><div id=\"root\"></div>"
+    "<p style=\"font-family:sans-serif;padding:24px;color:#46514c\">"
+    "前端尚未构建。请在 <code>local_agent/frontend</code> 执行 "
+    "<code>npm install &amp;&amp; npm run build</code> 后刷新本页。</p>"
+    "</body></html>"
+)
+
+
 def build_local_bridge_handler(service):
     session_status_pattern = re.compile(r"^/bridge/accounts/([^/]+)/session-status$")
     revalidate_pattern = re.compile(r"^/bridge/accounts/([^/]+)/revalidate$")
@@ -19,6 +50,8 @@ def build_local_bridge_handler(service):
     acquisition_pattern = re.compile(r"^/api/local/contents/(\d+)/acquisition-check$")
     detail_fetch_pattern = re.compile(r"^/api/local/contents/(\d+)/detail-fetch$")
     material_pattern = re.compile(r"^/api/local/contents/(\d+)/material$")
+    account_detail_pattern = re.compile(r"^/api/local/accounts/([^/]+)$")
+    account_action_pattern = re.compile(r"^/api/local/accounts/([^/]+)/(login|update|delete)$")
 
     class Handler(BaseHTTPRequestHandler):
         def do_OPTIONS(self):
@@ -33,13 +66,10 @@ def build_local_bridge_handler(service):
         def do_GET(self):
             parsed = urlparse(self.path)
             if parsed.path in {"/", "/index.html"}:
-                self._write_static("index.html", "text/html; charset=utf-8")
+                self._serve_spa_index()
                 return
-            if parsed.path == "/styles.css":
-                self._write_static("styles.css", "text/css; charset=utf-8")
-                return
-            if parsed.path == "/app.js":
-                self._write_static("app.js", "text/javascript; charset=utf-8")
+            if parsed.path.startswith("/assets/") or parsed.path in {"/favicon.ico", "/vite.svg"}:
+                self._serve_dist_file(parsed.path)
                 return
             if parsed.path == "/healthz":
                 self._write_json(200, {"status": "ok"})
@@ -94,6 +124,12 @@ def build_local_bridge_handler(service):
                 except Exception as exc:
                     self._write_json(503, {"detail": str(exc)})
                 return
+            if parsed.path == "/api/local/comments":
+                try:
+                    self._write_json(200, service.search_comments(query))
+                except Exception as exc:
+                    self._write_json(503, {"detail": str(exc)})
+                return
             match = content_detail_pattern.match(parsed.path)
             if match:
                 try:
@@ -119,6 +155,20 @@ def build_local_bridge_handler(service):
                 try:
                     item = service.get_task(int(match.group(1)))
                     self._write_json(200 if item else 404, item or {"detail": "task not found"})
+                except Exception as exc:
+                    self._write_json(503, {"detail": str(exc)})
+                return
+            if parsed.path == "/api/local/accounts":
+                try:
+                    self._write_json(200, service.list_accounts(query))
+                except Exception as exc:
+                    self._write_json(503, {"detail": str(exc)})
+                return
+            match = account_detail_pattern.match(parsed.path)
+            if match:
+                try:
+                    item = service.get_account(match.group(1))
+                    self._write_json(200 if item else 404, item or {"detail": "account not found"})
                 except Exception as exc:
                     self._write_json(503, {"detail": str(exc)})
                 return
@@ -251,11 +301,59 @@ def build_local_bridge_handler(service):
                 except Exception as exc:
                     self._write_json(503, {"detail": str(exc)})
                 return
+            if parsed.path == "/api/local/search-batch":
+                try:
+                    self._write_json(202, service.submit_search_batch(body))
+                except ValueError as exc:
+                    self._write_json(400, {"detail": str(exc)})
+                except Exception as exc:
+                    self._write_json(503, {"detail": str(exc)})
+                return
+            if parsed.path == "/api/local/search-suggest":
+                try:
+                    self._write_json(200, service.submit_search_suggest(body))
+                except ValueError as exc:
+                    self._write_json(400, {"detail": str(exc)})
+                except Exception as exc:
+                    self._write_json(503, {"detail": str(exc)})
+                return
+            if parsed.path == "/api/local/detail-batch":
+                try:
+                    self._write_json(202, service.submit_detail_batch(body))
+                except ValueError as exc:
+                    self._write_json(400, {"detail": str(exc)})
+                except Exception as exc:
+                    self._write_json(503, {"detail": str(exc)})
+                return
             if parsed.path == "/api/local/tasks":
                 try:
                     self._write_json(202, service.submit_collection_task(body))
                 except ValueError as exc:
                     self._write_json(400, {"detail": str(exc)})
+                except Exception as exc:
+                    self._write_json(503, {"detail": str(exc)})
+                return
+            if parsed.path == "/api/local/accounts":
+                try:
+                    self._write_json(201, service.create_account(body))
+                except ValueError as exc:
+                    self._write_json(400, {"detail": str(exc)})
+                except Exception as exc:
+                    self._write_json(503, {"detail": str(exc)})
+                return
+            match = account_action_pattern.match(parsed.path)
+            if match:
+                account_id = match.group(1)
+                action = match.group(2)
+                try:
+                    if action == "login":
+                        self._write_json(202, service.start_account_login(account_id, body))
+                    elif action == "update":
+                        self._write_json(200, service.update_account_record(account_id, body))
+                    else:
+                        self._write_json(200, service.delete_account(account_id))
+                except ValueError as exc:
+                    self._write_json(404, {"detail": str(exc)})
                 except Exception as exc:
                     self._write_json(503, {"detail": str(exc)})
                 return
@@ -326,15 +424,34 @@ def build_local_bridge_handler(service):
             self.end_headers()
             self.wfile.write(data)
 
-        def _write_static(self, filename: str, content_type: str):
-            path = service.web_root / filename
-            if not path.exists():
+        def _serve_spa_index(self):
+            index_path = service.web_root / "dist" / "index.html"
+            if index_path.is_file():
+                data = index_path.read_bytes()
+            else:
+                data = _SPA_FALLBACK_HTML.encode("utf-8")
+            self.send_response(200)
+            self._set_cors_headers()
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def _serve_dist_file(self, path: str):
+            dist_root = (service.web_root / "dist").resolve()
+            target = (dist_root / path.lstrip("/")).resolve()
+            if dist_root not in target.parents or not target.is_file():
                 self._write_json(404, {"detail": "asset not found"})
                 return
-            data = path.read_bytes()
+            content_type = _STATIC_CONTENT_TYPES.get(
+                target.suffix.lower(), "application/octet-stream"
+            )
+            data = target.read_bytes()
             self.send_response(200)
             self.send_header("Content-Type", content_type)
-            self.send_header("Cache-Control", "no-cache")
+            # Hashed Vite asset filenames are safe to cache aggressively.
+            self.send_header("Cache-Control", "public, max-age=31536000, immutable")
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)

@@ -56,6 +56,9 @@ class FakeCenterClient:
     async def fail_job(self, job_id, agent_id, failure, checkpoint):
         self.events.append(("fail", job_id, failure.code.value, failure.message, checkpoint))
 
+    async def report_account_snapshots(self, agent_id, accounts):
+        self.events.append(("account_snapshots", agent_id, accounts))
+
 
 class FakeExecutor:
     def __init__(self, result=None, failure=None):
@@ -133,6 +136,46 @@ def test_runtime_claims_and_completes_job_lifecycle():
     assert any(event[0] == "progress" and event[1] == "job-1" for event in client.events)
     assert any(event[0] == "complete" and event[1] == "job-1" and event[2] == JobStatus.SUCCESS.value for event in client.events)
     assert executor.seen == [("agent-1", JobType.FEED_COLLECT.value)]
+
+
+def test_runtime_reports_cookie_free_account_snapshots():
+    client = FakeCenterClient()
+    runtime = LocalAgentRuntime(config=AgentRuntimeConfig(machine_fingerprint="snap-agent"), client=client)
+    runtime.account_snapshot_provider = lambda: [
+        {
+            "id": "acc-1",
+            "platform": "xhs",
+            "display_name": "号一",
+            "platform_nickname": "昵称",
+            "auth_status": "active",
+            "health_status": "healthy",
+            "consecutive_failures": 2,
+            "cookie": "should-not-be-forwarded",
+        },
+        {"platform": "xhs"},  # missing id -> skipped
+    ]
+
+    asyncio.run(runtime.run_once())
+
+    reports = [event for event in client.events if event[0] == "account_snapshots"]
+    assert len(reports) == 1
+    _, agent_id, accounts = reports[0]
+    assert agent_id == "agent-1"
+    assert len(accounts) == 1
+    snapshot = accounts[0]
+    assert snapshot["local_account_id"] == "acc-1"
+    assert snapshot["auth_status"] == "active"
+    assert snapshot["consecutive_failures"] == 2
+    assert "cookie" not in snapshot
+
+
+def test_runtime_skips_account_snapshots_without_provider():
+    client = FakeCenterClient()
+    runtime = LocalAgentRuntime(config=AgentRuntimeConfig(machine_fingerprint="snap-agent"), client=client)
+
+    asyncio.run(runtime.run_once())
+
+    assert not [event for event in client.events if event[0] == "account_snapshots"]
 
 
 def test_runtime_reports_failure_with_existing_error_code():

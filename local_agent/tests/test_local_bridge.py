@@ -38,6 +38,18 @@ def test_local_bridge_probe_uses_account_specific_cdp_url(monkeypatch):
         service.loop.close()
 
 
+def test_resolve_account_session_meta_uses_runtime_cdp(tmp_path):
+    config = AgentRuntimeConfig(project_root=str(tmp_path))
+    service = LocalBridgeService(config=config, loop=asyncio.new_event_loop())
+    try:
+        service.remember_account_cdp("acc-x", "http://127.0.0.1:18901")
+        assert service._resolve_account_session_meta("acc-x") == {"cdp_url": "http://127.0.0.1:18901"}
+        assert service._resolve_account_session_meta("") is None
+        assert service._resolve_account_session_meta("acc-missing") is None
+    finally:
+        service.loop.close()
+
+
 def test_local_bridge_probe_prefers_runtime_cdp_over_default_config(monkeypatch):
     seen: list[str] = []
 

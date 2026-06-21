@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from typing import Any
+from typing import Any, Callable
 
 from local_agent_runtime.connectors.xhs.creator import XhsCreatorConnector
 from local_agent_runtime.connectors.xhs.homefeed_probe import XhsHomeFeedProbe
 from local_agent_runtime.connectors.xhs.search_probe import XhsSearchProbe
+from local_agent_runtime.connectors.xhs.search_suggest_probe import XhsSearchSuggestProbe
 from local_agent_runtime.contracts import FeedCandidateIngestionRequest, FeedCandidateInput
 from local_agent_runtime.enums import Platform, SessionStatus, SourceSurface
 from local_agent_runtime.runtime import AgentRuntimeConfig
@@ -15,11 +16,21 @@ from local_agent_runtime.storage.repository import LocalIntelligenceRepository
 
 
 class LocalCollectionService:
-    SUPPORTED_TASK_TYPES = {"search", "creator_monitor", "recommend"}
+    SUPPORTED_TASK_TYPES = {"search", "search_batch", "creator_monitor", "recommend"}
 
-    def __init__(self, *, config: AgentRuntimeConfig, repository: LocalIntelligenceRepository):
+    def __init__(
+        self,
+        *,
+        config: AgentRuntimeConfig,
+        repository: LocalIntelligenceRepository,
+        account_session_resolver: Callable[[str], dict[str, Any] | None] | None = None,
+    ):
         self.config = config
         self.repository = repository
+        # Resolves a local platform_account id -> session_meta ({"cdp_url": ...}).
+        # Local-first: the collection browser comes from the account's own managed
+        # Chrome, not from a central-provided ready session.
+        self.account_session_resolver = account_session_resolver
         self._running_task_ids: set[int] = set()
         self._running_futures: dict[int, Any] = {}
 
@@ -28,7 +39,16 @@ class LocalCollectionService:
         if task_type not in self.SUPPORTED_TASK_TYPES:
             raise ValueError(f"unsupported task_type: {task_type}")
         target = str(payload.get("target") or payload.get("keyword") or "").strip()
-        if task_type in {"search", "creator_monitor"} and not target:
+        keywords = [
+            str(item).strip()
+            for item in (payload.get("keywords") or [])
+            if str(item).strip()
+        ]
+        if task_type == "search_batch":
+            if not keywords:
+                raise ValueError("keywords are required")
+            target = target or "、".join(keywords[:3]) + ("…" if len(keywords) > 3 else "")
+        elif task_type in {"search", "creator_monitor"} and not target:
             raise ValueError("target is required")
         platform = str(payload.get("platform") or Platform.XHS.value)
         if platform != Platform.XHS.value:
@@ -39,6 +59,7 @@ class LocalCollectionService:
         params = {
             "platform": platform,
             "account_id": str(payload.get("account_id") or "").strip() or None,
+            "keywords": keywords,
             "max_items": max(1, min(int(payload.get("max_items") or 30), 100)),
             "sort": str(payload.get("sort") or "comprehensive"),
             "content_form": str(payload.get("content_form") or "all"),
@@ -173,6 +194,23 @@ class LocalCollectionService:
                 publish_time=params["publish_time"],
             ).collect(page)
             return [self._with_source_context(item, source_ref=target) for item in candidates], report
+        if task_type == "search_batch":
+            keywords = [kw for kw in (params.get("keywords") or []) if kw] or [target]
+            all_candidates: list[FeedCandidateInput] = []
+            per_keyword: list[dict[str, Any]] = []
+            for keyword in keywords:
+                candidates, report = await XhsSearchProbe(
+                    keywords=[keyword],
+                    max_items=params["max_items"],
+                    search_sort=params["sort"],
+                    note_type=params["content_form"],
+                    publish_time=params["publish_time"],
+                ).collect(page)
+                all_candidates.extend(
+                    self._with_source_context(item, source_ref=keyword) for item in candidates
+                )
+                per_keyword.append({"keyword": keyword, "item_count": len(candidates), "report": report})
+            return all_candidates, {"keywords": per_keyword, "keyword_count": len(keywords)}
         if task_type == "recommend":
             candidates, report = await XhsHomeFeedProbe(target_count=params["max_items"]).collect(page)
             return candidates, report
@@ -201,9 +239,52 @@ class LocalCollectionService:
             }
         raise ValueError(f"unsupported task_type: {task_type}")
 
+    async def fetch_suggestions(
+        self,
+        *,
+        keyword: str,
+        account_id: str | None = None,
+    ) -> dict[str, Any]:
+        keyword = str(keyword or "").strip()
+        if not keyword:
+            raise ValueError("keyword is required")
+        session = None
+        try:
+            session_meta = self._session_meta(account_id)
+            session = await default_session_registry.create(Platform.XHS.value).acquire(
+                session_meta=session_meta
+            )
+            if session.status != SessionStatus.READY:
+                raise RuntimeError(session.message or f"session status: {session.status}")
+            items, report = await XhsSearchSuggestProbe(core_keyword=keyword).collect(session.page)
+        finally:
+            if session is not None:
+                await session.close()
+        self.repository.upsert_search_suggestions(
+            {"platform": Platform.XHS.value, "core_keyword": keyword, "items": items},
+            default_platform=Platform.XHS.value,
+        )
+        return {
+            "core_keyword": keyword,
+            "items": [
+                {
+                    "suggested_keyword": item["suggested_keyword"],
+                    "rank": item.get("suggestion_rank"),
+                }
+                for item in items
+            ],
+            "report": report,
+        }
+
     def _session_meta(self, account_id: str | None) -> dict[str, Any]:
-        if account_id and account_id in self.config.account_sessions:
-            return dict(self.config.account_sessions[account_id])
+        if account_id:
+            if self.account_session_resolver is not None:
+                resolved = self.account_session_resolver(account_id)
+                if resolved and resolved.get("cdp_url"):
+                    return dict(resolved)
+            if account_id in self.config.account_sessions:
+                return dict(self.config.account_sessions[account_id])
+            raise RuntimeError("选定账号尚未登录或浏览器未启动，请先在“账号管理”里登录该账号")
         if self.config.cdp_url:
             return {"cdp_url": self.config.cdp_url}
         raise RuntimeError("no local browser session configured")
